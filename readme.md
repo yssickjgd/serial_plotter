@@ -1,6 +1,7 @@
 # SerialPlotter
 
 网页端实时数据可视化分析工具，支持串口、TCP 和 UDP 数据流的解析、监视与波形展示。
+
 ![License](https://img.shields.io/badge/License-CC%20BY%20NC%20SA%204.0-blue.svg)![JavaScript](https://img.shields.io/badge/JavaScript-vanilla-yellow.svg)![Platform](https://img.shields.io/badge/platform-Web-green.svg)
 
 ## 1 项目简介
