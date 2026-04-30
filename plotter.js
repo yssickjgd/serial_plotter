@@ -16,6 +16,7 @@ class Plotter {
         this.pY           = 22;  // bottom margin for X axis
         this.displayMode  = 'time';
         this.yScaleMode   = 'auto';
+        this.removeDcForFft = false;
         this.yMin         = -1;
         this.yMax         = 1;
         this.onStatsUpdate = null;
@@ -92,6 +93,7 @@ class Plotter {
     setDisplayOptions(opts = {}) {
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
+        if (opts.removeDcForFft !== undefined) this.removeDcForFft = !!opts.removeDcForFft;
         if (opts.yMin !== undefined && opts.yMin !== '') this.yMin = parseFloat(opts.yMin);
         if (opts.yMax !== undefined && opts.yMax !== '') this.yMax = parseFloat(opts.yMax);
         if (this.isPaused) this.draw();
@@ -166,9 +168,14 @@ class Plotter {
         const fftSize = this._nextPow2(values.length);
         const re = new Array(fftSize).fill(0);
         const im = new Array(fftSize).fill(0);
+        let mean = 0;
+        if (this.removeDcForFft) {
+            for (let i = 0; i < values.length; i++) mean += values[i];
+            mean /= values.length;
+        }
         for (let i = 0; i < values.length; i++) {
             const window = values.length > 1 ? (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (values.length - 1))) : 1;
-            re[i] = values[i] * window;
+            re[i] = ((this.removeDcForFft ? (values[i] - mean) : values[i])) * window;
         }
         this._fftInPlace(re, im);
         const half = Math.max(1, fftSize >> 1);
@@ -188,21 +195,40 @@ class Plotter {
 
     _buildSummary(visibleSeries, viewMode) {
         if (visibleSeries.length !== 1) {
-            return '';
+            return null;
         }
         const series = visibleSeries[0];
-        const values = viewMode === 'frequency' ? series.rawValues : series.rawValues;
-        if (!values || values.length === 0) return '';
+        const values = series.rawValues;
+        if (!values || values.length === 0) return null;
         const min = Math.min(...values);
         const max = Math.max(...values);
         const pp = max - min;
-        const freq = series.dominantBin && series.fftSize ? series.dominantBin / series.fftSize : 0;
-        const period = series.dominantBin ? (series.fftSize / series.dominantBin) : 0;
-        return `CH${series.channelIndex + 1} | 最大值 ${max.toFixed(6)} | 最小值 ${min.toFixed(6)} | 峰峰值 ${pp.toFixed(6)} | 主频 ${freq.toFixed(4)} cyc/样本 | 周期 ${period ? period.toFixed(2) : '--'} 样本`;
+        let sum = 0;
+        let sumSq = 0;
+        for (const v of values) {
+            sum += v;
+            sumSq += v * v;
+        }
+        const mean = sum / values.length;
+        const variance = Math.max(0, sumSq / values.length - mean * mean);
+        const stdDev = Math.sqrt(variance);
+        const freqSeries = this._prepareFrequencySeries(values);
+        const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
+        const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
+        return {
+            channelLabel: `CH${series.channelIndex + 1}`,
+            max,
+            min,
+            pp,
+            mean,
+            stdDev,
+            freq,
+            period: period || null
+        };
     }
 
-    _emitStats(text) {
-        if (this.onStatsUpdate) this.onStatsUpdate(text || '');
+    _emitStats(stats) {
+        if (this.onStatsUpdate) this.onStatsUpdate(stats || null);
     }
 
     _collectWindowSeries(startIdx, actualEnd) {

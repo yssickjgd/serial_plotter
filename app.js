@@ -51,6 +51,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotInfoRow     = document.getElementById('plot-info-row');
     const plotViewMode    = document.getElementById('plot-view-mode');
     const plotYScaleMode  = document.getElementById('plot-y-scale-mode');
+    const plotFftRemoveDc = document.getElementById('plot-fft-remove-dc');
     const plotYMin        = document.getElementById('plot-y-min');
     const plotYMax        = document.getElementById('plot-y-max');
     const statRx          = document.getElementById('stat-rx');
@@ -58,9 +59,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const statFps         = document.getElementById('stat-fps');
     const statFail        = document.getElementById('stat-fail');
 
-    plotter.onStatsUpdate = (text) => {
-        plotInfoRow.textContent = text || ' ';
+    const fmtFixed = (value, digits, width) => {
+        if (!Number.isFinite(value)) return '--'.padStart(width, ' ');
+        return value.toFixed(digits).padStart(width, ' ');
     };
+    const renderPlotStats = (stats) => {
+        if (!stats) {
+            plotInfoRow.innerHTML = '&nbsp;';
+            return;
+        }
+        const periodText = stats.period === null ? '--' : fmtFixed(stats.period, 2, 7);
+        plotInfoRow.innerHTML = [
+            ['通道', stats.channelLabel],
+            ['最大值', fmtFixed(stats.max, 6, 11)],
+            ['最小值', fmtFixed(stats.min, 6, 11)],
+            ['峰峰值', fmtFixed(stats.pp, 6, 11)],
+            ['均值', fmtFixed(stats.mean, 6, 11)],
+            ['标准差', fmtFixed(stats.stdDev, 6, 11)],
+            ['主频', `${fmtFixed(stats.freq, 4, 8)} cyc/样本`],
+            ['周期', `${periodText} 样本`]
+        ].map(([label, value]) => `<span class="plot-info-segment"><span class="plot-info-label">${label}</span><span class="plot-info-value">${value}</span></span>`).join('');
+    };
+
+    plotter.onStatsUpdate = renderPlotStats;
 
     /* ════ Stats ════ */
     const stats = {
@@ -270,13 +291,14 @@ document.addEventListener('DOMContentLoaded', () => {
         plotter.setDisplayOptions({
             displayMode: plotViewMode.value,
             yScaleMode: plotYScaleMode.value,
+            removeDcForFft: plotFftRemoveDc.checked,
             yMin: plotYMin.value,
             yMax: plotYMax.value
         });
-        plotInfoRow.textContent = plotInfoRow.textContent || ' ';
+        if (!plotInfoRow.innerHTML) plotInfoRow.innerHTML = '&nbsp;';
     };
 
-    [plotViewMode, plotYScaleMode, plotYMin, plotYMax].forEach(el => {
+    [plotViewMode, plotYScaleMode, plotFftRemoveDc, plotYMin, plotYMax].filter(Boolean).forEach(el => {
         el.addEventListener('change', () => { syncPlotDisplaySettings(); saveConfig(); });
     });
 
@@ -342,6 +364,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sendIntervalUnit: sendIntervalUnit.value,
         plotViewMode: plotViewMode.value,
         plotYScaleMode: plotYScaleMode.value,
+        plotFftRemoveDc: plotFftRemoveDc.checked,
         plotYMin: plotYMin.value,
         plotYMax: plotYMax.value,
         channels:    plotter.getChannelMeta().map(m => ({ name:m.name, color:m.color, visible:m.visible }))
@@ -370,6 +393,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cfg.sendIntervalUnit) sendIntervalUnit.value = cfg.sendIntervalUnit;
         if (cfg.plotViewMode) plotViewMode.value = cfg.plotViewMode;
         if (cfg.plotYScaleMode) plotYScaleMode.value = cfg.plotYScaleMode;
+        if (cfg.plotFftRemoveDc !== undefined) plotFftRemoveDc.checked = cfg.plotFftRemoveDc;
         if (cfg.plotYMin !== undefined) plotYMin.value = cfg.plotYMin;
         if (cfg.plotYMax !== undefined) plotYMax.value = cfg.plotYMax;
         toggleSub(chkHeader, headerConfig);
@@ -421,7 +445,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Auto-save on any config field change
-    [chkChecksum, sDataType, sEndianness, iptChannels, iptHeader, iptFooter, sendIntervalUnit, plotViewMode, plotYScaleMode, plotYMin, plotYMax].forEach(el => {
+    [chkChecksum, sDataType, sEndianness, iptChannels, iptHeader, iptFooter, sendIntervalUnit, plotViewMode, plotYScaleMode, plotFftRemoveDc, plotYMin, plotYMax].filter(Boolean).forEach(el => {
         el.addEventListener('change', saveConfig);
     });
 
