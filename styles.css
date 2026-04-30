@@ -133,9 +133,9 @@ canvas{flex:1;display:block;width:100%;min-height:0;}
     background:#151515;border-bottom:1px solid #2b2b2b;padding:5px 10px 4px;
 }
 .plot-title-row{display:flex;justify-content:space-between;align-items:center;gap:10px;}
-.plot-title{font-size:0.72rem;font-weight:700;color:#d5dde8;letter-spacing:.2px;}
-.plot-title-hint{font-size:0.58rem;color:#7e8793;white-space:nowrap;}
-.plot-info-row{min-height:18px;font-size:0.64rem;color:#92b6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.plot-title{font-size:0.78rem;font-weight:700;color:#ffffff;letter-spacing:.2px;}
+.plot-title-hint{font-size:0.68rem;color:#ffffff;white-space:nowrap;}
+.plot-info-row{min-height:18px;font-size:0.72rem;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* Plot scrollbar */
 .plot-scrollbar-wrap{height:11px;background:#1c1c1c;border-top:1px solid #333;position:relative;flex-shrink:0;cursor:pointer;}
@@ -154,8 +154,8 @@ canvas{flex:1;display:block;width:100%;min-height:0;}
 /* ── Monitor panel ── */
 .monitor-panel{display:flex;flex-direction:column;min-height:60px;overflow:hidden;}
 .monitor-header{
-    background:#1a1a1a;padding:4px 10px;font-size:0.65rem;font-weight:700;
-    color:#7a8a8a;display:flex;justify-content:space-between;align-items:center;
+    background:#1a1a1a;padding:4px 10px;font-size:0.78rem;font-weight:700;
+    color:#ffffff;display:flex;justify-content:space-between;align-items:center;
     border-bottom:1px solid #333;flex-shrink:0;
 }
 /* Stats bar sits between header and log, always visible */
@@ -163,7 +163,7 @@ canvas{flex:1;display:block;width:100%;min-height:0;}
     display:flex;gap:12px;background:#141414;padding:3px 10px;
     border-bottom:1px solid #2a2a2a;flex-shrink:0;flex-wrap:wrap;
 }
-.stats-bar-row span{font-size:0.65rem;color:#5aaa8a;white-space:nowrap;font-family:'Consolas',monospace;}
+.stats-bar-row span{font-size:0.72rem;color:#ffffff;white-space:nowrap;font-family:'Consolas',monospace;}
 .log-content{
     flex:1;overflow-y:auto;min-height:0;font-family:'Consolas','Courier New',monospace;
     font-size:0.7rem;line-height:1.45;color:#00e676;padding:6px 10px;

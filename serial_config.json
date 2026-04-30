@@ -1,0 +1,140 @@
+{
+  "connType": "serial",
+  "serialBaud": "115200",
+  "serialData": "8",
+  "serialStop": "1",
+  "serialParity": "none",
+  "netHost": "127.0.0.1",
+  "netPort": "8081",
+  "enableHeader": false,
+  "headerHex": "AB",
+  "enableFooter": true,
+  "footerHex": "00 00 80 7f",
+  "enableChecksum": false,
+  "dataType": "float32",
+  "endianness": "little",
+  "channelsCount": "23",
+  "maxPoints": "5000",
+  "sendIntervalUnit": "ms",
+  "plotViewMode": "time",
+  "plotYScaleMode": "auto",
+  "plotYMin": "-1",
+  "plotYMax": "1",
+  "channels": [
+    {
+      "name": "acc_x",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "acc_y",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "acc_z",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "gyro_x",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "gyro_y",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "gyro_z",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "q_0",
+      "color": "#ffff00",
+      "visible": false
+    },
+    {
+      "name": "q_1",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "q_2",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "q_3",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "yaw",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "pitch",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "roll",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "temperature",
+      "color": "#ffffff",
+      "visible": false
+    },
+    {
+      "name": "accel_odom_x",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "accel_odom_y",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "accel_odom_z",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "gyro_odom_x",
+      "color": "#ff0000",
+      "visible": false
+    },
+    {
+      "name": "gyro_odom_y",
+      "color": "#00ff00",
+      "visible": false
+    },
+    {
+      "name": "gyro_odom_z",
+      "color": "#00ffff",
+      "visible": false
+    },
+    {
+      "name": "loss",
+      "color": "#ffffff",
+      "visible": false
+    },
+    {
+      "name": "calculating_time",
+      "color": "#ffffff",
+      "visible": false
+    },
+    {
+      "name": "now_time",
+      "color": "#ffffff",
+      "visible": false
+    }
+  ]
+}
