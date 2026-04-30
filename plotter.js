@@ -207,7 +207,7 @@ class Plotter {
     }
 
     _buildSummary(visibleSeries, viewMode) {
-        if (visibleSeries.length === 0) {
+        if (visibleSeries.length !== 1) {
             return null;
         }
         const series = visibleSeries[0];
@@ -229,9 +229,7 @@ class Plotter {
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
-            channelLabel: visibleSeries.length > 1
-                ? `多通道 (${visibleSeries.length})`
-                : (series.ch.name || `CH${series.channelIndex + 1}`),
+            channelLabel: series.ch.name || `CH${series.channelIndex + 1}`,
             max,
             min,
             pp,
