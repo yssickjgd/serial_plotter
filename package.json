@@ -1,0 +1,12 @@
+{
+  "name": "serial-network-bridge",
+  "version": "1.0.0",
+  "description": "Local WebSocket Bridge for TCP/UDP",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
