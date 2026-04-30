@@ -44,10 +44,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendFileInput   = document.getElementById('send-file-input');
     const btnChannelsAllOn= document.getElementById('btn-channels-all-on');
     const btnChannelsAllOff= document.getElementById('btn-channels-all-off');
-    const channelSplitPane= document.getElementById('channels-split-pane');
     const channelsListPanel= document.getElementById('channels-list-panel');
     const channelsDisplayPanel = document.getElementById('channels-display-panel');
-    const channelSplitter = document.getElementById('channel-splitter');
     const plotInfoRow     = document.getElementById('plot-info-row');
     const plotViewMode    = document.getElementById('plot-view-mode');
     const plotYScaleMode  = document.getElementById('plot-y-scale-mode');
@@ -62,6 +60,43 @@ document.addEventListener('DOMContentLoaded', () => {
     const fmtFixed = (value, digits, width) => {
         if (!Number.isFinite(value)) return '--'.padStart(width, ' ');
         return value.toFixed(digits).padStart(width, ' ');
+    };
+    const formatMonitorTime = () => {
+        const now = new Date();
+        return [now.getHours(), now.getMinutes(), now.getSeconds()]
+            .map(n => n.toString().padStart(2, '0')).join(':')
+            + '.' + now.getMilliseconds().toString().padStart(3, '0');
+    };
+    const stopSendTimer = () => {
+        if (sendTimer) {
+            clearInterval(sendTimer);
+            sendTimer = null;
+        }
+        btnSend.textContent = '发送';
+        btnSend.className = 'btn btn-primary';
+    };
+    const appendMonitorLine = (className, prefix, timeStr, reason, hexStr) => {
+        const reasonText = reason ? `[${reason}]` : '';
+        const parts = [`[${timeStr}]`, `${prefix}${reasonText}`];
+        if (hexStr) parts.push(hexStr);
+        appendLog(`<span class="${className}">${parts.join(' ')}</span>`);
+    };
+    const disconnectActiveEngine = async () => {
+        if (!activeEngine) return;
+        try {
+            if (typeof activeEngine.forceDisconnect === 'function') {
+                await activeEngine.forceDisconnect();
+            } else if (typeof activeEngine.disconnect === 'function') {
+                await activeEngine.disconnect();
+            }
+        } catch (e) {
+            console.warn('断开连接失败，执行最小清理:', e);
+            try {
+                if (typeof activeEngine.forceDisconnect === 'function') {
+                    await activeEngine.forceDisconnect();
+                }
+            } catch (_) {}
+        }
     };
     const renderPlotStats = (stats) => {
         if (!stats) {
@@ -115,9 +150,6 @@ document.addEventListener('DOMContentLoaded', () => {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             btn.classList.add('active');
             document.getElementById(btn.dataset.tab).classList.add('active');
-            if (btn.dataset.tab === 'tab-channels') {
-                requestAnimationFrame(applyChannelPaneHeight);
-            }
         });
     });
 
@@ -161,50 +193,6 @@ document.addEventListener('DOMContentLoaded', () => {
     applyVHeights();
     window.addEventListener('resize', applyVHeights);
 
-    /* ════ Channel pane splitter ════ */
-    let channelTopH = null;
-    let channelDragging = false;
-    let channelDragStartY = 0;
-    let channelDragStartH = 0;
-
-    const applyChannelPaneHeight = () => {
-        const totalH = channelSplitPane.clientHeight;
-        const splitterH = channelSplitter.offsetHeight || 6;
-        if (totalH < 120) return;
-        const minTop = 160;
-        const minBottom = 180;
-        if (channelTopH === null) channelTopH = Math.round((totalH - splitterH) * 0.56);
-        const maxTop = Math.max(minTop, totalH - splitterH - minBottom);
-        channelTopH = Math.max(minTop, Math.min(maxTop, channelTopH));
-        channelsListPanel.style.height = channelTopH + 'px';
-    };
-
-    channelSplitter.addEventListener('mousedown', e => {
-        channelDragging = true;
-        channelDragStartY = e.clientY;
-        channelDragStartH = channelsListPanel.offsetHeight;
-        document.body.style.cursor = 'ns-resize';
-        document.body.style.userSelect = 'none';
-        e.preventDefault();
-    });
-    document.addEventListener('mousemove', e => {
-        if (!channelDragging) return;
-        const totalH = channelSplitPane.clientHeight;
-        const splitterH = channelSplitter.offsetHeight || 6;
-        const minTop = 160;
-        const minBottom = 180;
-        const maxTop = Math.max(minTop, totalH - splitterH - minBottom);
-        channelTopH = Math.max(minTop, Math.min(maxTop, channelDragStartH + (e.clientY - channelDragStartY)));
-        applyChannelPaneHeight();
-    });
-    document.addEventListener('mouseup', () => {
-        if (!channelDragging) return;
-        channelDragging = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        saveConfig();
-    });
-
     vResizer.addEventListener('mousedown', e => {
         vDragging = true; vStartY = e.clientY; vStartH = canvasWrapper.offsetHeight;
         document.body.style.cursor = 'ns-resize'; document.body.style.userSelect = 'none';
@@ -220,14 +208,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!vDragging) return; vDragging = false;
         document.body.style.cursor = ''; document.body.style.userSelect = '';
     });
-    window.addEventListener('resize', applyChannelPaneHeight);
 
     /* ════ Connection type switch ════ */
     sConnType.addEventListener('change', () => {
         const v = sConnType.value;
         divSerial.style.display     = v === 'serial' ? '' : 'none';
         divNet.style.display        = v !== 'serial' ? '' : 'none';
-        wrapLocalPort.style.display = v === 'udp'    ? 'flex' : 'none';
+        wrapLocalPort.style.display = (v === 'udp' || v === 'tcp-server') ? 'flex' : 'none';
         saveConfig();
     });
 
@@ -284,7 +271,6 @@ document.addEventListener('DOMContentLoaded', () => {
             row.append(lbl, colorIn, nameIn, visChk);
             channelList.appendChild(row);
         });
-        applyChannelPaneHeight();
     };
 
     const syncPlotDisplaySettings = () => {
@@ -352,6 +338,7 @@ document.addEventListener('DOMContentLoaded', () => {
         serialParity:document.getElementById('serial-parity').value,
         netHost:     document.getElementById('net-host').value,
         netPort:     document.getElementById('net-port').value,
+        netLocalPort: document.getElementById('net-local').value,
         enableHeader:chkHeader.checked,
         headerHex:   iptHeader.value,
         enableFooter:chkFooter.checked,
@@ -381,6 +368,7 @@ document.addEventListener('DOMContentLoaded', () => {
         set('serial-parity',cfg.serialParity);
         set('net-host',     cfg.netHost);
         set('net-port',     cfg.netPort);
+        set('net-local',    cfg.netLocalPort);
         if (cfg.enableHeader   !== undefined) chkHeader.checked   = cfg.enableHeader;
         if (cfg.enableFooter   !== undefined) chkFooter.checked   = cfg.enableFooter;
         if (cfg.enableChecksum !== undefined) chkChecksum.checked = cfg.enableChecksum;
@@ -453,21 +441,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Raw data → show in monitor (all incoming bytes, regardless of frame validity)
     parser.onRawData = (hexStr, timeStr) => {
         stats.rxBytes += countHexBytes(hexStr);
-        appendLog(`<span class="log-rx-bad">[${timeStr}] RX? ${hexStr}</span>`);
     };
 
     // Valid frame → update plotter + show in monitor with different color
     parser.onFrameParsed = (valuesArr, timeStr, hexStr) => {
-        stats.rxBytes += countHexBytes(hexStr);
         plotter.addFrame(valuesArr);
-        appendLog(`<span class="log-rx-ok">[${timeStr}] RX ${hexStr}</span>`);
+        appendMonitorLine('log-rx-ok', 'RX', timeStr, '', hexStr);
     };
 
     // Frame error → show in monitor
-    parser.onFrameError = (type, hexStr) => {
-        stats.rxBytes += countHexBytes(hexStr);
-        const label = type === 'checksum' ? '校验失败' : '帧尾不匹配';
-        appendLog(`<span class="log-error">[${label}] ${hexStr}</span>`);
+    parser.onFrameError = (type, timeStr, hexStr) => {
+        const label = type === 'checksum' ? '校验失败' : type === 'footer' ? '帧尾不匹配' : '解析错误';
+        appendMonitorLine('log-rx-error', 'RX', timeStr, label, hexStr);
     };
 
     /* ════ Data routing ════ */
@@ -483,6 +468,7 @@ document.addEventListener('DOMContentLoaded', () => {
             indicator.className = 'status-dot connected';
             sConnType.disabled  = true;
         } else {
+            stopSendTimer();
             btnConnect.textContent = '请求建立连接';
             btnConnect.classList.replace('btn-danger', 'btn-primary');
             indicator.className = 'status-dot disconnected';
@@ -495,7 +481,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* ════ Connect button ════ */
     btnConnect.addEventListener('click', async () => {
-        if (activeEngine) { await activeEngine.disconnect(); return; }
+        if (activeEngine) {
+            await disconnectActiveEngine();
+            return;
+        }
         const mode = sConnType.value;
         statusText.textContent = '正在处理连接要求...';
         try {
@@ -513,9 +502,9 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 const config = {
                     mode, host: document.getElementById('net-host').value,
-                    port: parseInt(document.getElementById('net-port').value)
+                    port: parseInt(document.getElementById('net-port').value),
+                    localPort: parseInt(document.getElementById('net-local').value) || parseInt(document.getElementById('net-port').value)
                 };
-                if (mode === 'udp') config.localPort = parseInt(document.getElementById('net-local').value) || 0;
                 await netAdapter.connect(config);
                 activeEngine = netAdapter;
                 statusText.textContent = 'TCP/UDP Bridge 已连通。';
@@ -585,26 +574,32 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const doSend = async () => {
-        if (!activeEngine) { alert('请先建立连接'); return; }
+        if (!activeEngine) {
+            stopSendTimer();
+            return;
+        }
         try {
             const mode  = sendMode.value;
             const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
             if (bytes.length === 0) return;
             await activeEngine.send(bytes);
             stats.txBytes += bytes.length;
-            const now = new Date();
-            const ts  = [now.getHours(), now.getMinutes(), now.getSeconds()]
-                        .map(n => n.toString().padStart(2,'0')).join(':')
-                        + '.' + now.getMilliseconds().toString().padStart(3,'0');
-            appendLog(`<span class="log-tx">[${ts}] TX ${bytesToHex(bytes)}</span>`);
-        } catch(e) { alert('发送失败: ' + e.message); }
+            appendMonitorLine('log-tx-ok', 'TX', formatMonitorTime(), '', bytesToHex(bytes));
+        } catch(e) {
+            const mode  = sendMode.value;
+            const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
+            const reason = e && e.message ? e.message : '发送失败';
+            appendMonitorLine('log-tx-error', 'TX', formatMonitorTime(), reason, bytesToHex(bytes));
+            stopSendTimer();
+            void disconnectActiveEngine();
+        }
     };
 
     btnSend.addEventListener('click', () => {
         const interval = getSendPeriodMs();
         if (sendTimer) {
-            clearInterval(sendTimer); sendTimer = null;
-            btnSend.textContent = '发送'; btnSend.className = 'btn btn-primary'; return;
+            stopSendTimer();
+            return;
         }
         if (interval > 0) {
             doSend();
@@ -640,7 +635,6 @@ document.addEventListener('DOMContentLoaded', () => {
     /* ════ Init ════ */
     loadConfig();
     requestAnimationFrame(() => {
-        applyChannelPaneHeight();
         syncPlotDisplaySettings();
     });
 });

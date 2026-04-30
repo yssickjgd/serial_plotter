@@ -82,19 +82,6 @@
             </div>
 
             <div class="control-group">
-                <div class="section-title">画板与缓存</div>
-                <div class="input-group">
-                    <label>最大采样点数</label>
-                    <input type="number" step="100" id="max-points" value="1000" />
-                </div>
-                <div class="row">
-                    <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
-                    <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
-                </div>
-                <button id="btn-export" class="btn btn-success" style="margin-top:4px;">导出全部通道至 CSV</button>
-            </div>
-
-            <div class="control-group">
                 <div class="section-title">配置文件</div>
                 <div class="row">
                     <button id="btn-export-cfg" class="btn btn-secondary">导出配置</button>
@@ -160,6 +147,19 @@
 
         <!-- TAB: 通道 -->
         <div class="tab-content" id="tab-channels">
+            <div class="control-group">
+                <div class="section-title">画板与缓存</div>
+                <div class="input-group">
+                    <label>最大采样点数</label>
+                    <input type="number" step="100" id="max-points" value="1000" />
+                </div>
+                <div class="row">
+                    <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
+                    <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
+                </div>
+                <button id="btn-export" class="btn btn-success" style="margin-top:4px;">导出全部通道至 CSV</button>
+            </div>
+
             <div class="channels-split-pane" id="channels-split-pane">
                 <div class="control-group channels-list-panel" id="channels-list-panel">
                     <div class="section-title">通道显示配置</div>
@@ -172,7 +172,6 @@
                     </div>
                     <div id="channel-config-list" class="channel-config-list"></div>
                 </div>
-                <div class="channel-splitter" id="channel-splitter"></div>
                 <div class="control-group channels-display-panel" id="channels-display-panel">
                     <div class="section-title">通道显示方式</div>
                     <div class="input-group">

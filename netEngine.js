@@ -12,7 +12,7 @@ class NetEngine {
     async connect(config) {
         return new Promise((resolve, reject) => {
             try {
-                this.ws = new WebSocket('ws://127.0.0.1:8080');
+                this.ws = new WebSocket('ws://127.0.0.1:8081');
                 this.ws.binaryType = 'arraybuffer';
             } catch (e) {
                 reject(new Error('无法连接到本地 Bridge，请确认已运行 node bridge.js'));
@@ -27,7 +27,6 @@ class NetEngine {
                     const res = JSON.parse(event.data);
                     if (res.event === 'error') {
                         console.error('网络引擎错误:', res.msg);
-                        alert(`网络错误: ${res.msg}`);
                         this.disconnect();
                     } else if (res.event === 'connected' || res.event === 'listening') {
                         this.keepReading = true;
@@ -48,12 +47,19 @@ class NetEngine {
 
     async disconnect() {
         this.keepReading = false;
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ cmd: 'disconnect' }));
-            this.ws.close();
+        try {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try { this.ws.send(JSON.stringify({ cmd: 'disconnect' })); } catch (_) {}
+                try { this.ws.close(); } catch (_) {}
+            }
+        } finally {
+            this.ws = null;
+            if (this.onConnectStatusChange) this.onConnectStatusChange(false);
         }
-        this.ws = null;
-        if (this.onConnectStatusChange) this.onConnectStatusChange(false);
+    }
+
+    async forceDisconnect() {
+        return this.disconnect();
     }
 
     async send(data) {

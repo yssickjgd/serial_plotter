@@ -13,7 +13,7 @@ class DataParser {
         // Callbacks
         this.onFrameParsed = null;  // (values[], timeStr, hexStr)
         this.onRawData     = null;  // (hexStr, timeStr) — every incoming chunk
-        this.onFrameError  = null;  // (type: 'checksum'|'footer', hexStr)
+        this.onFrameError  = null;  // (type: 'checksum'|'footer', timeStr, hexStr)
 
         // Stats counters (reset externally by caller)
         this.frameCount = 0;
@@ -61,6 +61,13 @@ class DataParser {
     }
 
     appendData(newData) {
+        if (this.onRawData && newData && newData.length > 0) {
+            try {
+                this.onRawData(_bytesToHex(newData), _fmtTime(new Date()));
+            } catch (e) {
+                console.error('onRawData 回调异常:', e);
+            }
+        }
         const merged = new Uint8Array(this.buffer.length + newData.length);
         merged.set(this.buffer, 0);
         merged.set(newData, this.buffer.length);
@@ -88,12 +95,6 @@ class DataParser {
                     if (match) { found = i; break; }
                 }
                 if (found === -1) {
-                    if (this.onRawData && this.buffer.length > headerLen - 1) {
-                        const dropped = this.buffer.slice(0, Math.max(0, this.buffer.length - headerLen + 1));
-                        if (dropped.length > 0) {
-                            this.onRawData(_bytesToHex(dropped), _fmtTime(new Date()));
-                        }
-                    }
                     this.buffer = this.buffer.slice(Math.max(0, this.buffer.length - headerLen + 1));
                     break;
                 }
@@ -117,7 +118,10 @@ class DataParser {
                 }
                 if (!footerValid) {
                     this.failCount++;
-                    if (this.onFrameError) this.onFrameError('footer', _bytesToHex(fullFrame));
+                    if (this.onFrameError) {
+                        try { this.onFrameError('footer', _fmtTime(new Date()), _bytesToHex(fullFrame)); }
+                        catch (e) { console.error('onFrameError 回调异常:', e); }
+                    }
                     this.buffer = this.buffer.slice(startIndex + 1);
                     continue;
                 }
@@ -133,7 +137,10 @@ class DataParser {
                 if (expected !== provided) {
                     checksumValid = false;
                     this.failCount++;
-                    if (this.onFrameError) this.onFrameError('checksum', _bytesToHex(fullFrame));
+                    if (this.onFrameError) {
+                        try { this.onFrameError('checksum', _fmtTime(new Date()), _bytesToHex(fullFrame)); }
+                        catch (e) { console.error('onFrameError 回调异常:', e); }
+                    }
                 }
             }
 
@@ -170,7 +177,11 @@ class DataParser {
             }
             if (this.onFrameParsed) {
                 const now = new Date();
-                this.onFrameParsed(values, _fmtTime(now), _bytesToHex(fullFrame));
+                try {
+                    this.onFrameParsed(values, _fmtTime(now), _bytesToHex(fullFrame));
+                } catch (e) {
+                    console.error('onFrameParsed 回调异常:', e);
+                }
             }
         } catch (e) { console.error('解析异常:', e); }
     }

@@ -216,7 +216,7 @@ class Plotter {
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
-            channelLabel: `CH${series.channelIndex + 1}`,
+            channelLabel: series.ch.name || `CH${series.channelIndex + 1}`,
             max,
             min,
             pp,

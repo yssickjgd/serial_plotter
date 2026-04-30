@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const net = require('net');
 const dgram = require('dgram');
 
-const PORT = 8080;
+const PORT = 8081;
 const wss = new WebSocket.Server({ port: PORT }, () => {
     console.log(`===============================================`);
     console.log(`[Bridge 服务已启动]`);
@@ -54,8 +54,9 @@ wss.on('connection', (ws) => {
                             socket.on('error', (err) => console.log('TCP 客户端异常', err.message));
                             ws.send(JSON.stringify({ event: 'connected', msg: `客户端 ${sock.remoteAddress} 已连接` }));
                         });
-                        tcpServer.listen(config.port, config.host || '0.0.0.0', () => {
-                            ws.send(JSON.stringify({ event: 'listening', msg: `正在监听 TCP 端口 ${config.port}` }));
+                        const listenPort = config.localPort || config.port;
+                        tcpServer.listen(listenPort, '0.0.0.0', () => {
+                            ws.send(JSON.stringify({ event: 'listening', msg: `正在监听 TCP 端口 ${listenPort}` }));
                         });
                         tcpServer.on('error', (err) => ws.send(JSON.stringify({ event: 'error', msg: err.message })));
                         
@@ -67,7 +68,7 @@ wss.on('connection', (ws) => {
                         socket.on('error', (err) => ws.send(JSON.stringify({ event: 'error', msg: err.message })));
                         
                         // 绑定本地监听端口
-                        socket.bind(config.localPort || 0, () => {
+                        socket.bind(config.localPort || config.port || 0, () => {
                             const address = socket.address();
                             ws.send(JSON.stringify({ event: 'listening', msg: `UDP 绑定监听于端口 ${address.port}` }));
                         });

@@ -5,6 +5,13 @@ class SerialEngine {
         this.keepReading = false;
         this.onDataCallback = null;
         this.onConnectStatusChange = null;
+        this._onSerialDisconnect = (event) => {
+            if (this.port && event && event.port && event.port !== this.port) return;
+            void this._handlePortDisconnect();
+        };
+        if (typeof navigator !== 'undefined' && navigator.serial && navigator.serial.addEventListener) {
+            navigator.serial.addEventListener('disconnect', this._onSerialDisconnect);
+        }
     }
 
     onData(callback) { this.onDataCallback = callback; }
@@ -36,8 +43,35 @@ class SerialEngine {
 
     async disconnect() {
         this.keepReading = false;
-        if (this.reader) await this.reader.cancel();
-        if (this.port)   { await this.port.close(); this.port = null; }
+        try {
+            if (this.reader) {
+                try { await this.reader.cancel(); } catch (_) {}
+                try { this.reader.releaseLock(); } catch (_) {}
+            }
+            if (this.port) {
+                try { await this.port.close(); } catch (_) {}
+            }
+        } finally {
+            this.reader = null;
+            this.port = null;
+            if (this.onConnectStatusChange) this.onConnectStatusChange(false);
+        }
+    }
+
+    async forceDisconnect() {
+        return this.disconnect();
+    }
+
+    async _handlePortDisconnect() {
+        this.keepReading = false;
+        try {
+            if (this.reader) await this.reader.cancel();
+        } catch (_) {}
+        try {
+            if (this.reader) this.reader.releaseLock();
+        } catch (_) {}
+        this.reader = null;
+        this.port = null;
         if (this.onConnectStatusChange) this.onConnectStatusChange(false);
     }
 
