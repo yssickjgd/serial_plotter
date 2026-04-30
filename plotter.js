@@ -76,6 +76,9 @@ class Plotter {
             });
         }
         while (this.channels.length > count) this.channels.pop();
+        this._clampScroll();
+        this._updateScrollbar();
+        if (this.isPaused) this.draw();
     }
 
     getChannelMeta() {
@@ -85,10 +88,20 @@ class Plotter {
     }
 
     setChannelColor(index, color)     { if (this.channels[index]) this.channels[index].color   = color; }
-    setChannelVisible(index, visible) { if (this.channels[index]) this.channels[index].visible = visible; }
+    setChannelVisible(index, visible) {
+        if (this.channels[index]) {
+            this.channels[index].visible = visible;
+            this._clampScroll();
+            this._updateScrollbar();
+            this.draw();
+        }
+    }
     setChannelName(index, name)       { if (this.channels[index]) this.channels[index].name    = name; }
     setAllChannelsVisible(visible) {
         this.channels.forEach(ch => { ch.visible = visible; });
+        this._clampScroll();
+        this._updateScrollbar();
+        this.draw();
     }
     setDisplayOptions(opts = {}) {
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
@@ -194,7 +207,7 @@ class Plotter {
     }
 
     _buildSummary(visibleSeries, viewMode) {
-        if (visibleSeries.length !== 1) {
+        if (visibleSeries.length === 0) {
             return null;
         }
         const series = visibleSeries[0];
@@ -216,7 +229,9 @@ class Plotter {
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
-            channelLabel: series.ch.name || `CH${series.channelIndex + 1}`,
+            channelLabel: visibleSeries.length > 1
+                ? `多通道 (${visibleSeries.length})`
+                : (series.ch.name || `CH${series.channelIndex + 1}`),
             max,
             min,
             pp,
@@ -378,10 +393,16 @@ class Plotter {
         const total = this._total();
         if (total < 1) { this._emitStats(''); return; }
 
-        const startIdx    = Math.max(0, Math.floor(this.scrollOffset));
-        const dispCnt     = Math.max(2, Math.floor(this.displayCount));
-        const actualEnd   = Math.min(startIdx + dispCnt, total);
-        const visibleCnt  = actualEnd - startIdx;
+        let startIdx    = Math.max(0, Math.floor(this.scrollOffset));
+        const dispCnt   = Math.max(2, Math.floor(this.displayCount));
+        let actualEnd   = Math.min(startIdx + dispCnt, total);
+        let visibleCnt  = actualEnd - startIdx;
+        if (visibleCnt <= 0) {
+            this.scrollOffset = Math.max(0, total - dispCnt);
+            startIdx   = Math.max(0, Math.floor(this.scrollOffset));
+            actualEnd  = Math.min(startIdx + dispCnt, total);
+            visibleCnt = actualEnd - startIdx;
+        }
         const series = this._collectWindowSeries(startIdx, actualEnd);
         if (series.length === 0) { this._emitStats(''); return; }
 
@@ -402,7 +423,9 @@ class Plotter {
             min -= pad; max += pad;
         }
         bounded = max - min;
-        axisMaxIndex = this.displayMode === 'frequency' ? Math.max(...series.map(s => Math.max(1, Math.floor((s.fftSize || 2) / 2)))) : dispCnt;
+        axisMaxIndex = this.displayMode === 'frequency'
+            ? Math.max(...series.map(s => Math.max(1, Math.floor((s.fftSize || 2) / 2))))
+            : Math.max(1, visibleCnt);
 
         // Y axis labels — tick marks drawn INTO the plot (left), so they don't resemble minus signs
         this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = '10px Consolas,monospace';
@@ -422,7 +445,7 @@ class Plotter {
             const px  = (i/10) * plotW;
             const idx = this.displayMode === 'frequency'
                 ? Math.floor((i / 10) * axisMaxIndex)
-                : startIdx + Math.floor((i/10) * dispCnt);
+                : startIdx + Math.floor((i/10) * Math.max(0, visibleCnt - 1));
             this.ctx.fillStyle = '#aaaaaa';
             this.ctx.fillText(idx, px, plotH + 3);
         }
@@ -466,11 +489,11 @@ class Plotter {
 
         // Crosshair
         if (this.mousePos) {
-            this._drawCrosshair(plotW, plotH, min, bounded, startIdx, dispCnt, axisMaxIndex, total);
+            this._drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total);
         }
     }
 
-    _drawCrosshair(plotW, plotH, min, bounded, startIdx, dispCnt, axisMaxIndex, total) {
+    _drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total) {
         const mx = this.mousePos.x, my = this.mousePos.y;
         if (mx < 0 || mx > plotW || my < 0 || my > plotH) return;
         const ctx = this.ctx;
@@ -486,7 +509,10 @@ class Plotter {
         ctx.restore();
 
         // Data coordinates
-        const fIdx = (mx / Math.max(1, plotW)) * Math.max(1, axisMaxIndex - 1);
+        const xSpan = this.displayMode === 'frequency'
+            ? Math.max(1, axisMaxIndex - 1)
+            : Math.max(1, visibleCnt - 1);
+        const fIdx = (mx / Math.max(1, plotW)) * xSpan;
         const xIdx = Math.max(0, Math.round(fIdx));
         const yVal = min + (1 - my / plotH) * bounded;
 
@@ -513,7 +539,7 @@ class Plotter {
         const labels = [];
         for (const ch of this.channels) {
             if (!ch.visible || ch.data.length === 0) continue;
-            const source = this.displayMode === 'frequency' ? this._prepareFrequencySeries(ch.data.slice(startIdx, Math.min(ch.data.length, startIdx + dispCnt))) : null;
+            const source = this.displayMode === 'frequency' ? this._prepareFrequencySeries(ch.data.slice(startIdx, Math.min(ch.data.length, startIdx + visibleCnt))) : null;
             const val = this.displayMode === 'frequency'
                 ? (source && source.mags.length > 0 ? source.mags[Math.min(source.mags.length - 1, xIdx)] : 0)
                 : (() => {

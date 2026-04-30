@@ -56,6 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statTx          = document.getElementById('stat-tx');
     const statFps         = document.getElementById('stat-fps');
     const statFail        = document.getElementById('stat-fail');
+    let capturePaused = false;
 
     const fmtFixed = (value, digits, width) => {
         if (!Number.isFinite(value)) return '--'.padStart(width, ' ');
@@ -125,6 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
         _framesLast:0, _failsLast:0
     };
     setInterval(() => {
+        if (capturePaused) return;
         const rxBps   = stats.rxBytes - stats._rxLast;
         const txBps   = stats.txBytes - stats._txLast;
         const frames  = parser.frameCount - stats._framesLast;
@@ -266,6 +268,7 @@ document.addEventListener('DOMContentLoaded', () => {
             visChk.addEventListener('change', () => {
                 plotter.setChannelVisible(meta.index, visChk.checked);
                 lbl.style.opacity = visChk.checked ? '1' : '0.4'; saveConfig();
+                syncPlotDisplaySettings();
             });
 
             row.append(lbl, colorIn, nameIn, visChk);
@@ -291,11 +294,13 @@ document.addEventListener('DOMContentLoaded', () => {
     btnChannelsAllOn.addEventListener('click', () => {
         plotter.setAllChannelsVisible(true);
         rebuildChannelConfigUI();
+        syncPlotDisplaySettings();
         saveConfig();
     });
     btnChannelsAllOff.addEventListener('click', () => {
         plotter.setAllChannelsVisible(false);
         rebuildChannelConfigUI();
+        syncPlotDisplaySettings();
         saveConfig();
     });
 
@@ -440,17 +445,20 @@ document.addEventListener('DOMContentLoaded', () => {
     /* ════ Parser callbacks ════ */
     // Raw data → show in monitor (all incoming bytes, regardless of frame validity)
     parser.onRawData = (hexStr, timeStr) => {
+        if (capturePaused) return;
         stats.rxBytes += countHexBytes(hexStr);
     };
 
     // Valid frame → update plotter + show in monitor with different color
     parser.onFrameParsed = (valuesArr, timeStr, hexStr) => {
+        if (capturePaused) return;
         plotter.addFrame(valuesArr);
         appendMonitorLine('log-rx-ok', 'RX', timeStr, '', hexStr);
     };
 
     // Frame error → show in monitor
     parser.onFrameError = (type, timeStr, hexStr) => {
+        if (capturePaused) return;
         const label = type === 'checksum' ? '校验失败' : type === 'footer' ? '帧尾不匹配' : '解析错误';
         appendMonitorLine('log-rx-error', 'RX', timeStr, label, hexStr);
     };
@@ -519,6 +527,7 @@ document.addEventListener('DOMContentLoaded', () => {
     /* ════ Toolbar ════ */
     btnPause.addEventListener('click', () => {
         const paused = plotter.togglePause();
+        capturePaused = paused;
         btnPause.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
         btnPause.className   = paused ? 'btn btn-success' : 'btn btn-secondary';
     });
@@ -526,6 +535,12 @@ document.addEventListener('DOMContentLoaded', () => {
         plotter.clear(); logContent.innerHTML = '';
         parser.buffer = new Uint8Array(0);
         parser.frameCount = 0; parser.failCount = 0;
+        stats.rxBytes = 0;
+        stats.txBytes = 0;
+        stats._rxLast = 0;
+        stats._txLast = 0;
+        stats._framesLast = 0;
+        stats._failsLast = 0;
     });
     btnExport.addEventListener('click', () => {
         const csv = plotter.exportCSV();
