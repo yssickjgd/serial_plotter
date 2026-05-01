@@ -1,61 +1,61 @@
 document.addEventListener('DOMContentLoaded', () => {
     const serialAdapter = new SerialEngine();
-    const netAdapter    = new NetEngine();
-    const parser        = new DataParser();
-    const plotter       = new Plotter('waveform-canvas');
-    let activeEngine    = null;
-    let sendTimer       = null;
+    const netAdapter = new NetEngine();
+    const parser = new DataParser();
+    const plotter = new Plotter('waveform-canvas');
+    let activeEngine = null;
+    let sendTimer = null;
 
     /* ════ DOM ════ */
-    const sConnType       = document.getElementById('conn-type');
-    const divSerial       = document.getElementById('config-serial');
-    const divNet          = document.getElementById('config-net');
-    const wrapLocalPort   = document.getElementById('wrap-local-port');
-    const btnConnect      = document.getElementById('btn-connect');
-    const indicator       = document.getElementById('connection-indicator');
-    const statusText      = document.getElementById('connection-status');
-    const chkHeader       = document.getElementById('chk-header');
-    const headerConfig    = document.getElementById('header-config');
-    const iptHeader       = document.getElementById('frame-header');
-    const chkFooter       = document.getElementById('chk-footer');
-    const footerConfig    = document.getElementById('footer-config');
-    const iptFooter       = document.getElementById('frame-footer');
-    const chkChecksum     = document.getElementById('chk-checksum');
-    const sDataType       = document.getElementById('data-type');
-    const sEndianness     = document.getElementById('endianness');
-    const iptChannels     = document.getElementById('channels-count');
-    const iptMaxPoints    = document.getElementById('max-points');
-    const btnApply        = document.getElementById('btn-apply-format');
-    const btnPause        = document.getElementById('btn-pause');
-    const btnClear        = document.getElementById('btn-clear');
-    const btnExport       = document.getElementById('btn-export');
-    const btnExportCfg    = document.getElementById('btn-export-cfg');
-    const btnImportCfg    = document.getElementById('btn-import-cfg');
-    const cfgFileInput    = document.getElementById('cfg-file-input');
-    const cfgSaveStatus   = document.getElementById('cfg-save-status');
-    const channelList     = document.getElementById('channel-config-list');
-    const logContent      = document.getElementById('data-log');
-    const sendMode        = document.getElementById('send-mode');
-    const sendInterval    = document.getElementById('send-interval');
-    const sendIntervalUnit= document.getElementById('send-interval-unit');
-    const sendInput       = document.getElementById('send-input');
-    const btnSend         = document.getElementById('btn-send');
-    const btnLoadFile     = document.getElementById('btn-load-file');
-    const sendFileInput   = document.getElementById('send-file-input');
-    const btnChannelsAllOn= document.getElementById('btn-channels-all-on');
-    const btnChannelsAllOff= document.getElementById('btn-channels-all-off');
-    const channelsListPanel= document.getElementById('channels-list-panel');
+    const sConnType = document.getElementById('conn-type');
+    const divSerial = document.getElementById('config-serial');
+    const divNet = document.getElementById('config-net');
+    const wrapLocalPort = document.getElementById('wrap-local-port');
+    const btnConnect = document.getElementById('btn-connect');
+    const indicator = document.getElementById('connection-indicator');
+    const statusText = document.getElementById('connection-status');
+    const chkHeader = document.getElementById('chk-header');
+    const headerConfig = document.getElementById('header-config');
+    const iptHeader = document.getElementById('frame-header');
+    const chkFooter = document.getElementById('chk-footer');
+    const footerConfig = document.getElementById('footer-config');
+    const iptFooter = document.getElementById('frame-footer');
+    const chkChecksum = document.getElementById('chk-checksum');
+    const sDataType = document.getElementById('data-type');
+    const sEndianness = document.getElementById('endianness');
+    const iptChannels = document.getElementById('channels-count');
+    const iptMaxPoints = document.getElementById('max-points');
+    const btnApply = document.getElementById('btn-apply-format');
+    const btnPause = document.getElementById('btn-pause');
+    const btnClear = document.getElementById('btn-clear');
+    const btnExport = document.getElementById('btn-export');
+    const btnExportCfg = document.getElementById('btn-export-cfg');
+    const btnImportCfg = document.getElementById('btn-import-cfg');
+    const cfgFileInput = document.getElementById('cfg-file-input');
+    const cfgSaveStatus = document.getElementById('cfg-save-status');
+    const channelList = document.getElementById('channel-config-list');
+    const logContent = document.getElementById('data-log');
+    const sendMode = document.getElementById('send-mode');
+    const sendInterval = document.getElementById('send-interval');
+    const sendIntervalUnit = document.getElementById('send-interval-unit');
+    const sendInput = document.getElementById('send-input');
+    const btnSend = document.getElementById('btn-send');
+    const btnLoadFile = document.getElementById('btn-load-file');
+    const sendFileInput = document.getElementById('send-file-input');
+    const btnChannelsAllOn = document.getElementById('btn-channels-all-on');
+    const btnChannelsAllOff = document.getElementById('btn-channels-all-off');
+    const channelsListPanel = document.getElementById('channels-list-panel');
     const channelsDisplayPanel = document.getElementById('channels-display-panel');
-    const plotInfoRow     = document.getElementById('plot-info-row');
-    const plotViewMode    = document.getElementById('plot-view-mode');
-    const plotYScaleMode  = document.getElementById('plot-y-scale-mode');
+    const plotInfoRow = document.getElementById('plot-info-row');
+    const plotViewMode = document.getElementById('plot-view-mode');
+    const plotYScaleMode = document.getElementById('plot-y-scale-mode');
     const plotFftRemoveDc = document.getElementById('plot-fft-remove-dc');
-    const plotYMin        = document.getElementById('plot-y-min');
-    const plotYMax        = document.getElementById('plot-y-max');
-    const statRx          = document.getElementById('stat-rx');
-    const statTx          = document.getElementById('stat-tx');
-    const statFps         = document.getElementById('stat-fps');
-    const statFail        = document.getElementById('stat-fail');
+    const plotYMin = document.getElementById('plot-y-min');
+    const plotYMax = document.getElementById('plot-y-max');
+    const statRx = document.getElementById('stat-rx');
+    const statTx = document.getElementById('stat-tx');
+    const statFps = document.getElementById('stat-fps');
+    const statFail = document.getElementById('stat-fail');
     let capturePaused = false;
 
     const fmtFixed = (value, digits, width) => {
@@ -96,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (typeof activeEngine.forceDisconnect === 'function') {
                     await activeEngine.forceDisconnect();
                 }
-            } catch (_) {}
+            } catch (_) { }
         }
     };
     const renderPlotStats = (stats) => {
@@ -121,26 +121,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* ════ Stats ════ */
     const stats = {
-        rxBytes:0, txBytes:0,
-        _rxLast:0, _txLast:0,
-        _framesLast:0, _failsLast:0
+        rxBytes: 0, txBytes: 0,
+        _rxLast: 0, _txLast: 0,
+        _framesLast: 0, _failsLast: 0
     };
     setInterval(() => {
         if (capturePaused) return;
-        const rxBps   = stats.rxBytes - stats._rxLast;
-        const txBps   = stats.txBytes - stats._txLast;
-        const frames  = parser.frameCount - stats._framesLast;
-        const fails   = parser.failCount  - stats._failsLast;
-        const total   = frames + fails;
+        const rxBps = stats.rxBytes - stats._rxLast;
+        const txBps = stats.txBytes - stats._txLast;
+        const frames = parser.frameCount - stats._framesLast;
+        const fails = parser.failCount - stats._failsLast;
+        const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
-        statRx.textContent   = `RX: ${_fmtBytes(rxBps)}/s`;
-        statTx.textContent   = `TX: ${_fmtBytes(txBps)}/s`;
-        statFps.textContent  = `帧率: ${frames} f/s`;
+        statRx.textContent = `RX: ${_fmtBytes(rxBps)}/s`;
+        statTx.textContent = `TX: ${_fmtBytes(txBps)}/s`;
+        statFps.textContent = `帧率: ${frames} f/s`;
         statFail.textContent = `校验失败: ${failPct}%`;
-        stats._rxLast     = stats.rxBytes;
-        stats._txLast     = stats.txBytes;
+        stats._rxLast = stats.rxBytes;
+        stats._txLast = stats.txBytes;
         stats._framesLast = parser.frameCount;
-        stats._failsLast  = parser.failCount;
+        stats._failsLast = parser.failCount;
     }, 1000);
 
     const countHexBytes = (hexStr) => hexStr ? hexStr.replace(/\s/g, '').length / 2 : 0;
@@ -156,8 +156,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     /* ════ Left-Right Resizer ════ */
-    const sidebar     = document.getElementById('sidebar');
-    const hResizer    = document.getElementById('h-resizer');
+    const sidebar = document.getElementById('sidebar');
+    const hResizer = document.getElementById('h-resizer');
     const mainDisplay = document.getElementById('main-display');
     let hDragging = false, hStartX = 0, hStartW = 0;
     hResizer.addEventListener('mousedown', e => {
@@ -178,18 +178,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* ════ Top-Bottom Resizer (canvas / monitor) ════ */
     const canvasWrapper = document.getElementById('canvas-wrapper');
-    const vResizer      = document.getElementById('v-resizer');
-    const monitorPanel  = document.getElementById('monitor-panel');
+    const vResizer = document.getElementById('v-resizer');
+    const monitorPanel = document.getElementById('monitor-panel');
     let vDragging = false, vStartY = 0, vStartH = 0;
     let canvasH = null; // null = use ratio on first call
 
     const applyVHeights = () => {
         const totalH = mainDisplay.clientHeight;
-        const vH     = vResizer.offsetHeight;
+        const vH = vResizer.offsetHeight;
         if (canvasH === null) canvasH = Math.round((totalH - vH) * 0.62);
         const monH = Math.max(80, totalH - vH - canvasH);
         canvasWrapper.style.flex = 'none'; canvasWrapper.style.height = canvasH + 'px';
-        monitorPanel.style.flex  = 'none'; monitorPanel.style.height  = monH  + 'px';
+        monitorPanel.style.flex = 'none'; monitorPanel.style.height = monH + 'px';
         plotter.resize();
     };
     applyVHeights();
@@ -211,11 +211,77 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.style.cursor = ''; document.body.style.userSelect = '';
     });
 
+    /* ════ Vertical resizer (logs / send panel) ════ */
+    window.addEventListener('DOMContentLoaded', () => {
+        const containerH = container.clientHeight;
+        const resizerH = logSendResizer.offsetHeight;
+
+        const ratio = 0.45; // 👈 在这里改默认比例
+
+        const logH = containerH * ratio;
+
+        log.style.height = logH + 'px';
+        send.style.height = (containerH - logH - resizerH) + 'px';
+    });
+
+    const logSendResizer = document.getElementById('log-send-resizer');
+    const log = document.getElementById('data-log');
+    const send = document.querySelector('.send-panel');
+    const container = document.getElementById('monitor-panel');
+
+    let dragging = false;
+    let startY = 0;
+    let startLogH = 0;
+
+    logSendResizer.addEventListener('mousedown', e => {
+        dragging = true;
+        startY = e.clientY;
+        startLogH = log.offsetHeight;
+
+        document.body.style.cursor = 'ns-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+        if (!dragging) return;
+
+        const delta = e.clientY - startY;
+        const containerH = container.clientHeight;
+        const resizerH = logSendResizer.offsetHeight;
+
+        let newLogH = startLogH + delta;
+
+        // ✅ 最小高度限制
+        const minLog = 60;
+        const minSend = 60;
+
+        const maxLog = containerH - resizerH - minSend;
+
+        if (newLogH < minLog) newLogH = minLog;
+        if (newLogH > maxLog) newLogH = maxLog;
+
+        // ✅ 同时调整两边
+        log.style.flex = 'none';
+        send.style.flex = 'none';
+
+        log.style.height = newLogH + 'px';
+        send.style.height = (containerH - newLogH - resizerH) + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+
     /* ════ Connection type switch ════ */
     sConnType.addEventListener('change', () => {
         const v = sConnType.value;
-        divSerial.style.display     = v === 'serial' ? '' : 'none';
-        divNet.style.display        = v !== 'serial' ? '' : 'none';
+        divSerial.style.display = v === 'serial' ? '' : 'none';
+        divNet.style.display = v !== 'serial' ? '' : 'none';
         wrapLocalPort.style.display = (v === 'udp' || v === 'tcp-server') ? 'flex' : 'none';
         saveConfig();
     });
@@ -246,7 +312,7 @@ document.addEventListener('DOMContentLoaded', () => {
             row.className = 'channel-row';
 
             const lbl = document.createElement('span');
-            lbl.className = 'channel-row-label'; lbl.textContent = `CH${meta.index+1}`;
+            lbl.className = 'channel-row-label'; lbl.textContent = `CH${meta.index + 1}`;
 
             const colorIn = document.createElement('input');
             colorIn.type = 'color'; colorIn.className = 'channel-color-swatch';
@@ -257,9 +323,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const nameIn = document.createElement('input');
             nameIn.type = 'text'; nameIn.className = 'channel-name-input';
-            nameIn.value = meta.name; nameIn.placeholder = `CH${meta.index+1}`;
+            nameIn.value = meta.name; nameIn.placeholder = `CH${meta.index + 1}`;
             nameIn.addEventListener('change', () => {
-                plotter.setChannelName(meta.index, nameIn.value || `CH${meta.index+1}`); saveConfig();
+                plotter.setChannelName(meta.index, nameIn.value || `CH${meta.index + 1}`); saveConfig();
             });
 
             const visChk = document.createElement('input');
@@ -308,13 +374,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const updateParserSettings = () => {
         const ch = parseInt(iptChannels.value) || 1;
         parser.setFormat({
-            enableHeader:   chkHeader.checked,
-            headerHex:      iptHeader.value,
-            enableFooter:   chkFooter.checked,
-            footerHex:      iptFooter.value,
-            dataType:       sDataType.value,
+            enableHeader: chkHeader.checked,
+            headerHex: iptHeader.value,
+            enableFooter: chkFooter.checked,
+            footerHex: iptFooter.value,
+            dataType: sDataType.value,
             isLittleEndian: sEndianness.value === 'little',
-            channelsCount:  ch,
+            channelsCount: ch,
             enableChecksum: chkChecksum.checked
         });
         plotter.setChannelCount(ch);
@@ -336,30 +402,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const CFG_KEY = 'serialplot_v3_config';
 
     const getConfig = () => ({
-        connType:    sConnType.value,
-        serialBaud:  document.getElementById('serial-baud').value,
-        serialData:  document.getElementById('serial-data').value,
-        serialStop:  document.getElementById('serial-stop').value,
-        serialParity:document.getElementById('serial-parity').value,
-        netHost:     document.getElementById('net-host').value,
-        netPort:     document.getElementById('net-port').value,
+        connType: sConnType.value,
+        serialBaud: document.getElementById('serial-baud').value,
+        serialData: document.getElementById('serial-data').value,
+        serialStop: document.getElementById('serial-stop').value,
+        serialParity: document.getElementById('serial-parity').value,
+        netHost: document.getElementById('net-host').value,
+        netPort: document.getElementById('net-port').value,
         netLocalPort: document.getElementById('net-local').value,
-        enableHeader:chkHeader.checked,
-        headerHex:   iptHeader.value,
-        enableFooter:chkFooter.checked,
-        footerHex:   iptFooter.value,
-        enableChecksum:chkChecksum.checked,
-        dataType:    sDataType.value,
-        endianness:  sEndianness.value,
-        channelsCount:iptChannels.value,
-        maxPoints:   iptMaxPoints.value,
+        enableHeader: chkHeader.checked,
+        headerHex: iptHeader.value,
+        enableFooter: chkFooter.checked,
+        footerHex: iptFooter.value,
+        enableChecksum: chkChecksum.checked,
+        dataType: sDataType.value,
+        endianness: sEndianness.value,
+        channelsCount: iptChannels.value,
+        maxPoints: iptMaxPoints.value,
         sendIntervalUnit: sendIntervalUnit.value,
         plotViewMode: plotViewMode.value,
         plotYScaleMode: plotYScaleMode.value,
         plotFftRemoveDc: plotFftRemoveDc.checked,
         plotYMin: plotYMin.value,
         plotYMax: plotYMax.value,
-        channels:    plotter.getChannelMeta().map(m => ({ name:m.name, color:m.color, visible:m.visible }))
+        channels: plotter.getChannelMeta().map(m => ({ name: m.name, color: m.color, visible: m.visible }))
     });
 
     const applyConfig = (cfg) => {
@@ -367,22 +433,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
         sConnType.value = cfg.connType || 'serial';
         sConnType.dispatchEvent(new Event('change'));
-        set('serial-baud',  cfg.serialBaud);
-        set('serial-data',  cfg.serialData);
-        set('serial-stop',  cfg.serialStop);
-        set('serial-parity',cfg.serialParity);
-        set('net-host',     cfg.netHost);
-        set('net-port',     cfg.netPort);
-        set('net-local',    cfg.netLocalPort);
-        if (cfg.enableHeader   !== undefined) chkHeader.checked   = cfg.enableHeader;
-        if (cfg.enableFooter   !== undefined) chkFooter.checked   = cfg.enableFooter;
+        set('serial-baud', cfg.serialBaud);
+        set('serial-data', cfg.serialData);
+        set('serial-stop', cfg.serialStop);
+        set('serial-parity', cfg.serialParity);
+        set('net-host', cfg.netHost);
+        set('net-port', cfg.netPort);
+        set('net-local', cfg.netLocalPort);
+        if (cfg.enableHeader !== undefined) chkHeader.checked = cfg.enableHeader;
+        if (cfg.enableFooter !== undefined) chkFooter.checked = cfg.enableFooter;
         if (cfg.enableChecksum !== undefined) chkChecksum.checked = cfg.enableChecksum;
-        if (cfg.headerHex)    iptHeader.value     = cfg.headerHex;
-        if (cfg.footerHex)    iptFooter.value     = cfg.footerHex;
-        if (cfg.dataType)     sDataType.value     = cfg.dataType;
-        if (cfg.endianness)   sEndianness.value   = cfg.endianness;
-        if (cfg.channelsCount)iptChannels.value   = cfg.channelsCount;
-        if (cfg.maxPoints)    iptMaxPoints.value  = cfg.maxPoints;
+        if (cfg.headerHex) iptHeader.value = cfg.headerHex;
+        if (cfg.footerHex) iptFooter.value = cfg.footerHex;
+        if (cfg.dataType) sDataType.value = cfg.dataType;
+        if (cfg.endianness) sEndianness.value = cfg.endianness;
+        if (cfg.channelsCount) iptChannels.value = cfg.channelsCount;
+        if (cfg.maxPoints) iptMaxPoints.value = cfg.maxPoints;
         if (cfg.sendIntervalUnit) sendIntervalUnit.value = cfg.sendIntervalUnit;
         if (cfg.plotViewMode) plotViewMode.value = cfg.plotViewMode;
         if (cfg.plotYScaleMode) plotYScaleMode.value = cfg.plotYScaleMode;
@@ -397,7 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cfg.channels.forEach((ch, i) => {
                 plotter.setChannelColor(i, ch.color);
                 plotter.setChannelVisible(i, ch.visible !== false);
-                plotter.setChannelName(i, ch.name || `CH${i+1}`);
+                plotter.setChannelName(i, ch.name || `CH${i + 1}`);
             });
             rebuildChannelConfigUI();
         }
@@ -408,15 +474,15 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             localStorage.setItem(CFG_KEY, JSON.stringify(getConfig()));
             cfgSaveStatus.textContent = '配置已自动保存。';
-        } catch(e) { cfgSaveStatus.textContent = '保存失败: ' + e.message; }
+        } catch (e) { cfgSaveStatus.textContent = '保存失败: ' + e.message; }
     };
 
     const loadConfig = () => {
         try {
             const raw = localStorage.getItem(CFG_KEY);
             if (raw) { applyConfig(JSON.parse(raw)); cfgSaveStatus.textContent = '已从本地存储载入配置。'; }
-            else      { updateParserSettings(); }
-        } catch(e) { console.warn('配置加载失败:', e); updateParserSettings(); }
+            else { updateParserSettings(); }
+        } catch (e) { console.warn('配置加载失败:', e); updateParserSettings(); }
     };
 
     btnExportCfg.addEventListener('click', () => {
@@ -432,7 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const reader = new FileReader();
         reader.onload = ev => {
             try { applyConfig(JSON.parse(ev.target.result)); saveConfig(); cfgSaveStatus.textContent = '配置已导入。'; }
-            catch(err) { alert('配置文件格式错误: ' + err.message); }
+            catch (err) { alert('配置文件格式错误: ' + err.message); }
         };
         reader.readAsText(file); e.target.value = '';
     });
@@ -474,7 +540,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btnConnect.textContent = '主动断开连接';
             btnConnect.classList.replace('btn-primary', 'btn-danger');
             indicator.className = 'status-dot connected';
-            sConnType.disabled  = true;
+            sConnType.disabled = true;
         } else {
             stopSendTimer();
             btnConnect.textContent = '请求建立连接';
@@ -501,7 +567,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     baudRate: parseInt(document.getElementById('serial-baud').value),
                     dataBits: parseInt(document.getElementById('serial-data').value),
                     stopBits: parseInt(document.getElementById('serial-stop').value),
-                    parity:   document.getElementById('serial-parity').value
+                    parity: document.getElementById('serial-parity').value
                 };
                 statusText.textContent = '请于弹出框选择对应的串口通道...';
                 await serialAdapter.connect(config);
@@ -517,7 +583,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 activeEngine = netAdapter;
                 statusText.textContent = 'TCP/UDP Bridge 已连通。';
             }
-        } catch(e) {
+        } catch (e) {
             console.error('连接调度中断', e);
             statusText.textContent = `连接失败: ${e.message}`;
             activeEngine = null;
@@ -529,7 +595,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const paused = plotter.togglePause();
         capturePaused = paused;
         btnPause.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
-        btnPause.className   = paused ? 'btn btn-success' : 'btn btn-secondary';
+        btnPause.className = paused ? 'btn btn-success' : 'btn btn-secondary';
     });
     btnClear.addEventListener('click', () => {
         plotter.clear(); logContent.innerHTML = '';
@@ -561,7 +627,7 @@ document.addEventListener('DOMContentLoaded', () => {
             bytes.push(parseInt(clean.substr(i, 2), 16));
         return new Uint8Array(bytes);
     };
-    const bytesToHex  = arr => Array.from(arr).map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+    const bytesToHex = arr => Array.from(arr).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
     const textToBytes = str => new TextEncoder().encode(str);
     const bytesToText = arr => new TextDecoder('latin1').decode(arr);
 
@@ -575,7 +641,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const bytes = hexToBytes(sendInput.value);
                 sendInput.value = bytesToText(bytes);
             }
-        } catch(e) { /* keep as-is */ }
+        } catch (e) { /* keep as-is */ }
     });
 
     const getSendPeriodMs = () => {
@@ -594,14 +660,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         try {
-            const mode  = sendMode.value;
+            const mode = sendMode.value;
             const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
             if (bytes.length === 0) return;
             await activeEngine.send(bytes);
             stats.txBytes += bytes.length;
             appendMonitorLine('log-tx-ok', 'TX', formatMonitorTime(), '', bytesToHex(bytes));
-        } catch(e) {
-            const mode  = sendMode.value;
+        } catch (e) {
+            const mode = sendMode.value;
             const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
             const reason = e && e.message ? e.message : '发送失败';
             appendMonitorLine('log-tx-error', 'TX', formatMonitorTime(), reason, bytesToHex(bytes));
@@ -656,7 +722,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ── Format bytes helper ── */
 function _fmtBytes(n) {
-    if (n < 1024)       return n + ' B';
-    if (n < 1024*1024)  return (n/1024).toFixed(1) + ' KB';
-    return (n/(1024*1024)).toFixed(1) + ' MB';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }

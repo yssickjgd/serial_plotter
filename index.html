@@ -245,6 +245,7 @@
                 <div class="monitor-header">
                     <span>字节流监视台</span>
                 </div>
+
                 <!-- Stats bar: always visible, separate row -->
                 <div class="stats-bar-row">
                     <span id="stat-rx">RX: 0 B/s</span>
@@ -252,8 +253,13 @@
                     <span id="stat-fps">帧率: 0 f/s</span>
                     <span id="stat-fail">校验失败: 0%</span>
                 </div>
+
                 <!-- Scrollable log -->
                 <div id="data-log" class="log-content"></div>
+
+                <!-- Vertical drag handle -->
+                <div class="v-resizer-inner" id="log-send-resizer"></div>
+                
                 <!-- Send Panel: always at bottom -->
                 <div class="send-panel">
                     <div class="send-toolbar">
