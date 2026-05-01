@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,272 +8,283 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
-<div class="app-container">
+    <div class="app-container">
 
-    <!-- ══ LEFT: Config Sidebar ══ -->
-    <aside class="sidebar" id="sidebar">
-        <div class="app-title">
-            <span class="status-dot disconnected" id="connection-indicator"></span>
-            <span>Scientific Plotter</span>
-        </div>
+        <!-- ══ LEFT: Config Sidebar ══ -->
+        <aside class="sidebar" id="sidebar">
+            <div class="app-title">
+                <span class="status-dot disconnected" id="connection-indicator"></span>
+                <span>Scientific Plotter</span>
+            </div>
 
-        <div class="tab-bar">
-            <button class="tab-btn active" data-tab="tab-connection">通讯</button>
-            <button class="tab-btn" data-tab="tab-frame">帧格式</button>
-            <button class="tab-btn" data-tab="tab-channels">通道</button>
-        </div>
+            <div class="tab-bar">
+                <button class="tab-btn active" data-tab="tab-connection">通讯</button>
+                <button class="tab-btn" data-tab="tab-frame">帧格式</button>
+                <button class="tab-btn" data-tab="tab-channels">通道</button>
+            </div>
 
-        <!-- TAB: 通讯 -->
-        <div class="tab-content active" id="tab-connection">
-            <div class="control-group">
-                <div class="section-title">通讯通道</div>
-                <div class="input-group">
-                    <label>模式</label>
-                    <select id="conn-type">
-                        <option value="serial">原生串口 (Web Serial)</option>
-                        <option value="tcp-client">TCP Client (Bridge)</option>
-                        <option value="tcp-server">TCP Server (Bridge)</option>
-                        <option value="udp">UDP (Bridge)</option>
-                    </select>
-                </div>
-                <div id="config-serial">
+            <!-- TAB: 通讯 -->
+            <div class="tab-content active" id="tab-connection">
+                <div class="control-group">
+                    <div class="section-title">通讯通道</div>
                     <div class="input-group">
-                        <label>波特率</label>
-                        <input type="text" id="serial-baud" value="115200" />
+                        <label>模式</label>
+                        <select id="conn-type">
+                            <option value="serial">原生串口 (Web Serial)</option>
+                            <option value="tcp-client">TCP Client (Bridge)</option>
+                            <option value="tcp-server">TCP Server (Bridge)</option>
+                            <option value="udp">UDP (Bridge)</option>
+                        </select>
                     </div>
+                    <div id="config-serial">
+                        <div class="input-group">
+                            <label>波特率</label>
+                            <input type="text" id="serial-baud" value="115200" />
+                        </div>
+                        <div class="row">
+                            <div class="input-group">
+                                <label>数据位</label>
+                                <select id="serial-data">
+                                    <option>8</option>
+                                    <option>7</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label>停止位</label>
+                                <select id="serial-stop">
+                                    <option>1</option>
+                                    <option>2</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>奇偶校验</label>
+                            <select id="serial-parity">
+                                <option value="none">无 (None)</option>
+                                <option value="even">偶校验 (Even)</option>
+                                <option value="odd">奇校验 (Odd)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="config-net" style="display:none;">
+                        <div class="input-group">
+                            <label>远端 Host IP</label>
+                            <input type="text" id="net-host" value="127.0.0.1" />
+                        </div>
+                        <div class="row">
+                            <div class="input-group">
+                                <label>端口 Port</label>
+                                <input type="text" id="net-port" value="8081" />
+                            </div>
+                            <div class="input-group" id="wrap-local-port" style="display:none;">
+                                <label>本地 Port</label>
+                                <input type="text" id="net-local" value="" placeholder="端口..." />
+                            </div>
+                        </div>
+                        <p class="hint-text">需预先启动 <code>node bridge.js</code> 辅助代理。</p>
+                    </div>
+                    <button id="btn-connect" class="btn btn-primary">请求建立连接</button>
+                    <div class="status-text" id="connection-status">Ready.</div>
+                </div>
+
+                <div class="control-group">
+                    <div class="section-title">配置文件</div>
+                    <div class="row">
+                        <button id="btn-export-cfg" class="btn btn-secondary">导出配置</button>
+                        <button id="btn-import-cfg" class="btn btn-secondary">导入配置</button>
+                        <input type="file" id="cfg-file-input" accept=".json" hidden />
+                    </div>
+                    <span class="hint-text" id="cfg-save-status">配置自动同步至本地存储。</span>
+                </div>
+            </div>
+
+            <!-- TAB: 帧格式 -->
+            <div class="tab-content" id="tab-frame">
+                <div class="control-group">
+                    <div class="section-title">帧首</div>
+                    <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
+                    <div class="input-group" id="header-config">
+                        <label>帧首字节序列 (Hex, 空格分隔)</label>
+                        <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
+                        <span class="hint-text">支持多字节，如: AA BB CC</span>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <div class="section-title">帧尾</div>
+                    <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
+                    <div class="input-group" id="footer-config" style="opacity:0.4;pointer-events:none;">
+                        <label>帧尾字节序列 (Hex, 空格分隔)</label>
+                        <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
+                    </div>
+                </div>
+                <div class="control-group">
+                    <div class="section-title">校验位</div>
+                    <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
+                    <span class="hint-text" style="margin-top:-4px;">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
+                </div>
+                <div class="control-group">
+                    <div class="section-title">数据格式</div>
                     <div class="row">
                         <div class="input-group">
-                            <label>数据位</label>
-                            <select id="serial-data"><option>8</option><option>7</option></select>
+                            <label>数据类型</label>
+                            <select id="data-type">
+                                <option value="int8">Int8</option>
+                                <option value="uint8">UInt8</option>
+                                <option value="int16">Int16</option>
+                                <option value="uint16">UInt16</option>
+                                <option value="int32">Int32</option>
+                                <option value="uint32">UInt32</option>
+                                <option value="float32" selected>Float32</option>
+                                <option value="float64">Float64</option>
+                            </select>
                         </div>
                         <div class="input-group">
-                            <label>停止位</label>
-                            <select id="serial-stop"><option>1</option><option>2</option></select>
+                            <label>字节端序</label>
+                            <select id="endianness">
+                                <option value="little" selected>小端 (LE)</option>
+                                <option value="big">大端 (BE)</option>
+                            </select>
                         </div>
                     </div>
                     <div class="input-group">
-                        <label>奇偶校验</label>
-                        <select id="serial-parity">
-                            <option value="none">无 (None)</option>
-                            <option value="even">偶校验 (Even)</option>
-                            <option value="odd">奇校验 (Odd)</option>
-                        </select>
+                        <label>采样通道数 (Channels)</label>
+                        <input type="number" id="channels-count" value="1" min="1" max="16" />
                     </div>
+                    <button id="btn-apply-format" class="btn btn-primary" style="margin-top:2px;">应用帧格式配置</button>
                 </div>
-                <div id="config-net" style="display:none;">
+            </div>
+
+            <!-- TAB: 通道 -->
+            <div class="tab-content" id="tab-channels">
+                <div class="control-group">
+                    <div class="section-title">画板与缓存</div>
                     <div class="input-group">
-                        <label>远端 Host IP</label>
-                        <input type="text" id="net-host" value="127.0.0.1" />
+                        <label>最大采样点数</label>
+                        <input type="number" step="100" id="max-points" value="1000" />
                     </div>
                     <div class="row">
+                        <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
+                        <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
+                    </div>
+                    <button id="btn-export" class="btn btn-success" style="margin-top:4px;">导出全部通道至 CSV</button>
+                </div>
+
+                <div class="channels-split-pane" id="channels-split-pane">
+                    <div class="control-group channels-list-panel" id="channels-list-panel">
+                        <div class="section-title">通道显示配置</div>
+                        <div class="channel-toolbar">
+                            <p class="hint-text">在帧格式页配置通道数后，点击"应用"自动生成。</p>
+                            <div class="channel-toolbar-actions">
+                                <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
+                                <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
+                            </div>
+                        </div>
+                        <div id="channel-config-list" class="channel-config-list"></div>
+                    </div>
+                    <div class="control-group channels-display-panel" id="channels-display-panel">
+                        <div class="section-title">通道显示方式</div>
                         <div class="input-group">
-                            <label>端口 Port</label>
-                            <input type="text" id="net-port" value="8081" />
-                        </div>
-                        <div class="input-group" id="wrap-local-port" style="display:none;">
-                            <label>本地 Port</label>
-                            <input type="text" id="net-local" value="" placeholder="端口..." />
-                        </div>
-                    </div>
-                    <p class="hint-text">需预先启动 <code>node bridge.js</code> 辅助代理。</p>
-                </div>
-                <button id="btn-connect" class="btn btn-primary">请求建立连接</button>
-                <div class="status-text" id="connection-status">Ready.</div>
-            </div>
-
-            <div class="control-group">
-                <div class="section-title">配置文件</div>
-                <div class="row">
-                    <button id="btn-export-cfg" class="btn btn-secondary">导出配置</button>
-                    <button id="btn-import-cfg" class="btn btn-secondary">导入配置</button>
-                    <input type="file" id="cfg-file-input" accept=".json" hidden />
-                </div>
-                <span class="hint-text" id="cfg-save-status">配置自动同步至本地存储。</span>
-            </div>
-        </div>
-
-        <!-- TAB: 帧格式 -->
-        <div class="tab-content" id="tab-frame">
-            <div class="control-group">
-                <div class="section-title">帧首</div>
-                <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
-                <div class="input-group" id="header-config">
-                    <label>帧首字节序列 (Hex, 空格分隔)</label>
-                    <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
-                    <span class="hint-text">支持多字节，如: AA BB CC</span>
-                </div>
-            </div>
-            <div class="control-group">
-                <div class="section-title">帧尾</div>
-                <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
-                <div class="input-group" id="footer-config" style="opacity:0.4;pointer-events:none;">
-                    <label>帧尾字节序列 (Hex, 空格分隔)</label>
-                    <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
-                </div>
-            </div>
-            <div class="control-group">
-                <div class="section-title">校验位</div>
-                <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
-                <span class="hint-text" style="margin-top:-4px;">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
-            </div>
-            <div class="control-group">
-                <div class="section-title">数据格式</div>
-                <div class="row">
-                    <div class="input-group">
-                        <label>数据类型</label>
-                        <select id="data-type">
-                            <option value="int8">Int8</option><option value="uint8">UInt8</option>
-                            <option value="int16">Int16</option><option value="uint16">UInt16</option>
-                            <option value="int32">Int32</option><option value="uint32">UInt32</option>
-                            <option value="float32" selected>Float32</option>
-                            <option value="float64">Float64</option>
-                        </select>
-                    </div>
-                    <div class="input-group">
-                        <label>字节端序</label>
-                        <select id="endianness">
-                            <option value="little" selected>小端 (LE)</option>
-                            <option value="big">大端 (BE)</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="input-group">
-                    <label>采样通道数 (Channels)</label>
-                    <input type="number" id="channels-count" value="1" min="1" max="16" />
-                </div>
-                <button id="btn-apply-format" class="btn btn-primary" style="margin-top:2px;">应用帧格式配置</button>
-            </div>
-        </div>
-
-        <!-- TAB: 通道 -->
-        <div class="tab-content" id="tab-channels">
-            <div class="control-group">
-                <div class="section-title">画板与缓存</div>
-                <div class="input-group">
-                    <label>最大采样点数</label>
-                    <input type="number" step="100" id="max-points" value="1000" />
-                </div>
-                <div class="row">
-                    <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
-                    <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
-                </div>
-                <button id="btn-export" class="btn btn-success" style="margin-top:4px;">导出全部通道至 CSV</button>
-            </div>
-
-            <div class="channels-split-pane" id="channels-split-pane">
-                <div class="control-group channels-list-panel" id="channels-list-panel">
-                    <div class="section-title">通道显示配置</div>
-                    <div class="channel-toolbar">
-                        <p class="hint-text">在帧格式页配置通道数后，点击"应用"自动生成。</p>
-                        <div class="channel-toolbar-actions">
-                            <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
-                            <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
-                        </div>
-                    </div>
-                    <div id="channel-config-list" class="channel-config-list"></div>
-                </div>
-                <div class="control-group channels-display-panel" id="channels-display-panel">
-                    <div class="section-title">通道显示方式</div>
-                    <div class="input-group">
-                        <label>波形模式</label>
-                        <select id="plot-view-mode">
-                            <option value="time">时域图</option>
-                            <option value="frequency">频域图</option>
-                        </select>
-                    </div>
-                    <div class="input-group">
-                        <label>Y 轴策略</label>
-                        <select id="plot-y-scale-mode">
-                            <option value="auto">自动缩放 Y 轴</option>
-                            <option value="manual">自定义 Y 轴范围</option>
-                        </select>
-                    </div>
-                    <label class="chk-label"><input type="checkbox" id="plot-fft-remove-dc" />频域去直流</label>
-                    <div class="row">
-                        <div class="input-group">
-                            <label>Y 轴最小值</label>
-                            <input type="number" id="plot-y-min" step="0.1" value="-1" />
+                            <label>波形模式</label>
+                            <select id="plot-view-mode">
+                                <option value="time">时域图</option>
+                                <option value="frequency">频域图</option>
+                            </select>
                         </div>
                         <div class="input-group">
-                            <label>Y 轴最大值</label>
-                            <input type="number" id="plot-y-max" step="0.1" value="1" />
+                            <label>Y 轴策略</label>
+                            <select id="plot-y-scale-mode">
+                                <option value="auto">自动缩放 Y 轴</option>
+                                <option value="manual">自定义 Y 轴范围</option>
+                            </select>
                         </div>
+                        <label class="chk-label"><input type="checkbox" id="plot-fft-remove-dc" />频域去直流</label>
+                        <div class="row">
+                            <div class="input-group">
+                                <label>Y 轴最小值</label>
+                                <input type="number" id="plot-y-min" step="0.1" value="-1" />
+                            </div>
+                            <div class="input-group">
+                                <label>Y 轴最大值</label>
+                                <input type="number" id="plot-y-max" step="0.1" value="1" />
+                            </div>
+                        </div>
+                        <span class="hint-text">频域模式会对当前窗口数据执行 FFT，并在绘图区显示频谱。</span>
                     </div>
-                    <span class="hint-text">频域模式会对当前窗口数据执行 FFT，并在绘图区显示频谱。</span>
                 </div>
             </div>
-        </div>
-    </aside>
+        </aside>
 
-    <!-- ══ HORIZONTAL DRAG HANDLE ══ -->
-    <div class="h-resizer" id="h-resizer"></div>
+        <!-- ══ HORIZONTAL DRAG HANDLE ══ -->
+        <div class="h-resizer" id="h-resizer"></div>
 
-    <!-- ══ RIGHT: Plot + Monitor ══ -->
-    <main class="main-display" id="main-display">
-        <!-- Plot -->
-        <div class="canvas-wrapper box-border" id="canvas-wrapper">
-            <div class="plot-header" id="plot-header">
-                <div class="plot-title-row">
-                    <span class="plot-title">波形监视台</span>
-                    <span class="plot-title-hint">右键绘图区重置缩放</span>
+        <!-- ══ RIGHT: Plot + Monitor ══ -->
+        <main class="main-display" id="main-display">
+            <!-- Plot -->
+            <div class="canvas-wrapper box-border" id="canvas-wrapper">
+                <div class="plot-header" id="plot-header">
+                    <div class="plot-title-row">
+                        <span class="plot-title">波形监视台</span>
+                        <span class="plot-title-hint">右键绘图区重置缩放</span>
+                    </div>
+                    <div class="plot-info-row" id="plot-info-row">&nbsp;</div>
                 </div>
-                <div class="plot-info-row" id="plot-info-row">&nbsp;</div>
+                <canvas id="waveform-canvas"></canvas>
+                <div class="plot-scrollbar-wrap" id="plot-scrollbar-wrap">
+                    <div class="plot-scrollbar-thumb" id="plot-scrollbar-thumb"></div>
+                </div>
             </div>
-            <canvas id="waveform-canvas"></canvas>
-            <div class="plot-scrollbar-wrap" id="plot-scrollbar-wrap">
-                <div class="plot-scrollbar-thumb" id="plot-scrollbar-thumb"></div>
-            </div>
-        </div>
 
-        <!-- Vertical drag handle -->
-        <div class="v-resizer" id="v-resizer"></div>
+            <!-- Vertical drag handle -->
+            <div class="v-resizer" id="v-resizer"></div>
 
-        <!-- Monitor Panel -->
-        <div class="monitor-panel box-border" id="monitor-panel">
-            <!-- Title row -->
-            <div class="monitor-header">
-                <span>字节流监视台</span>
-            </div>
-            <!-- Stats bar: always visible, separate row -->
-            <div class="stats-bar-row">
-                <span id="stat-rx">RX: 0 B/s</span>
-                <span id="stat-tx">TX: 0 B/s</span>
-                <span id="stat-fps">帧率: 0 f/s</span>
-                <span id="stat-fail">校验失败: 0%</span>
-            </div>
-            <!-- Scrollable log -->
-            <div id="data-log" class="log-content"></div>
-            <!-- Send Panel: always at bottom -->
-            <div class="send-panel">
-                <div class="send-toolbar">
-                    <select id="send-mode" title="发送格式">
-                        <option value="hex">Hex</option>
-                        <option value="text">Text</option>
-                    </select>
-                    <div class="interval-wrap">
-                        <label>间隔</label>
-                        <input type="number" id="send-interval" value="0" min="0" step="0.1" title="支持浮点数" />
-                        <select id="send-interval-unit" title="发送间隔单位">
-                            <option value="ms">ms</option>
-                            <option value="s">s</option>
-                            <option value="hz">Hz</option>
+            <!-- Monitor Panel -->
+            <div class="monitor-panel box-border" id="monitor-panel">
+                <!-- Title row -->
+                <div class="monitor-header">
+                    <span>字节流监视台</span>
+                </div>
+                <!-- Stats bar: always visible, separate row -->
+                <div class="stats-bar-row">
+                    <span id="stat-rx">RX: 0 B/s</span>
+                    <span id="stat-tx">TX: 0 B/s</span>
+                    <span id="stat-fps">帧率: 0 f/s</span>
+                    <span id="stat-fail">校验失败: 0%</span>
+                </div>
+                <!-- Scrollable log -->
+                <div id="data-log" class="log-content"></div>
+                <!-- Send Panel: always at bottom -->
+                <div class="send-panel">
+                    <div class="send-toolbar">
+                        <select id="send-mode" title="发送格式">
+                            <option value="hex">Hex</option>
+                            <option value="text">Text</option>
                         </select>
+                        <div class="interval-wrap">
+                            <label>间隔</label>
+                            <input type="number" id="send-interval" value="0" min="0" step="0.1" title="支持浮点数" />
+                            <select id="send-interval-unit" title="发送间隔单位">
+                                <option value="ms">ms</option>
+                                <option value="s">s</option>
+                                <option value="hz">Hz</option>
+                            </select>
+                        </div>
+                        <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
+                        <input type="file" id="send-file-input" hidden />
+                        <button id="btn-send" class="btn btn-primary">发送</button>
                     </div>
-                    <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
-                    <input type="file" id="send-file-input" hidden />
-                    <button id="btn-send" class="btn btn-primary">发送</button>
+                    <textarea id="send-input" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
                 </div>
-                <textarea id="send-input" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
             </div>
-        </div>
-    </main>
-</div>
+        </main>
+    </div>
 
-<script src="plotter.js"></script>
-<script src="dataParser.js"></script>
-<script src="serialEngine.js"></script>
-<script src="netEngine.js"></script>
-<script src="app.js"></script>
+    <script src="plotter.js"></script>
+    <script src="dataParser.js"></script>
+    <script src="serialEngine.js"></script>
+    <script src="netEngine.js"></script>
+    <script src="app.js"></script>
 </body>
+
 </html>
