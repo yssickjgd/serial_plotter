@@ -212,70 +212,70 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     /* ════ Vertical resizer (logs / send panel) ════ */
-    window.addEventListener('DOMContentLoaded', () => {
-        const containerH = container.clientHeight;
-        const resizerH = logSendResizer.offsetHeight;
+    // window.addEventListener('DOMContentLoaded', () => {
+    //     const containerH = container.clientHeight;
+    //     const resizerH = logSendResizer.offsetHeight;
 
-        const ratio = 0.45; // 👈 在这里改默认比例
+    //     const ratio = 0.45; // 👈 在这里改默认比例
 
-        const logH = containerH * ratio;
+    //     const logH = containerH * ratio;
 
-        log.style.height = logH + 'px';
-        send.style.height = (containerH - logH - resizerH) + 'px';
-    });
+    //     log.style.height = logH + 'px';
+    //     send.style.height = (containerH - logH - resizerH) + 'px';
+    // });
 
-    const logSendResizer = document.getElementById('log-send-resizer');
-    const log = document.getElementById('data-log');
-    const send = document.querySelector('.send-panel');
-    const container = document.getElementById('monitor-panel');
+    // const logSendResizer = document.getElementById('log-send-resizer');
+    // const log = document.getElementById('data-log');
+    // const send = document.querySelector('.send-panel');
+    // const container = document.getElementById('monitor-panel');
 
-    let dragging = false;
-    let startY = 0;
-    let startLogH = 0;
+    // let dragging = false;
+    // let startY = 0;
+    // let startLogH = 0;
 
-    logSendResizer.addEventListener('mousedown', e => {
-        dragging = true;
-        startY = e.clientY;
-        startLogH = log.offsetHeight;
+    // logSendResizer.addEventListener('mousedown', e => {
+    //     dragging = true;
+    //     startY = e.clientY;
+    //     startLogH = log.offsetHeight;
 
-        document.body.style.cursor = 'ns-resize';
-        document.body.style.userSelect = 'none';
-        e.preventDefault();
-    });
+    //     document.body.style.cursor = 'ns-resize';
+    //     document.body.style.userSelect = 'none';
+    //     e.preventDefault();
+    // });
 
-    document.addEventListener('mousemove', e => {
-        if (!dragging) return;
+    // document.addEventListener('mousemove', e => {
+    //     if (!dragging) return;
 
-        const delta = e.clientY - startY;
-        const containerH = container.clientHeight;
-        const resizerH = logSendResizer.offsetHeight;
+    //     const delta = e.clientY - startY;
+    //     const containerH = container.clientHeight;
+    //     const resizerH = logSendResizer.offsetHeight;
 
-        let newLogH = startLogH + delta;
+    //     let newLogH = startLogH + delta;
 
-        // ✅ 最小高度限制
-        const minLog = 60;
-        const minSend = 60;
+    //     // ✅ 最小高度限制
+    //     const minLog = 60;
+    //     const minSend = 60;
 
-        const maxLog = containerH - resizerH - minSend;
+    //     const maxLog = containerH - resizerH - minSend;
 
-        if (newLogH < minLog) newLogH = minLog;
-        if (newLogH > maxLog) newLogH = maxLog;
+    //     if (newLogH < minLog) newLogH = minLog;
+    //     if (newLogH > maxLog) newLogH = maxLog;
 
-        // ✅ 同时调整两边
-        log.style.flex = 'none';
-        send.style.flex = 'none';
+    //     // ✅ 同时调整两边
+    //     log.style.flex = 'none';
+    //     send.style.flex = 'none';
 
-        log.style.height = newLogH + 'px';
-        send.style.height = (containerH - newLogH - resizerH) + 'px';
-    });
+    //     log.style.height = newLogH + 'px';
+    //     send.style.height = (containerH - newLogH - resizerH) + 'px';
+    // });
 
-    document.addEventListener('mouseup', () => {
-        if (!dragging) return;
-        dragging = false;
+    // document.addEventListener('mouseup', () => {
+    //     if (!dragging) return;
+    //     dragging = false;
 
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-    });
+    //     document.body.style.cursor = '';
+    //     document.body.style.userSelect = '';
+    // });
 
     /* ════ Connection type switch ════ */
     sConnType.addEventListener('change', () => {

@@ -597,7 +597,7 @@ canvas {
 }
 
 .log-content {
-    flex: none;
+    flex: 1;
     overflow-y: auto;
     min-height: 0;
     font-family: 'Consolas', 'Courier New', monospace;
@@ -625,7 +625,7 @@ canvas {
 }
 
 /* Vertical resizer between log and send panel */
-.v-resizer-inner {
+/* .v-resizer-inner {
     height: 4px;
     background: #2a2a2a;
     cursor: ns-resize;
@@ -646,7 +646,7 @@ canvas {
 
 .v-resizer-inner:hover {
     background: #3a3a3a;
-}
+} */
 
 /* ── Send panel ── */
 .send-panel {
@@ -659,6 +659,7 @@ canvas {
     gap: 3px;
     padding: 4px 8px 5px;
     min-height: 0;
+    margin-bottom: 6px;
 }
 
 .send-toolbar {
