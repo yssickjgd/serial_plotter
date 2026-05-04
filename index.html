@@ -4,6 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="精密科学串口网络分析仪，又称串口绘图助手、串口调试助手，是由中国科学技术大学RoboWalker战队yssickjgd同学开发的一款基于 Web 的串口、TCP/UDP 科学绘图工具，支持实时 FFT 频谱分析、多通道波形监视、自定义帧解析与 CSV 导出。">
     <title>精密科学串口网络分析仪 | Advanced Plotter</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
@@ -136,6 +137,8 @@
                                 <option value="uint16">UInt16</option>
                                 <option value="int32">Int32</option>
                                 <option value="uint32">UInt32</option>
+                                <option value="int64">Int64</option>
+                                <option value="uint64">UInt64</option>
                                 <option value="float32" selected>Float32</option>
                                 <option value="float64">Float64</option>
                             </select>
@@ -150,7 +153,7 @@
                     </div>
                     <div class="input-group">
                         <label>采样通道数 (Channels)</label>
-                        <input type="number" id="channels-count" value="1" min="1" max="16" />
+                        <input type="number" id="channels-count" value="1" min="1" max="24" />
                     </div>
                     <button id="btn-apply-format" class="btn btn-primary" style="margin-top:2px;">应用帧格式配置</button>
                 </div>
