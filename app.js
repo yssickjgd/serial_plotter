@@ -138,15 +138,15 @@ document.addEventListener('DOMContentLoaded', () => {
             plotInfoRow.innerHTML = '&nbsp;';
             return;
         }
-        const freqHz = stats.freq === null ? '--' : fmtFixed(stats.freq * statsBytes.frames, 6, 7);
-        const periodText = stats.period === null ? '--' : fmtFixed(stats.period, 0, 7);
+        const freqHz = stats.freq === null ? '--' : fmtFixed(stats.freq * statsBytes.frames, 6, 15);
+        const periodText = stats.period === null ? '--' : fmtFixed(stats.period, 0, 15);
         plotInfoRow.innerHTML = [
             ['通道: ', stats.channelLabel],
-            ['最大值: ', fmtFixed(stats.max, 6, 7)],
-            ['最小值: ', fmtFixed(stats.min, 6, 7)],
-            ['峰峰值: ', fmtFixed(stats.pp, 6, 7)],
-            ['均值: ', fmtFixed(stats.mean, 6, 7)],
-            ['标准差: ', fmtFixed(stats.stdDev, 6, 7)],
+            ['最大值: ', fmtFixed(stats.max, 6, 15)],
+            ['最小值: ', fmtFixed(stats.min, 6, 15)],
+            ['峰峰值: ', fmtFixed(stats.pp, 6, 15)],
+            ['均值: ', fmtFixed(stats.mean, 6, 15)],
+            ['标准差: ', fmtFixed(stats.stdDev, 6, 15)],
             ['主频: ', `${freqHz} Hz`],
             ['主周期: ', `${periodText} sample`]
         ].map(([label, value]) => `<span class="plot-info-segment">${label} ${value}</span>`).join('');
