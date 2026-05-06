@@ -231,7 +231,16 @@
                         <span class="plot-title">波形监视台</span>
                         <span class="plot-title-hint">右键绘图区重置缩放</span>
                     </div>
-                    <div class="plot-info-row" id="plot-info-row">&nbsp;</div>
+                    <div class="plot-info-row" id="plot-info-row">
+                        <span id="stat-channel-label">通道: --</span>
+                        <span id="stat-max">最大值: --</span>
+                        <span id="stat-min">最小值: --</span>
+                        <span id="stat-pp">峰峰值: --</span>
+                        <span id="stat-mean">均值: --</span>
+                        <span id="stat-std-dev">标准差: --</span>
+                        <span id="stat-freq-hz">主频: -- Hz</span>
+                        <span id="stat-period">主周期: -- sample</span>
+                    </div>
                 </div>
                 <canvas id="waveform-canvas"></canvas>
                 <div class="plot-scrollbar-wrap" id="plot-scrollbar-wrap">

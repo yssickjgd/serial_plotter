@@ -477,24 +477,16 @@ canvas {
 }
 
 .plot-info-segment {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex: 0 0 auto;
-    min-width: 12ch;
-}
-
-.plot-info-label {
+    flex: 1 1 0;
+    min-width: 0;
+    font-size: 0.72rem;
     color: #ffffff;
-    opacity: .92;
-    flex: 0 0 auto;
-}
-
-.plot-info-value {
-    display: inline-block;
-    min-width: 8ch;
-    text-align: right;
-    color: #ffffff;
+    white-space: nowrap;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
 }
 
 /* Plot scrollbar */
@@ -592,9 +584,9 @@ canvas {
     white-space: nowrap;
     font-family: 'Consolas', 'Courier New', monospace;
     font-variant-numeric: tabular-nums;
-    text-align: center;
     overflow: hidden;
     text-overflow: ellipsis;
+    text-align: left;
 }
 
 .log-content {

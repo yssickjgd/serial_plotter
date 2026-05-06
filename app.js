@@ -99,58 +99,60 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (_) { }
         }
     };
-    const renderPlotStats = (stats) => {
-        if (!stats) {
-            plotInfoRow.innerHTML = '&nbsp;';
-            return;
-        }
-        const periodText = stats.period === null ? '--' : fmtFixed(stats.period, 2, 7);
-        plotInfoRow.innerHTML = [
-            ['通道', stats.channelLabel],
-            ['最大值', fmtFixed(stats.max, 6, 11)],
-            ['最小值', fmtFixed(stats.min, 6, 11)],
-            ['峰峰值', fmtFixed(stats.pp, 6, 11)],
-            ['均值', fmtFixed(stats.mean, 6, 11)],
-            ['标准差', fmtFixed(stats.stdDev, 6, 11)],
-            ['主频', `${fmtFixed(stats.freq, 4, 8)} cyc/样本`],
-            ['周期', `${periodText} 样本`]
-        ].map(([label, value]) => `<span class="plot-info-segment"><span class="plot-info-label">${label}</span><span class="plot-info-value">${value}</span></span>`).join('');
-    };
-
-    plotter.onStatsUpdate = renderPlotStats;
 
     /* ════ Stats ════ */
-    const stats = {
+    const statsBytes = {
         rxBytes: 0, txBytes: 0,
         _rxLast: 0, _txLast: 0,
-        _framesLast: 0, _failsLast: 0
+        _framesLast: 0, _failsLast: 0, 
+        _calculatePeriod: 1000,
+        framesPerSec: 0
     };
     setInterval(() => {
         if (capturePaused) {
-            
-            stats._rxLast = stats.rxBytes;
-            stats._txLast = stats.txBytes;
-            stats._framesLast = parser.frameCount;
-            stats._failsLast = parser.failCount;
+            statsBytes._rxLast = statsBytes.rxBytes;
+            statsBytes._txLast = statsBytes.txBytes;
+            statsBytes._framesLast = parser.frameCount;
+            statsBytes._failsLast = parser.failCount;
             return;
         }
-        const rxBps = stats.rxBytes - stats._rxLast;
-        const txBps = stats.txBytes - stats._txLast;
-        const frames = parser.frameCount - stats._framesLast;
-        const fails = parser.failCount - stats._failsLast;
+        const rxBps = statsBytes.rxBytes - statsBytes._rxLast;
+        const txBps = statsBytes.txBytes - statsBytes._txLast;
+        const frames = (parser.frameCount - statsBytes._framesLast) / (statsBytes._calculatePeriod / 1000);
+        const fails = parser.failCount - statsBytes._failsLast;
         const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
         statRx.textContent = `RX: ${_fmtBytes(rxBps)}/s`;
         statTx.textContent = `TX: ${_fmtBytes(txBps)}/s`;
         statFps.textContent = `帧率: ${frames} f/s`;
         statFail.textContent = `校验失败: ${failPct}%`;
-        stats._rxLast = stats.rxBytes;
-        stats._txLast = stats.txBytes;
-        stats._framesLast = parser.frameCount;
-        stats._failsLast = parser.failCount;
-    }, 1000);
-
+        statsBytes._rxLast = statsBytes.rxBytes;
+        statsBytes._txLast = statsBytes.txBytes;
+        statsBytes._framesLast = parser.frameCount;
+        statsBytes._failsLast = parser.failCount;
+        statsBytes.frames = frames;
+    }, statsBytes._calculatePeriod);
     const countHexBytes = (hexStr) => hexStr ? hexStr.replace(/\s/g, '').length / 2 : 0;
+    const renderPlotStats = (stats) => {
+        if (!stats) {
+            plotInfoRow.innerHTML = '&nbsp;';
+            return;
+        }
+        const freqHz = stats.freq === null ? '--' : fmtFixed(stats.freq * statsBytes.frames, 6, 7);
+        const periodText = stats.period === null ? '--' : fmtFixed(stats.period, 0, 7);
+        plotInfoRow.innerHTML = [
+            ['通道: ', stats.channelLabel],
+            ['最大值: ', fmtFixed(stats.max, 6, 7)],
+            ['最小值: ', fmtFixed(stats.min, 6, 7)],
+            ['峰峰值: ', fmtFixed(stats.pp, 6, 7)],
+            ['均值: ', fmtFixed(stats.mean, 6, 7)],
+            ['标准差: ', fmtFixed(stats.stdDev, 6, 7)],
+            ['主频: ', `${freqHz} Hz`],
+            ['主周期: ', `${periodText} sample`]
+        ].map(([label, value]) => `<span class="plot-info-segment">${label} ${value}</span>`).join('');
+    };
+
+    plotter.onStatsUpdate = renderPlotStats;
 
     /* ════ Tabs ════ */
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -519,7 +521,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Raw data → show in monitor (all incoming bytes, regardless of frame validity)
     parser.onRawData = (hexStr, timeStr) => {
         if (capturePaused) return;
-        stats.rxBytes += countHexBytes(hexStr);
+        statsBytes.rxBytes += countHexBytes(hexStr);
     };
 
     // Valid frame → update plotter + show in monitor with different color
@@ -608,12 +610,12 @@ document.addEventListener('DOMContentLoaded', () => {
         plotter.clear(); logContent.innerHTML = '';
         parser.buffer = new Uint8Array(0);
         parser.frameCount = 0; parser.failCount = 0;
-        stats.rxBytes = 0;
-        stats.txBytes = 0;
-        stats._rxLast = 0;
-        stats._txLast = 0;
-        stats._framesLast = 0;
-        stats._failsLast = 0;
+        statsBytes.rxBytes = 0;
+        statsBytes.txBytes = 0;
+        statsBytes._rxLast = 0;
+        statsBytes._txLast = 0;
+        statsBytes._framesLast = 0;
+        statsBytes._failsLast = 0;
     });
     btnExport.addEventListener('click', () => {
         const csv = plotter.exportCSV();
@@ -671,7 +673,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
             if (bytes.length === 0) return;
             await activeEngine.send(bytes);
-            stats.txBytes += bytes.length;
+            statsBytes.txBytes += bytes.length;
             appendMonitorLine('log-tx-ok', 'TX', formatMonitorTime(), '', bytesToHex(bytes));
         } catch (e) {
             const mode = sendMode.value;
