@@ -126,7 +126,14 @@ document.addEventListener('DOMContentLoaded', () => {
         _framesLast: 0, _failsLast: 0
     };
     setInterval(() => {
-        if (capturePaused) return;
+        if (capturePaused) {
+            
+            stats._rxLast = stats.rxBytes;
+            stats._txLast = stats.txBytes;
+            stats._framesLast = parser.frameCount;
+            stats._failsLast = parser.failCount;
+            return;
+        }
         const rxBps = stats.rxBytes - stats._rxLast;
         const txBps = stats.txBytes - stats._txLast;
         const frames = parser.frameCount - stats._framesLast;
