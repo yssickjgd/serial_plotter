@@ -34,14 +34,22 @@ class Plotter {
         this.displayMode  = 'time';
         this.yScaleMode   = 'auto';
         this.removeDcForFft = false;
-        this.yMin         = -1;
-        this.yMax         = 1;
         this.onStatsUpdate = null;
 
-        // Viewport
-        this.scrollOffset = 0;
-        this.displayCount = 1000;
-        this.autoFollow   = true;
+        // 视口状态（时域/频域独立，通过 _vp getter 访问当前模式）
+        this.vp = {
+            time:      { scrollOffset: 0, displayCount: 1000, autoFollow: true },
+            frequency: { scrollOffset: 0, displayCount: 1000, autoFollow: true }
+        };
+
+        // Y 轴范围（时域/频域独立，通过 _yBounds getter 访问当前模式）
+        this.yBounds = {
+            time:      { min: -1, max: 1 },
+            frequency: { min: -1, max: 1 }
+        };
+
+        // 频域模式下 FFT bins 总数（由 draw() 更新，供 _clampScroll 使用）
+        this._cachedScrollTotal = 0;
 
         // Crosshair
         this.mousePos = null; // {x, y} in canvas pixel coords
@@ -59,8 +67,8 @@ class Plotter {
         this.canvas.addEventListener('mouseleave',  ()  => this._onMouseLeave());
         this.canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            this.displayCount = this.maxPoints;
-            this.autoFollow   = true;
+            this._vp.displayCount = this.maxPoints;
+            this._vp.autoFollow   = true;
             this._clampScroll();
             if (this.isPaused) this.draw();
         });
@@ -69,6 +77,12 @@ class Plotter {
         window.addEventListener('resize', () => this.resize());
         this.renderLoop();
     }
+
+    /** 返回当前显示模式对应的视口状态对象 */
+    get _vp() { return this.vp[this.displayMode]; }
+
+    /** 返回当前显示模式对应的 Y 轴范围对象 */
+    get _yBounds() { return this.yBounds[this.displayMode]; }
 
     /* ── Resize ── */
     /** 根据父容器尺寸重置画布宽高，并刷新滚动条 */
@@ -127,13 +141,15 @@ class Plotter {
         this._updateScrollbar();
         this.draw();
     }
-    /** 应用绘图显示选项（时域/频域、Y 轴策略、去直流等） */
+    /** 应用绘图显示选项（时域/频域、Y 轴策略、去直流、Y 轴范围等） */
     setDisplayOptions(opts = {}) {
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
         if (opts.removeDcForFft !== undefined) this.removeDcForFft = !!opts.removeDcForFft;
-        if (opts.yMin !== undefined && opts.yMin !== '') this.yMin = parseFloat(opts.yMin);
-        if (opts.yMax !== undefined && opts.yMax !== '') this.yMax = parseFloat(opts.yMax);
+        if (opts.yMinTime !== undefined && opts.yMinTime !== '') this.yBounds.time.min = parseFloat(opts.yMinTime);
+        if (opts.yMaxTime !== undefined && opts.yMaxTime !== '') this.yBounds.time.max = parseFloat(opts.yMaxTime);
+        if (opts.yMinFreq !== undefined && opts.yMinFreq !== '') this.yBounds.frequency.min = parseFloat(opts.yMinFreq);
+        if (opts.yMaxFreq !== undefined && opts.yMaxFreq !== '') this.yBounds.frequency.max = parseFloat(opts.yMaxFreq);
         if (this.isPaused) this.draw();
     }
 
@@ -147,17 +163,20 @@ class Plotter {
                     this.channels[i].data.shift();
             }
         }
-        if (this.autoFollow) {
-            const total = this._total();
-            this.scrollOffset = Math.max(0, total - this.displayCount);
+        if (this._vp.autoFollow) {
+            const total = this._scrollTotal();
+            this._vp.scrollOffset = Math.max(0, total - this._vp.displayCount);
         }
         this._updateScrollbar();
     }
 
-    /** 清空所有通道数据，重置视口到跟随模式 */
+    /** 清空所有通道数据，重置时域/频域视口到跟随模式 */
     clear() {
         for (const ch of this.channels) ch.data = [];
-        this.scrollOffset = 0; this.autoFollow = true;
+        for (const mode of ['time', 'frequency']) {
+            this.vp[mode].scrollOffset = 0;
+            this.vp[mode].autoFollow = true;
+        }
         this._updateScrollbar(); this.draw();
     }
 
@@ -165,7 +184,12 @@ class Plotter {
     togglePause()          { this.isPaused = !this.isPaused; return this.isPaused; }
 
     /** 设置每个通道的最大采样点数 */
-    setMaxPoints(size)     { this.maxPoints = size; this.displayCount = Math.min(this.displayCount, size); }
+    setMaxPoints(size) {
+        this.maxPoints = size;
+        for (const mode of ['time', 'frequency']) {
+            this.vp[mode].displayCount = Math.min(this.vp[mode].displayCount, size);
+        }
+    }
 
     /* ── FFT & 统计分析 ── */
 
@@ -241,7 +265,11 @@ class Plotter {
         return { mags, dominantBin, fftSize };
     }
 
-    /** 汇总单通道的统计信息（最大/最小/峰峰值/均值/标准差/主频/主周期），多通道返回 null */
+    /**
+     * 汇总单通道的统计信息，多通道返回 null。
+     * 基本统计（max/min/pp/mean/stdDev）基于视口窗口数据，
+     * 主频/主周期始终基于全量数据（保证滚动时数值稳定）。
+     */
     _buildSummary(visibleSeries, viewMode) {
         if (visibleSeries.length !== 1) {
             return null;
@@ -249,6 +277,8 @@ class Plotter {
         const series = visibleSeries[0];
         const values = series.rawValues;
         if (!values || values.length === 0) return null;
+
+        // 基本统计：基于视口窗口数据
         const min = Math.min(...values);
         const max = Math.max(...values);
         const pp = max - min;
@@ -261,7 +291,10 @@ class Plotter {
         const mean = sum / values.length;
         const variance = Math.max(0, sumSq / values.length - mean * mean);
         const stdDev = Math.sqrt(variance);
-        const freqSeries = this._prepareFrequencySeries(values);
+
+        // 主频/主周期：始终基于全量数据（FFT 输入不随视口滚动而变化）
+        const fullData = series.ch.data;
+        const freqSeries = this._prepareFrequencySeries(fullData);
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
@@ -281,18 +314,43 @@ class Plotter {
         if (this.onStatsUpdate) this.onStatsUpdate(stats || null);
     }
 
-    /** 收集当前视口范围内所有可见通道的数据，频域模式下同时执行 FFT */
-    _collectWindowSeries(startIdx, actualEnd) {
+    /** 对所有可见通道的全量数据执行 FFT（结果缓存在 Map 中供 draw 复用） */
+    _computeFftForVisibleChannels() {
+        const results = new Map();
+        for (let idx = 0; idx < this.channels.length; idx++) {
+            const ch = this.channels[idx];
+            if (!ch.visible || ch.data.length === 0) continue;
+            results.set(idx, this._prepareFrequencySeries(ch.data));
+        }
+        return results;
+    }
+
+    /**
+     * 收集可见通道的数据：
+     *   - 时域模式：取视口范围 [startIdx, actualEnd) 内的数据
+     *   - 频域模式：取预计算的 FFT 结果中 [startIdx, actualEnd) 范围的频谱 bins
+     */
+    _collectWindowSeries(startIdx, actualEnd, fftResults) {
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
             if (!ch.visible || ch.data.length === 0) continue;
-            const rawValues = ch.data.slice(startIdx, actualEnd);
-            if (rawValues.length === 0) continue;
             if (this.displayMode === 'frequency') {
-                const freq = this._prepareFrequencySeries(rawValues);
-                series.push({ channelIndex: idx, ch, rawValues, ...freq });
+                const freq = fftResults.get(idx);
+                if (!freq || freq.mags.length === 0) continue;
+                // 取视口范围内的频谱 bins
+                const mags = freq.mags.slice(startIdx, actualEnd);
+                if (mags.length === 0) continue;
+                series.push({
+                    channelIndex: idx, ch,
+                    rawValues: ch.data,
+                    mags,
+                    dominantBin: freq.dominantBin,
+                    fftSize: freq.fftSize
+                });
             } else {
+                const rawValues = ch.data.slice(startIdx, actualEnd);
+                if (rawValues.length === 0) continue;
                 series.push({ channelIndex: idx, ch, rawValues, mags: rawValues, dominantBin: 0, fftSize: rawValues.length });
             }
         }
@@ -313,23 +371,23 @@ class Plotter {
 
     /* ── 交互事件 ── */
 
-    /** 鼠标滚轮缩放：以鼠标位置为锚点缩放视口，factor 0.8/1.25 */
+    /** 鼠标滚轮缩放：以鼠标位置为锚点缩放当前模式的视口，factor 0.8/1.25 */
     _onWheel(e) {
         e.preventDefault();
-        const total = this._total();
+        const total = this._scrollTotal();
         if (total < 2) return;
 
         const rect   = this.canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const plotW  = this.canvas.width - this.pX;
         const ratio  = Math.max(0, Math.min(1, mouseX / plotW));
-        const anchorIdx = this.scrollOffset + ratio * this.displayCount;
+        const anchorIdx = this._vp.scrollOffset + ratio * this._vp.displayCount;
 
         const factor = e.deltaY < 0 ? 0.8 : 1.25;
-        this.displayCount = Math.round(Math.max(2, Math.min(this.maxPoints, this.displayCount * factor)));
+        this._vp.displayCount = Math.round(Math.max(2, Math.min(this.maxPoints, this._vp.displayCount * factor)));
 
-        this.scrollOffset = Math.round(anchorIdx - ratio * this.displayCount);
-        this.autoFollow   = false;
+        this._vp.scrollOffset = Math.round(anchorIdx - ratio * this._vp.displayCount);
+        this._vp.autoFollow   = false;
         this._clampScroll();
         this._updateScrollbar();
         if (this.isPaused) this.draw();
@@ -352,11 +410,17 @@ class Plotter {
     /** 返回所有通道中的最大数据长度 */
     _total() { return this.channels.reduce((m, ch) => Math.max(m, ch.data.length), 0); }
 
-    /** 约束 scrollOffset 在合法范围内，到达末尾时自动切换为跟随模式 */
+    /** 返回当前模式下可滚动的总范围（频域模式为 fftSize/2，时域模式为数据长度） */
+    _scrollTotal() {
+        if (this.displayMode === 'frequency' && this._cachedScrollTotal > 0) return this._cachedScrollTotal;
+        return this._total();
+    }
+
+    /** 约束当前模式的 scrollOffset 在合法范围内，到达末尾时自动切换为跟随模式 */
     _clampScroll() {
-        const total = this._total();
-        this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, total - this.displayCount));
-        if (this.scrollOffset + this.displayCount >= total) this.autoFollow = true;
+        const total = this._scrollTotal();
+        this._vp.scrollOffset = Math.max(0, Math.min(this._vp.scrollOffset, total - this._vp.displayCount));
+        if (this._vp.scrollOffset + this._vp.displayCount >= total) this._vp.autoFollow = true;
     }
 
     /** 初始化滚动条拖拽和点击跳转事件 */
@@ -365,7 +429,7 @@ class Plotter {
         let dragging = false, dragStartX = 0, dragStartOff = 0;
 
         this.scrollbarThumb.addEventListener('mousedown', (e) => {
-            dragging = true; dragStartX = e.clientX; dragStartOff = this.scrollOffset;
+            dragging = true; dragStartX = e.clientX; dragStartOff = this._vp.scrollOffset;
             e.preventDefault();
         });
         document.addEventListener('mousemove', (e) => {
@@ -373,9 +437,9 @@ class Plotter {
             const wrapW  = this.scrollbarWrap.clientWidth;
             const thumbW = this.scrollbarThumb.offsetWidth;
             const dx     = e.clientX - dragStartX;
-            const range  = Math.max(1, this._total() - this.displayCount);
-            this.scrollOffset = Math.round(dragStartOff + (dx / (wrapW - thumbW)) * range);
-            this.autoFollow = false;
+            const range  = Math.max(1, this._scrollTotal() - this._vp.displayCount);
+            this._vp.scrollOffset = Math.round(dragStartOff + (dx / (wrapW - thumbW)) * range);
+            this._vp.autoFollow = false;
             this._clampScroll(); this._updateScrollbar();
             if (this.isPaused) this.draw();
         });
@@ -385,24 +449,24 @@ class Plotter {
             if (e.target === this.scrollbarThumb) return;
             const rect  = this.scrollbarWrap.getBoundingClientRect();
             const ratio = (e.clientX - rect.left) / rect.width;
-            const total = this._total();
-            this.scrollOffset = Math.round(ratio * Math.max(1, total - this.displayCount));
-            this.autoFollow = false;
+            const total = this._scrollTotal();
+            this._vp.scrollOffset = Math.round(ratio * Math.max(1, total - this._vp.displayCount));
+            this._vp.autoFollow = false;
             this._clampScroll(); this._updateScrollbar();
             if (this.isPaused) this.draw();
         });
     }
 
-    /** 根据当前视口位置和数据总量更新滚动条 thumb 的宽度和位置 */
+    /** 根据当前模式的视口位置和可滚动范围更新滚动条 thumb 的宽度和位置 */
     _updateScrollbar() {
         if (!this.scrollbarWrap || !this.scrollbarThumb) return;
-        const total = this._total();
-        if (total === 0 || this.displayCount >= total) {
+        const total = this._scrollTotal();
+        if (total === 0 || this._vp.displayCount >= total) {
             this.scrollbarThumb.style.left = '0'; this.scrollbarThumb.style.width = '100%'; return;
         }
         const wrapW  = this.scrollbarWrap.clientWidth;
-        const thumbW = Math.max(24, Math.round(wrapW * this.displayCount / total));
-        const left   = Math.round((this.scrollOffset / Math.max(1, total - this.displayCount)) * (wrapW - thumbW));
+        const thumbW = Math.max(24, Math.round(wrapW * this._vp.displayCount / total));
+        const left   = Math.round((this._vp.scrollOffset / Math.max(1, total - this._vp.displayCount)) * (wrapW - thumbW));
         this.scrollbarThumb.style.width = thumbW + 'px';
         this.scrollbarThumb.style.left  = left  + 'px';
     }
@@ -440,26 +504,37 @@ class Plotter {
         const total = this._total();
         if (total < 1) { this._emitStats(''); return; }
 
-        let startIdx    = Math.max(0, Math.floor(this.scrollOffset));
-        const dispCnt   = Math.max(2, Math.floor(this.displayCount));
-        let actualEnd   = Math.min(startIdx + dispCnt, total);
+        // 频域模式：预先计算全量 FFT，用 fftSize/2 作为可滚动范围
+        let fftResults = null;
+        let scrollTotal = total;
+        if (this.displayMode === 'frequency') {
+            fftResults = this._computeFftForVisibleChannels();
+            const maxFftBins = Array.from(fftResults.values())
+                .reduce((m, r) => Math.max(m, Math.floor((r.fftSize || 2) / 2)), 0);
+            if (maxFftBins > 1) scrollTotal = maxFftBins;
+            this._cachedScrollTotal = scrollTotal;
+        }
+
+        let startIdx    = Math.max(0, Math.floor(this._vp.scrollOffset));
+        const dispCnt   = Math.max(2, Math.floor(this._vp.displayCount));
+        let actualEnd   = Math.min(startIdx + dispCnt, scrollTotal);
         let visibleCnt  = actualEnd - startIdx;
         if (visibleCnt <= 0) {
-            this.scrollOffset = Math.max(0, total - dispCnt);
-            startIdx   = Math.max(0, Math.floor(this.scrollOffset));
-            actualEnd  = Math.min(startIdx + dispCnt, total);
+            this._vp.scrollOffset = Math.max(0, scrollTotal - dispCnt);
+            startIdx   = Math.max(0, Math.floor(this._vp.scrollOffset));
+            actualEnd  = Math.min(startIdx + dispCnt, scrollTotal);
             visibleCnt = actualEnd - startIdx;
         }
-        const series = this._collectWindowSeries(startIdx, actualEnd);
+        const series = this._collectWindowSeries(startIdx, actualEnd, fftResults);
         if (series.length === 0) { this._emitStats(''); return; }
 
         const summaryText = this._buildSummary(series, this.displayMode);
         this._emitStats(summaryText);
 
-        let min, max, bounded, axisMaxIndex;
-        if (this.yScaleMode === 'manual' && Number.isFinite(this.yMin) && Number.isFinite(this.yMax) && this.yMax !== this.yMin) {
-            min = Math.min(this.yMin, this.yMax);
-            max = Math.max(this.yMin, this.yMax);
+        let min, max, bounded;
+        if (this.yScaleMode === 'manual' && Number.isFinite(this._yBounds.min) && Number.isFinite(this._yBounds.max) && this._yBounds.max !== this._yBounds.min) {
+            min = Math.min(this._yBounds.min, this._yBounds.max);
+            max = Math.max(this._yBounds.min, this._yBounds.max);
         } else {
             const allVals = [];
             for (const item of series) allVals.push(...item.mags);
@@ -470,9 +545,7 @@ class Plotter {
             min -= pad; max += pad;
         }
         bounded = max - min;
-        axisMaxIndex = this.displayMode === 'frequency'
-            ? Math.max(...series.map(s => Math.max(1, Math.floor((s.fftSize || 2) / 2))))
-            : Math.max(1, visibleCnt);
+        const axisMaxIndex = Math.max(1, visibleCnt);
 
         // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
         this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = '10px Consolas,monospace';
@@ -490,9 +563,7 @@ class Plotter {
         this.ctx.textAlign = 'center'; this.ctx.textBaseline = 'top';
         for (let i = 0; i <= 10; i++) {
             const px  = (i/10) * plotW;
-            const idx = this.displayMode === 'frequency'
-                ? Math.floor((i / 10) * axisMaxIndex)
-                : startIdx + Math.floor((i/10) * Math.max(0, visibleCnt - 1));
+            const idx = startIdx + Math.floor((i/10) * Math.max(0, visibleCnt - 1));
             this.ctx.fillStyle = '#aaaaaa';
             this.ctx.fillText(idx, px, plotH + 3);
         }
@@ -534,13 +605,13 @@ class Plotter {
             }
         }
 
-        // Crosshair
+        // —— 十字光标 ——
         if (this.mousePos) {
-            this._drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total);
+            this._drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total, series);
         }
     }
 
-    _drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total) {
+    _drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total, series) {
         const mx = this.mousePos.x, my = this.mousePos.y;
         if (mx < 0 || mx > plotW || my < 0 || my > plotH) return;
         const ctx = this.ctx;
@@ -565,7 +636,7 @@ class Plotter {
 
         // Main tooltip (cursor position label)
         const tipLines = this.displayMode === 'frequency'
-            ? [`Bin: ${xIdx}`, `Mag: ${yVal.toFixed(6)}`]
+            ? [`Bin: ${startIdx + xIdx}`, `Mag: ${yVal.toFixed(6)}`]
             : [`X: ${Math.min(total - 1, startIdx + xIdx)}`, `Y: ${yVal.toFixed(6)}`];
         ctx.font = '12px Consolas,monospace';
         const lineH = 16, tipPad = 6;
@@ -584,19 +655,23 @@ class Plotter {
 
         // Per-channel intersections
         const labels = [];
+        // 构建 channelIndex → series item 的查找表
+        const seriesMap = new Map(series.map(s => [s.channelIndex, s]));
         for (const ch of this.channels) {
             if (!ch.visible || ch.data.length === 0) continue;
-            const source = this.displayMode === 'frequency' ? this._prepareFrequencySeries(ch.data.slice(startIdx, Math.min(ch.data.length, startIdx + visibleCnt))) : null;
-            const val = this.displayMode === 'frequency'
-                ? (source && source.mags.length > 0 ? source.mags[Math.min(source.mags.length - 1, xIdx)] : 0)
-                : (() => {
-                    const iLow  = startIdx + Math.floor(fIdx);
-                    const iHigh = startIdx + Math.ceil(fIdx);
-                    const t     = fIdx - Math.floor(fIdx);
-                    const vLow  = ch.data[iLow]  !== undefined ? ch.data[iLow]  : 0;
-                    const vHigh = ch.data[iHigh] !== undefined ? ch.data[iHigh] : vLow;
-                    return vLow + t * (vHigh - vLow);
-                })();
+            const idx = this.channels.indexOf(ch);
+            let val = 0;
+            if (this.displayMode === 'frequency') {
+                const s = seriesMap.get(idx);
+                val = (s && s.mags.length > 0) ? s.mags[Math.min(s.mags.length - 1, xIdx)] : 0;
+            } else {
+                const iLow  = startIdx + Math.floor(fIdx);
+                const iHigh = startIdx + Math.ceil(fIdx);
+                const t     = fIdx - Math.floor(fIdx);
+                const vLow  = ch.data[iLow]  !== undefined ? ch.data[iLow]  : 0;
+                const vHigh = ch.data[iHigh] !== undefined ? ch.data[iHigh] : vLow;
+                val = vLow + t * (vHigh - vLow);
+            }
             const origY = plotH - ((val - min) / bounded) * plotH;
             labels.push({ ch, val, origY, labelY: origY });
         }

@@ -127,9 +127,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotViewMode = document.getElementById('plot-view-mode');
     const plotYScaleMode = document.getElementById('plot-y-scale-mode');
     const plotFftRemoveDc = document.getElementById('plot-fft-remove-dc');
+    const wrapFftRemoveDc = document.getElementById('wrap-fft-remove-dc');
     const plotYMin = document.getElementById('plot-y-min');
     const plotYMax = document.getElementById('plot-y-max');
     const plotInfoRow = document.getElementById('plot-info-row');
+
+    // 时域/频域独立的 Y 轴范围（字符串值，与 UI 输入框同步）
+    let plotYBounds = {
+        time:      { min: '-1', max: '1' },
+        frequency: { min: '-1', max: '1' }
+    };
 
     // —— 工具栏 ——
     const pauseBtn = document.getElementById('btn-pause');
@@ -424,14 +431,14 @@ document.addEventListener('DOMContentLoaded', () => {
      *    - 可见性复选框
      * ───────────────────────────────────────────────────────── */
 
-    /** 将绘图显示选项同步给 plotter（时域/频域、Y 轴策略等） */
+    /** 将绘图显示选项同步给 plotter（时域/频域、Y 轴策略、Y 轴范围等） */
     const syncPlotDisplaySettings = () => {
         plotter.setDisplayOptions({
             displayMode: plotViewMode.value,
             yScaleMode: plotYScaleMode.value,
             removeDcForFft: plotFftRemoveDc.checked,
-            yMin: plotYMin.value,
-            yMax: plotYMax.value
+            yMinTime: plotYBounds.time.min, yMaxTime: plotYBounds.time.max,
+            yMinFreq: plotYBounds.frequency.min, yMaxFreq: plotYBounds.frequency.max
         });
         if (!plotInfoRow.innerHTML) plotInfoRow.innerHTML = '&nbsp;';
     };
@@ -498,10 +505,31 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    // 绘图显示选项变化时同步
-    [plotViewMode, plotYScaleMode, plotFftRemoveDc, plotYMin, plotYMax]
+    // 将当前 UI 的 Y 轴值写入对应模式的 bounds
+    const updateYBounds = () => {
+        const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+        plotYBounds[mode].min = plotYMin.value;
+        plotYBounds[mode].max = plotYMax.value;
+    };
+
+    // 波形模式切换时恢复对应模式的 Y 轴值到 UI，并切换"频域去直流"可见性
+    plotViewMode.addEventListener('change', () => {
+        const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+        plotYMin.value = plotYBounds[mode].min;
+        plotYMax.value = plotYBounds[mode].max;
+        wrapFftRemoveDc.style.display = mode === 'frequency' ? '' : 'none';
+        syncPlotDisplaySettings(); saveConfig();
+    });
+
+    // 其他绘图选项变化时同步
+    [plotYScaleMode, plotFftRemoveDc]
         .filter(Boolean)
         .forEach(el => el.addEventListener('change', () => { syncPlotDisplaySettings(); saveConfig(); }));
+
+    // Y 轴范围变化时更新当前模式的 bounds 再同步
+    [plotYMin, plotYMax]
+        .filter(Boolean)
+        .forEach(el => el.addEventListener('change', () => { updateYBounds(); syncPlotDisplaySettings(); saveConfig(); }));
 
     // 全部打开 / 全部关闭
     channelsAllOnBtn.addEventListener('click', () => {
@@ -550,8 +578,8 @@ document.addEventListener('DOMContentLoaded', () => {
         plotViewMode: plotViewMode.value,
         plotYScaleMode: plotYScaleMode.value,
         plotFftRemoveDc: plotFftRemoveDc.checked,
-        plotYMin: plotYMin.value,
-        plotYMax: plotYMax.value,
+        plotYMinTime: plotYBounds.time.min, plotYMaxTime: plotYBounds.time.max,
+        plotYMinFreq: plotYBounds.frequency.min, plotYMaxFreq: plotYBounds.frequency.max,
         channels: plotter.getChannelMeta().map(m => ({
             name: m.name, color: m.color, visible: m.visible
         }))
@@ -586,10 +614,17 @@ document.addEventListener('DOMContentLoaded', () => {
         // 发送 & 绘图选项
         if (cfg.sendIntervalUnit) sendIntervalUnit.value = cfg.sendIntervalUnit;
         if (cfg.plotViewMode) plotViewMode.value = cfg.plotViewMode;
+        wrapFftRemoveDc.style.display = plotViewMode.value === 'frequency' ? '' : 'none';
         if (cfg.plotYScaleMode) plotYScaleMode.value = cfg.plotYScaleMode;
         if (cfg.plotFftRemoveDc !== undefined) plotFftRemoveDc.checked = cfg.plotFftRemoveDc;
-        if (cfg.plotYMin !== undefined) plotYMin.value = cfg.plotYMin;
-        if (cfg.plotYMax !== undefined) plotYMax.value = cfg.plotYMax;
+        // 恢复 Y 轴范围（兼容旧配置的 plotYMin/plotYMax）
+        plotYBounds.time.min = cfg.plotYMinTime ?? cfg.plotYMin ?? '-1';
+        plotYBounds.time.max = cfg.plotYMaxTime ?? cfg.plotYMax ?? '1';
+        plotYBounds.frequency.min = cfg.plotYMinFreq ?? '-1';
+        plotYBounds.frequency.max = cfg.plotYMaxFreq ?? '1';
+        const curMode = (cfg.plotViewMode || 'time') === 'frequency' ? 'frequency' : 'time';
+        plotYMin.value = plotYBounds[curMode].min;
+        plotYMax.value = plotYBounds[curMode].max;
 
         // 同步帧格式到 parser & plotter
         toggleConfigSection(headerChk, headerConfigDiv);
@@ -663,10 +698,10 @@ document.addEventListener('DOMContentLoaded', () => {
         e.target.value = '';  // 清空 input 以便重复选择同一文件
     });
 
-    // 任意配置字段变化时自动保存
+    // 任意配置字段变化时自动保存（已独立处理的项不重复注册：plotViewMode、plotYMin、plotYMax）
     [checksumChk, dataTypeSelect, endiannessSelect, channelsInput,
         headerInput, footerInput, sendIntervalUnit,
-        plotViewMode, plotYScaleMode, plotFftRemoveDc, plotYMin, plotYMax]
+        plotYScaleMode, plotFftRemoveDc]
         .filter(Boolean)
         .forEach(el => el.addEventListener('change', saveConfig));
 
