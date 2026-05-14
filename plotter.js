@@ -1,4 +1,21 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  plotter.js — 波形绘图引擎
+ *
+ *  职责：Canvas 绘制、通道管理、视口缩放/平移、FFT 频谱分析、
+ *        十字光标交互、滚动条、统计信息汇总与 CSV 导出。
+ *
+ *  代码结构：
+ *    1. 构造函数（画布初始化、事件绑定、滚动条初始化）
+ *    2. Resize（画布尺寸自适应）
+ *    3. 通道管理（增删、颜色、可见性、名称）
+ *    4. 数据与视口（addFrame、clear、pause、maxPoints）
+ *    5. FFT & 统计分析（_nextPow2、_fftInPlace、_prepareFrequencySeries、_buildSummary）
+ *    6. 交互事件（滚轮缩放、十字光标、滚动条拖拽）
+ *    7. 渲染（renderLoop、draw、_drawCrosshair）
+ * ═══════════════════════════════════════════════════════════════ */
+
 class Plotter {
+    /** 初始化画布、通道数组、视口状态、事件监听与滚动条 */
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
         this.ctx    = this.canvas.getContext('2d');
@@ -54,6 +71,7 @@ class Plotter {
     }
 
     /* ── Resize ── */
+    /** 根据父容器尺寸重置画布宽高，并刷新滚动条 */
     resize() {
         const rect = this.canvas.parentElement.getBoundingClientRect();
         const sbH  = this.scrollbarWrap ? this.scrollbarWrap.offsetHeight : 12;
@@ -64,7 +82,8 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
-    /* ── Channel Management ── */
+    /* ── 通道管理 ── */
+    /** 调整通道数量，不足时按默认色板补全，超出时裁剪 */
     setChannelCount(count) {
         while (this.channels.length < count) {
             const idx = this.channels.length;
@@ -81,13 +100,16 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
+    /** 返回所有通道的元数据（index, name, color, visible）供 UI 使用 */
     getChannelMeta() {
         return this.channels.map((ch, i) => ({
             index: i, name: ch.name, color: ch.color, visible: ch.visible
         }));
     }
 
+    /** 设置指定通道的绘制颜色 */
     setChannelColor(index, color)     { if (this.channels[index]) this.channels[index].color   = color; }
+    /** 设置指定通道的可见性，隐藏时跳过绘制 */
     setChannelVisible(index, visible) {
         if (this.channels[index]) {
             this.channels[index].visible = visible;
@@ -96,13 +118,16 @@ class Plotter {
             this.draw();
         }
     }
+    /** 设置指定通道的显示名称 */
     setChannelName(index, name)       { if (this.channels[index]) this.channels[index].name    = name; }
+    /** 批量设置所有通道的可见性 */
     setAllChannelsVisible(visible) {
         this.channels.forEach(ch => { ch.visible = visible; });
         this._clampScroll();
         this._updateScrollbar();
         this.draw();
     }
+    /** 应用绘图显示选项（时域/频域、Y 轴策略、去直流等） */
     setDisplayOptions(opts = {}) {
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
@@ -112,6 +137,7 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
+    /** 追加一帧数据到各通道缓冲区，超出 maxPoints 时自动丢弃最早数据 */
     addFrame(valuesArray) {
         if (this.isPaused) return;
         for (let i = 0; i < valuesArray.length; i++) {
@@ -128,21 +154,29 @@ class Plotter {
         this._updateScrollbar();
     }
 
+    /** 清空所有通道数据，重置视口到跟随模式 */
     clear() {
         for (const ch of this.channels) ch.data = [];
         this.scrollOffset = 0; this.autoFollow = true;
         this._updateScrollbar(); this.draw();
     }
 
+    /** 切换暂停状态，返回当前是否暂停 */
     togglePause()          { this.isPaused = !this.isPaused; return this.isPaused; }
+
+    /** 设置每个通道的最大采样点数 */
     setMaxPoints(size)     { this.maxPoints = size; this.displayCount = Math.min(this.displayCount, size); }
 
+    /* ── FFT & 统计分析 ── */
+
+    /** 返回不小于 n 的最小 2 的幂（FFT 要求输入长度为 2 的幂） */
     _nextPow2(n) {
         let p = 1;
         while (p < n) p <<= 1;
         return p;
     }
 
+    /** 原地 Cooley-Tukey FFT（蝶形运算），re/im 为实部/虚部数组，长度须为 2 的幂 */
     _fftInPlace(re, im) {
         const n = re.length;
         for (let i = 1, j = 0; i < n; i++) {
@@ -176,6 +210,7 @@ class Plotter {
         }
     }
 
+    /** Hann 窗加窗后执行 FFT，返回幅度谱 { mags, dominantBin, fftSize } */
     _prepareFrequencySeries(values) {
         if (values.length < 2) return { mags: [], dominantBin: 0, fftSize: 0 };
         const fftSize = this._nextPow2(values.length);
@@ -206,6 +241,7 @@ class Plotter {
         return { mags, dominantBin, fftSize };
     }
 
+    /** 汇总单通道的统计信息（最大/最小/峰峰值/均值/标准差/主频/主周期），多通道返回 null */
     _buildSummary(visibleSeries, viewMode) {
         if (visibleSeries.length !== 1) {
             return null;
@@ -240,10 +276,12 @@ class Plotter {
         };
     }
 
+    /** 通过 onStatsUpdate 回调向 app.js 推送统计信息 */
     _emitStats(stats) {
         if (this.onStatsUpdate) this.onStatsUpdate(stats || null);
     }
 
+    /** 收集当前视口范围内所有可见通道的数据，频域模式下同时执行 FFT */
     _collectWindowSeries(startIdx, actualEnd) {
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
@@ -261,6 +299,7 @@ class Plotter {
         return series;
     }
 
+    /** 将所有通道数据导出为 CSV 字符串（含表头），无数据时返回 null */
     exportCSV() {
         if (!this.channels.length || !this.channels[0].data.length) return null;
         let csv = ['Index', ...this.channels.map(ch => ch.name)].join(',') + '\r\n';
@@ -272,7 +311,9 @@ class Plotter {
         return csv;
     }
 
-    /* ── Wheel Zoom (mouse-centered) ── */
+    /* ── 交互事件 ── */
+
+    /** 鼠标滚轮缩放：以鼠标位置为锚点缩放视口，factor 0.8/1.25 */
     _onWheel(e) {
         e.preventDefault();
         const total = this._total();
@@ -294,7 +335,7 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
-    /* ── Crosshair Mouse Tracking ── */
+    /** 记录鼠标位置用于十字光标绘制 */
     _onMouseMove(e) {
         const rect = this.canvas.getBoundingClientRect();
         this.mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -306,15 +347,19 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
-    /* ── Scrollbar ── */
+    /* ── 滚动条 ── */
+
+    /** 返回所有通道中的最大数据长度 */
     _total() { return this.channels.reduce((m, ch) => Math.max(m, ch.data.length), 0); }
 
+    /** 约束 scrollOffset 在合法范围内，到达末尾时自动切换为跟随模式 */
     _clampScroll() {
         const total = this._total();
         this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, total - this.displayCount));
         if (this.scrollOffset + this.displayCount >= total) this.autoFollow = true;
     }
 
+    /** 初始化滚动条拖拽和点击跳转事件 */
     _initScrollbar() {
         if (!this.scrollbarWrap || !this.scrollbarThumb) return;
         let dragging = false, dragStartX = 0, dragStartOff = 0;
@@ -348,6 +393,7 @@ class Plotter {
         });
     }
 
+    /** 根据当前视口位置和数据总量更新滚动条 thumb 的宽度和位置 */
     _updateScrollbar() {
         if (!this.scrollbarWrap || !this.scrollbarThumb) return;
         const total = this._total();
@@ -361,17 +407,20 @@ class Plotter {
         this.scrollbarThumb.style.left  = left  + 'px';
     }
 
-    /* ── Render ── */
+    /* ── 渲染 ── */
+
+    /** requestAnimationFrame 循环，非暂停状态下持续重绘 */
     renderLoop() {
         if (!this.isPaused) this.draw();
         requestAnimationFrame(() => this.renderLoop());
     }
 
+    /** 主绘制方法：背景 → 网格 → 坐标轴 → 波形 → 十字光标 */
     draw() {
         const W = this.canvas.width, H = this.canvas.height;
         const plotW = W - this.pX, plotH = H - this.pY;
 
-        // Background
+        // —— 背景与网格 ——
         this.ctx.fillStyle = '#111111';
         this.ctx.fillRect(0, 0, W, H);
 
@@ -425,7 +474,7 @@ class Plotter {
             ? Math.max(...series.map(s => Math.max(1, Math.floor((s.fftSize || 2) / 2))))
             : Math.max(1, visibleCnt);
 
-        // Y axis labels — tick marks drawn INTO the plot (left), so they don't resemble minus signs
+        // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
         this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = '10px Consolas,monospace';
         this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
         for (let i = 0; i <= 8; i++) {
@@ -437,7 +486,7 @@ class Plotter {
             this.ctx.strokeStyle = '#888'; this.ctx.lineWidth = 1; this.ctx.stroke();
         }
 
-        // X axis labels
+        // —— X 轴标签 ——
         this.ctx.textAlign = 'center'; this.ctx.textBaseline = 'top';
         for (let i = 0; i <= 10; i++) {
             const px  = (i/10) * plotW;
@@ -448,7 +497,7 @@ class Plotter {
             this.ctx.fillText(idx, px, plotH + 3);
         }
 
-        // Waveforms
+        // —— 波形绘制（频域柱状图 / 时域折线+散点）——
         if (this.displayMode === 'frequency') {
             const stepX = plotW / Math.max(1, axisMaxIndex - 1);
             for (const item of series) {

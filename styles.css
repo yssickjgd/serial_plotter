@@ -1,3 +1,17 @@
+/* ═══════════════════════════════════════════════════════════════
+ *  styles.css — 全局样式表
+ *
+ *  结构：
+ *    1. CSS 变量（:root）
+ *    2. 全局重置与布局
+ *    3. 侧栏（sidebar、tab-bar、control-group）
+ *    4. 主显示区（canvas-wrapper、plot-header、monitor-panel）
+ *    5. 分隔条（h-resizer、v-resizer）
+ *    6. 发送面板（send-panel）
+ *    7. 滚动条样式
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* ── CSS 变量 ── */
 :root {
     --sidebar-bg: #f3f4f6;
     --bg-main: #e8eaed;
@@ -16,6 +30,7 @@
     --h-resizer-w: 5px;
 }
 
+/* ── 全局重置 ── */
 * {
     margin: 0;
     padding: 0;
@@ -23,6 +38,7 @@
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
 }
 
+/* ── 布局基础 ── */
 body {
     background: var(--bg-main);
     color: var(--text);
@@ -31,7 +47,7 @@ body {
     overflow: hidden;
 }
 
-/* ── App shell ── */
+/* ── 应用外壳 ── */
 .app-container {
     display: flex;
     width: 100vw;
@@ -39,7 +55,7 @@ body {
     overflow: hidden;
 }
 
-/* ── Sidebar ── */
+/* ── 配置侧栏 ── */
 .sidebar {
     width: var(--sidebar-w);
     min-width: var(--sidebar-w);
@@ -88,7 +104,7 @@ body {
     background: #bbc;
 }
 
-/* ── Tab bar ── */
+/* ── 侧栏 Tab 栏 ── */
 .tab-bar {
     display: flex;
     border-bottom: 2px solid var(--border);
@@ -120,7 +136,7 @@ body {
     background: var(--sidebar-bg);
 }
 
-/* ── Tab content ── */
+/* ── 侧栏 Tab 内容区 ── */
 .tab-content {
     display: none;
     flex-direction: column;
@@ -182,7 +198,7 @@ body {
     padding-right: 2px;
 }
 
-/* ── Control groups ── */
+/* ── 侧栏控件组 ── */
 .control-group {
     display: flex;
     flex-direction: column;
@@ -257,7 +273,7 @@ code {
     font-family: 'Consolas', monospace;
 }
 
-/* Checkbox */
+/* ── Checkbox ── */
 .chk-label {
     display: flex;
     align-items: center;
@@ -276,7 +292,7 @@ code {
     flex-shrink: 0;
 }
 
-/* Buttons */
+/* ── Buttons ── */
 .btn {
     width: 100%;
     padding: 5px 8px;
@@ -353,7 +369,7 @@ code {
     background: var(--success);
 }
 
-/* ── Channel config list ── */
+/* ── 通道配置列表 ── */
 .channel-row {
     display: flex;
     align-items: center;
@@ -398,7 +414,7 @@ code {
     border-radius: 3px;
 }
 
-/* ── Main display (right side) ── */
+/* ── 主显示区（右侧）── */
 .main-display {
     flex: 1;
     display: flex;
@@ -416,7 +432,7 @@ code {
     border-radius: 3px;
 }
 
-/* ── Canvas wrapper ── */
+/* ── 波形绘图区 ── */
 .canvas-wrapper {
     position: relative;
     display: flex;
@@ -490,7 +506,7 @@ canvas {
     text-align: left;
 }
 
-/* Plot scrollbar */
+/* ── 波形滚动条 ── */
 .plot-scrollbar-wrap {
     height: 11px;
     background: #1c1c1c;
@@ -545,7 +561,7 @@ canvas {
     background: #bbc;
 }
 
-/* ── Monitor panel ── */
+/* ── 字节流监视台 ── */
 .monitor-panel {
     display: flex;
     flex-direction: column;
@@ -611,6 +627,7 @@ canvas {
     word-break: break-all;
 }
 
+/* ── 日志颜色（蓝=接收成功，黄=接收错误，绿=发送成功，红=发送失败）── */
 .log-content .log-rx-ok {
     color: #50b4ff;
 }
@@ -651,7 +668,7 @@ canvas {
     background: #3a3a3a;
 } */
 
-/* ── Send panel ── */
+/* ── 发送面板 ── */
 .send-panel {
     border-top: 1px solid #2a2a2a;
     background: #161616;
@@ -738,7 +755,7 @@ canvas {
     border-color: #555;
 }
 
-/* ── Scrollbars ── */
+/* ── 全局滚动条 ── */
 ::-webkit-scrollbar {
     width: 5px;
     height: 5px;

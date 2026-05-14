@@ -13,7 +13,7 @@
 <body>
     <div class="app-container">
 
-        <!-- ══ LEFT: Config Sidebar ══ -->
+        <!-- ══ 左侧：配置侧栏 ══ -->
         <aside class="sidebar" id="sidebar">
             <div class="app-title">
                 <span class="status-dot disconnected" id="connection-indicator"></span>
@@ -26,7 +26,7 @@
                 <button class="tab-btn" data-tab="tab-channels">通道</button>
             </div>
 
-            <!-- TAB: 通讯 -->
+            <!-- ── Tab: 通讯 ── -->
             <div class="tab-content active" id="tab-connection">
                 <div class="control-group">
                     <div class="section-title">通讯通道</div>
@@ -101,7 +101,7 @@
                 </div>
             </div>
 
-            <!-- TAB: 帧格式 -->
+            <!-- ── Tab: 帧格式 ── -->
             <div class="tab-content" id="tab-frame">
                 <div class="control-group">
                     <div class="section-title">帧首</div>
@@ -159,7 +159,7 @@
                 </div>
             </div>
 
-            <!-- TAB: 通道 -->
+            <!-- ── Tab: 通道 ── -->
             <div class="tab-content" id="tab-channels">
                 <div class="control-group">
                     <div class="section-title">画板与缓存</div>
@@ -222,9 +222,9 @@
         <!-- 水平分隔条：拖拽调整侧栏宽度，与垂直分隔条 v-resizer 共用交互模式 -->
         <div class="h-resizer" id="h-resizer"></div>
 
-        <!-- ══ RIGHT: Plot + Monitor ══ -->
+        <!-- ══ 右侧：波形 + 监视台 ══ -->
         <main class="main-display" id="main-display">
-            <!-- Plot -->
+            <!-- ── 波形绘图区 ── -->
             <div class="canvas-wrapper box-border" id="canvas-wrapper">
                 <div class="plot-header" id="plot-header">
                     <div class="plot-title-row">
@@ -252,9 +252,8 @@
             <!-- 垂直分隔条：拖拽调整波形区与监视台高度，与水平分隔条 h-resizer 共用交互模式 -->
             <div class="v-resizer" id="v-resizer"></div>
 
-            <!-- Monitor Panel -->
+            <!-- ── 字节流监视台 ── -->
             <div class="monitor-panel box-border" id="monitor-panel">
-                <!-- Title row -->
                 <div class="monitor-header">
                     <span>字节流监视台</span>
                 </div>
@@ -267,13 +266,13 @@
                     <span id="stat-fail">校验失败: 0%</span>
                 </div>
 
-                <!-- Scrollable log -->
+                <!-- 可滚动日志区 -->
                 <div id="data-log" class="log-content"></div>
 
-                <!-- Vertical drag handle -->
+                <!-- 日志/发送区分隔条（暂未启用） -->
                 <!-- <div class="v-resizer-inner" id="log-send-resizer"></div> -->
                 
-                <!-- Send Panel: always at bottom -->
+                <!-- 发送面板 -->
                 <div class="send-panel">
                     <div class="send-toolbar">
                         <select id="send-mode" title="发送格式">
