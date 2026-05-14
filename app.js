@@ -144,10 +144,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // —— 字节流监视台 ——
     const logContent = document.getElementById('data-log');
-    const statRx = document.getElementById('stat-rx');
-    const statTx = document.getElementById('stat-tx');
-    const statFps = document.getElementById('stat-fps');
-    const statFail = document.getElementById('stat-fail');
 
     // —— 发送面板 ——
     const sendModeSelect = document.getElementById('send-mode');
@@ -181,7 +177,11 @@ document.addEventListener('DOMContentLoaded', () => {
         framesPerSec: 0                    // 最新帧率
     };
 
-    // 定时刷新统计面板
+    /* 定时刷新字节流监视台统计面板
+     * 采用与波形监视台 renderPlotStats 相同的 innerHTML + fmtFixed 模式，
+     * 确保两个监视台的数值显示风格一致（等宽字体、右对齐）。 */
+    const statsBarRow = document.querySelector('.stats-bar-row');
+
     setInterval(() => {
         if (capturePaused) {
             // 暂停期间只同步基准值，避免恢复后出现瞬时峰值
@@ -199,10 +199,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
 
-        statRx.textContent = `RX: ${formatBytes(rxBps)}/s`;
-        statTx.textContent = `TX: ${formatBytes(txBps)}/s`;
-        statFps.textContent = `帧率: ${frames} f/s`;
-        statFail.textContent = `校验失败: ${failPct}%`;
+        // 使用 innerHTML 统一渲染，与波形监视台的 renderPlotStats 保持一致
+        statsBarRow.innerHTML = [
+            ['RX:', `${formatBytes(rxBps)}/s`],
+            ['TX:', `${formatBytes(txBps)}/s`],
+            ['帧率:', `${frames} f/s`],
+            ['校验失败:', `${failPct}%`]
+        ].map(([label, value]) => `<span>${label} ${value}</span>`).join('');
 
         stats._rxLast = stats.rxBytes;
         stats._txLast = stats.txBytes;
@@ -264,6 +267,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // —— 水平分隔条（侧栏 ↔ 主区域）——
     let hDragging = false, hStartX = 0, hStartW = 0;
 
+    /** 应用侧栏宽度并触发波形重绘，与 applyVerticalHeights 对应 */
+    const applySidebarWidth = (newW) => {
+        const w = Math.max(180, Math.min(500, newW));
+        sidebar.style.width = sidebar.style.minWidth = sidebar.style.maxWidth = w + 'px';
+        plotter.resize();
+    };
+
+    /* 窗口缩小时约束侧栏宽度不超出可用空间 */
+    window.addEventListener('resize', () => {
+        const maxW = mainDisplay.clientWidth - 100;
+        if (sidebar.offsetWidth > maxW) applySidebarWidth(maxW);
+    });
+
     hResizer.addEventListener('mousedown', (e) => {
         hDragging = true;
         hStartX = e.clientX;
@@ -275,9 +291,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.addEventListener('mousemove', (e) => {
         if (!hDragging) return;
-        const newW = Math.max(180, Math.min(500, hStartW + (e.clientX - hStartX)));
-        sidebar.style.width = sidebar.style.minWidth = sidebar.style.maxWidth = newW + 'px';
-        plotter.resize();
+        applySidebarWidth(hStartW + (e.clientX - hStartX));
     });
 
     document.addEventListener('mouseup', () => {
@@ -291,7 +305,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let vDragging = false, vStartY = 0, vStartH = 0;
     let canvasH = null;  // null 表示首次使用默认比例（62%）
 
-    /** 根据 canvasH 重新分配波形区和监视台的高度 */
+    /** 根据 canvasH 重新分配波形区和监视台的高度，与 applySidebarWidth 对应 */
     const applyVerticalHeights = () => {
         const totalH = mainDisplay.clientHeight;
         const vH = vResizer.offsetHeight;

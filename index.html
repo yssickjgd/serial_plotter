@@ -219,7 +219,7 @@
             </div>
         </aside>
 
-        <!-- ══ HORIZONTAL DRAG HANDLE ══ -->
+        <!-- 水平分隔条：拖拽调整侧栏宽度，与垂直分隔条 v-resizer 共用交互模式 -->
         <div class="h-resizer" id="h-resizer"></div>
 
         <!-- ══ RIGHT: Plot + Monitor ══ -->
@@ -231,6 +231,7 @@
                         <span class="plot-title">波形监视台</span>
                         <span class="plot-title-hint">右键绘图区重置缩放，单通道时显示通道统计信息，采样点为2的幂次为佳</span>
                     </div>
+                    <!-- 统计信息行：单通道时由 app.js 的 renderPlotStats 动态更新 -->
                     <div class="plot-info-row" id="plot-info-row">
                         <span id="stat-channel-label">通道: --</span>
                         <span id="stat-max">最大值: --</span>
@@ -248,7 +249,7 @@
                 </div>
             </div>
 
-            <!-- Vertical drag handle -->
+            <!-- 垂直分隔条：拖拽调整波形区与监视台高度，与水平分隔条 h-resizer 共用交互模式 -->
             <div class="v-resizer" id="v-resizer"></div>
 
             <!-- Monitor Panel -->
@@ -258,7 +259,7 @@
                     <span>字节流监视台</span>
                 </div>
 
-                <!-- Stats bar: always visible, separate row -->
+                <!-- 统计信息行：由 app.js 的 setInterval 定时更新，与波形监视台共用排版规范 -->
                 <div class="stats-bar-row">
                     <span id="stat-rx">RX: 0 B/s</span>
                     <span id="stat-tx">TX: 0 B/s</span>

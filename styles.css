@@ -63,7 +63,7 @@ body {
     flex-shrink: 0;
 }
 
-/* ── Horizontal resizer ── */
+/* ── 水平分隔条（侧栏 ↔ 主区域），与 .v-resizer 共用布局模式 ── */
 .h-resizer {
     width: var(--h-resizer-w);
     background: var(--border);
@@ -72,7 +72,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    position: relative;
+    position: relative;       /* 为 ::before 手柄指示器提供定位基准 */
     transition: background .15s;
 }
 
@@ -439,7 +439,7 @@ canvas {
     flex-shrink: 0;
     background: #151515;
     border-bottom: 1px solid #2b2b2b;
-    padding: 5px 10px 4px;
+    padding: 4px 10px;
 }
 
 .plot-title-row {
@@ -462,6 +462,7 @@ canvas {
     white-space: nowrap;
 }
 
+/* 统计信息行（波形监视台），与 .stats-bar-row 共用排版规范 */
 .plot-info-row {
     min-height: 18px;
     display: flex;
@@ -519,7 +520,7 @@ canvas {
     cursor: grabbing;
 }
 
-/* ── Vertical resizer (between plot & monitor) ── */
+/* ── 垂直分隔条（波形区 ↔ 监视台），与 .h-resizer 共用布局模式 ── */
 .v-resizer {
     height: 5px;
     background: var(--border);
@@ -528,6 +529,7 @@ canvas {
     display: flex;
     align-items: center;
     justify-content: center;
+    position: relative;       /* 为 ::before 手柄指示器提供定位基准 */
     transition: background .15s;
 }
 
@@ -565,15 +567,23 @@ canvas {
     flex-shrink: 0;
 }
 
-/* Stats bar sits between header and log, always visible */
+/* ── 统计信息栏（波形监视台 .plot-info-row 与字节流监视台 .stats-bar-row 共用样式） ── */
 .stats-bar-row {
     display: flex;
-    gap: 8px;
-    background: #141414;
-    padding: 3px 10px;
-    border-bottom: 1px solid #2a2a2a;
-    flex-shrink: 0;
     flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    min-height: 18px;
+    background: #151515;
+    padding: 4px 10px;
+    border-bottom: 1px solid #2b2b2b;
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    color: #ffffff;
+    white-space: nowrap;
+    overflow: hidden;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-variant-numeric: tabular-nums;
 }
 
 .stats-bar-row span {
