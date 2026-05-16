@@ -6,6 +6,7 @@
   "serialParity": "none",
   "netHost": "127.0.0.1",
   "netPort": "8081",
+  "netLocalPort": "",
   "enableHeader": false,
   "headerHex": "AB",
   "enableFooter": true,
@@ -16,15 +17,18 @@
   "channelsCount": "23",
   "maxPoints": "5000",
   "sendIntervalUnit": "ms",
-  "plotViewMode": "time",
+  "plotViewMode": "frequency",
   "plotYScaleMode": "auto",
-  "plotYMin": "-1",
-  "plotYMax": "1",
+  "plotFftRemoveDc": true,
+  "plotYMinTime": "-1",
+  "plotYMaxTime": "1",
+  "plotYMinFreq": "-1",
+  "plotYMaxFreq": "1",
   "channels": [
     {
       "name": "acc_x",
       "color": "#ff0000",
-      "visible": false
+      "visible": true
     },
     {
       "name": "acc_y",
