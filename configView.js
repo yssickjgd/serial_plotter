@@ -1,0 +1,46 @@
+const CONFIG_VALUE_FIELDS = [
+    'serialBaud', 'serialData', 'serialStop', 'serialParity',
+    'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
+    'dataType', 'endianness', 'channelsCount', 'maxPoints',
+    'sendIntervalUnit', 'plotViewMode', 'plotYScaleMode'
+];
+const CONFIG_CHECK_FIELDS = ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc'];
+
+function collectConfigFromView(elements, bounds, channelMeta) {
+    const config = { connType: elements.connType.value };
+    for (const key of CONFIG_VALUE_FIELDS) config[key] = elements[key].value;
+    for (const key of CONFIG_CHECK_FIELDS) config[key] = elements[key].checked;
+    Object.assign(config, {
+        plotYMinTime: bounds.time.min, plotYMaxTime: bounds.time.max,
+        plotYMinFreq: bounds.frequency.min, plotYMaxFreq: bounds.frequency.max,
+        channels: channelMeta.map(({ name, color, visible }) => ({ name, color, visible }))
+    });
+    return config;
+}
+
+function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
+    updateFrameFormat, updateChannels, updatePlot }) {
+    elements.connType.value = config.connType || 'serial';
+    updateConnectionModeUI();
+    for (const key of CONFIG_VALUE_FIELDS) {
+        if (config[key] !== undefined) elements[key].value = config[key];
+    }
+    for (const key of CONFIG_CHECK_FIELDS) {
+        if (config[key] !== undefined) elements[key].checked = config[key];
+    }
+    const mode = elements.plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+    elements.wrapFftRemoveDc.style.display = mode === 'frequency' ? '' : 'none';
+    bounds.time.min = config.plotYMinTime ?? config.plotYMin ?? '-1';
+    bounds.time.max = config.plotYMaxTime ?? config.plotYMax ?? '1';
+    bounds.frequency.min = config.plotYMinFreq ?? '-1';
+    bounds.frequency.max = config.plotYMaxFreq ?? '1';
+    elements.plotYMin.value = bounds[mode].min;
+    elements.plotYMax.value = bounds[mode].max;
+    updateFrameFormat();
+    updateChannels(config.channels);
+    updatePlot();
+}
+
+globalThis.SerialPlotter ??= {};
+Object.assign(globalThis.SerialPlotter, { collectConfigFromView, applyConfigToView });
+if (typeof module !== 'undefined') module.exports = { collectConfigFromView, applyConfigToView };

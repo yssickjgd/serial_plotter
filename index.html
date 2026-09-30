@@ -165,7 +165,7 @@
                     <div class="section-title">画板与缓存</div>
                     <div class="input-group">
                         <label>最大采样点数</label>
-                        <input type="number" step="100" id="max-points" value="1000" />
+                    <input type="number" step="100" min="2" max="100000" id="max-points" value="1000" />
                     </div>
                     <div class="row">
                         <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
@@ -268,7 +268,7 @@
                     <span id="stat-fail">校验失败: 0%</span>
                 </div>
 
-                <!-- 可滚动日志区 -->
+                <!-- 可滚动的窗口原始帧记录；只渲染可见行 -->
                 <div id="data-log" class="log-content"></div>
 
                 <!-- 日志/发送区分隔条（暂未启用） -->
@@ -300,10 +300,21 @@
         </main>
     </div>
 
+    <script src="projectLimits.js"></script>
+    <script src="byteUtils.js"></script>
+    <script src="frameBuffer.js"></script>
+    <script src="plotMath.js"></script>
+    <script src="csvExport.js"></script>
+    <script src="spectrum.js"></script>
+    <script src="monitorView.js"></script>
+    <script src="configValidation.js"></script>
+    <script src="configView.js"></script>
+    <script src="configStore.js"></script>
     <script src="plotter.js"></script>
     <script src="dataParser.js"></script>
     <script src="serialEngine.js"></script>
     <script src="netEngine.js"></script>
+    <script src="sendController.js"></script>
     <script src="app.js"></script>
 </body>
 

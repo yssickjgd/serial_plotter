@@ -1,26 +1,34 @@
 /* ═══════════════════════════════════════════════════════════════
  *  plotter.js — 波形绘图引擎
  *
- *  职责：Canvas 绘制、通道管理、视口缩放/平移、FFT 频谱分析、
- *        十字光标交互、滚动条、统计信息汇总与 CSV 导出。
+ *  职责：Canvas 绘制、通道管理、视口缩放/平移、频谱展示、
+ *        十字光标交互、滚动条与统计信息汇总。
  *
  *  代码结构：
  *    1. 构造函数（画布初始化、事件绑定、滚动条初始化）
  *    2. Resize（画布尺寸自适应）
  *    3. 通道管理（增删、颜色、可见性、名称）
  *    4. 数据与视口（addFrame、clear、pause、maxPoints）
- *    5. FFT & 统计分析（_nextPow2、_fftInPlace、_prepareFrequencySeries、_buildSummary）
- *    6. 交互事件（滚轮缩放、十字光标、滚动条拖拽）
+ *    5. 频谱缓存与统计分析（FFT 实现在 spectrum.js）
+ *    6. 交互事件（滚轮缩放、矩形框选、十字光标、滚动条拖拽）
  *    7. 渲染（renderLoop、draw、_drawCrosshair）
  * ═══════════════════════════════════════════════════════════════ */
 
 class Plotter {
     /** 初始化画布、通道数组、视口状态、事件监听与滚动条 */
-    constructor(canvasId) {
+    constructor(canvasId, frames) {
         this.canvas = document.getElementById(canvasId);
         this.ctx    = this.canvas.getContext('2d');
+        this.fontFamily = typeof getComputedStyle === 'function'
+            ? getComputedStyle(this.canvas).fontFamily : 'Consolas, monospace';
 
-        this.channels = []; // { data[], color, visible, name }
+        this.channels = []; // display metadata; samples live in FrameBuffer
+        this.frames = frames;
+        this._fftCache = new Map();
+        this._fftVersion = -1;
+        this._fftAt = 0;
+        this._lastDraw = 0;
+        this._dirty = true;
         this.defaultColors = [
             '#00FF7F','#FF4DC4','#00CFFF','#FFE040',
             '#FF6B35','#4FC3F7','#CE93D8','#A5D6A7',
@@ -35,6 +43,9 @@ class Plotter {
         this.yScaleMode   = 'auto';
         this.removeDcForFft = false;
         this.onStatsUpdate = null;
+        this._drawState = null;
+        this._selection = null;
+        this._boxZoomY = { time: null, frequency: null };
 
         // 视口状态（时域/频域独立，通过 _vp getter 访问当前模式）
         this.vp = {
@@ -63,13 +74,20 @@ class Plotter {
 
         // Canvas events
         this.canvas.addEventListener('wheel',       (e) => this._onWheel(e), { passive: false });
-        this.canvas.addEventListener('mousemove',   (e) => this._onMouseMove(e));
-        this.canvas.addEventListener('mouseleave',  ()  => this._onMouseLeave());
+        this.canvas.addEventListener('pointerdown', e => this._onPointerDown(e));
+        this.canvas.addEventListener('pointermove', e => this._onPointerMove(e));
+        this.canvas.addEventListener('pointerup', e => this._onPointerUp(e));
+        this.canvas.addEventListener('pointercancel', e => this._onPointerCancel(e));
+        this.canvas.addEventListener('lostpointercapture', e => this._onPointerCancel(e));
+        this.canvas.addEventListener('pointerleave', () => this._onMouseLeave());
         this.canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
+            this._selection = null;
+            this._dirty = true;
             this._vp.displayCount = this.maxPoints;
             this._vp.autoFollow   = true;
             this._clampScroll();
+            this._boxZoomY[this.displayMode] = null;
             if (this.isPaused) this.draw();
         });
 
@@ -87,6 +105,10 @@ class Plotter {
     /* ── Resize ── */
     /** 根据父容器尺寸重置画布宽高，并刷新滚动条 */
     resize() {
+        if (this._selection)
+            this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
+        this._selection = null;
+        this._dirty = true;
         const rect = this.canvas.parentElement.getBoundingClientRect();
         const sbH  = this.scrollbarWrap ? this.scrollbarWrap.offsetHeight : 12;
         const headH = this.plotHeader ? this.plotHeader.offsetHeight : 0;
@@ -99,10 +121,11 @@ class Plotter {
     /* ── 通道管理 ── */
     /** 调整通道数量，不足时按默认色板补全，超出时裁剪 */
     setChannelCount(count) {
+        this.frames.setChannelCount(count);
+        this._cachedScrollTotal = 0;
         while (this.channels.length < count) {
             const idx = this.channels.length;
             this.channels.push({
-                data:    [],
                 color:   this.defaultColors[idx % this.defaultColors.length],
                 visible: false,
                 name:    `CH${idx + 1}`
@@ -110,6 +133,7 @@ class Plotter {
         }
         while (this.channels.length > count) this.channels.pop();
         this._clampScroll();
+        this._dirty = true;
         this._updateScrollbar();
         if (this.isPaused) this.draw();
     }
@@ -122,27 +146,54 @@ class Plotter {
     }
 
     /** 设置指定通道的绘制颜色 */
-    setChannelColor(index, color)     { if (this.channels[index]) this.channels[index].color   = color; }
+    setChannelColor(index, color)     { if (this.channels[index]) { this.channels[index].color = color; this._dirty = true; } }
     /** 设置指定通道的可见性，隐藏时跳过绘制 */
     setChannelVisible(index, visible) {
         if (this.channels[index]) {
             this.channels[index].visible = visible;
+            this._fftVersion = -1;
+            this._dirty = true;
             this._clampScroll();
             this._updateScrollbar();
             this.draw();
         }
     }
     /** 设置指定通道的显示名称 */
-    setChannelName(index, name)       { if (this.channels[index]) this.channels[index].name    = name; }
+    setChannelName(index, name)       { if (this.channels[index]) { this.channels[index].name = name; this._dirty = true; } }
     /** 批量设置所有通道的可见性 */
     setAllChannelsVisible(visible) {
         this.channels.forEach(ch => { ch.visible = visible; });
+        this._fftVersion = -1;
+        this._dirty = true;
+        this._clampScroll();
+        this._updateScrollbar();
+        this.draw();
+    }
+
+    /** Apply imported channel settings with one cache reset and one draw. */
+    setChannelSettings(settings) {
+        settings.forEach((setting, index) => {
+            const channel = this.channels[index];
+            if (!channel) return;
+            if (setting.color !== undefined) channel.color = setting.color;
+            channel.visible = setting.visible !== false;
+            channel.name = setting.name || `CH${index + 1}`;
+        });
+        this._fftVersion = -1;
+        this._dirty = true;
         this._clampScroll();
         this._updateScrollbar();
         this.draw();
     }
     /** 应用绘图显示选项（时域/频域、Y 轴策略、去直流、Y 轴范围等） */
     setDisplayOptions(opts = {}) {
+        const oldMode = this.displayMode;
+        const oldDc = this.removeDcForFft;
+        const oldScale = this.yScaleMode;
+        const oldBounds = {
+            time: { ...this.yBounds.time },
+            frequency: { ...this.yBounds.frequency }
+        };
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
         if (opts.removeDcForFft !== undefined) this.removeDcForFft = !!opts.removeDcForFft;
@@ -150,29 +201,43 @@ class Plotter {
         if (opts.yMaxTime !== undefined && opts.yMaxTime !== '') this.yBounds.time.max = parseFloat(opts.yMaxTime);
         if (opts.yMinFreq !== undefined && opts.yMinFreq !== '') this.yBounds.frequency.min = parseFloat(opts.yMinFreq);
         if (opts.yMaxFreq !== undefined && opts.yMaxFreq !== '') this.yBounds.frequency.max = parseFloat(opts.yMaxFreq);
+        if (oldMode !== this.displayMode && this._selection) {
+            this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
+            this._selection = null;
+        }
+        if (oldScale !== this.yScaleMode) {
+            this._boxZoomY.time = null;
+            this._boxZoomY.frequency = null;
+        }
+        for (const mode of ['time', 'frequency']) {
+            if (oldBounds[mode].min !== this.yBounds[mode].min ||
+                oldBounds[mode].max !== this.yBounds[mode].max)
+                this._boxZoomY[mode] = null;
+        }
+        if (oldMode !== this.displayMode || oldDc !== this.removeDcForFft) this._fftVersion = -1;
+        this._dirty = true;
         if (this.isPaused) this.draw();
     }
 
     /** 追加一帧数据到各通道缓冲区，超出 maxPoints 时自动丢弃最早数据 */
-    addFrame(valuesArray) {
+    addFrame(valuesArray, frameBytes, timeStr, order) {
         if (this.isPaused) return;
-        for (let i = 0; i < valuesArray.length; i++) {
-            if (this.channels[i]) {
-                this.channels[i].data.push(valuesArray[i]);
-                if (this.channels[i].data.length > this.maxPoints)
-                    this.channels[i].data.shift();
-            }
-        }
+        this.frames.append(valuesArray, frameBytes, timeStr, order);
         if (this._vp.autoFollow) {
             const total = this._scrollTotal();
             this._vp.scrollOffset = Math.max(0, total - this._vp.displayCount);
         }
-        this._updateScrollbar();
+        this._dirty = true;
     }
 
     /** 清空所有通道数据，重置时域/频域视口到跟随模式 */
     clear() {
-        for (const ch of this.channels) ch.data = [];
+        this._selection = null;
+        this._boxZoomY.time = null;
+        this._boxZoomY.frequency = null;
+        this.frames.clear();
+        this._fftVersion = -1;
+        this._cachedScrollTotal = 0;
         for (const mode of ['time', 'frequency']) {
             this.vp[mode].scrollOffset = 0;
             this.vp[mode].autoFollow = true;
@@ -185,85 +250,17 @@ class Plotter {
 
     /** 设置每个通道的最大采样点数 */
     setMaxPoints(size) {
+        this.frames.resize(size);
+        this._cachedScrollTotal = 0;
         this.maxPoints = size;
         for (const mode of ['time', 'frequency']) {
             this.vp[mode].displayCount = Math.min(this.vp[mode].displayCount, size);
         }
+        this._clampScroll();
+        this._dirty = true;
     }
 
     /* ── FFT & 统计分析 ── */
-
-    /** 返回不小于 n 的最小 2 的幂（FFT 要求输入长度为 2 的幂） */
-    _nextPow2(n) {
-        let p = 1;
-        while (p < n) p <<= 1;
-        return p;
-    }
-
-    /** 原地 Cooley-Tukey FFT（蝶形运算），re/im 为实部/虚部数组，长度须为 2 的幂 */
-    _fftInPlace(re, im) {
-        const n = re.length;
-        for (let i = 1, j = 0; i < n; i++) {
-            let bit = n >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) {
-                [re[i], re[j]] = [re[j], re[i]];
-                [im[i], im[j]] = [im[j], im[i]];
-            }
-        }
-        for (let len = 2; len <= n; len <<= 1) {
-            const ang = -2 * Math.PI / len;
-            const wLenRe = Math.cos(ang);
-            const wLenIm = Math.sin(ang);
-            for (let i = 0; i < n; i += len) {
-                let wRe = 1, wIm = 0;
-                for (let j = 0; j < len / 2; j++) {
-                    const uRe = re[i + j], uIm = im[i + j];
-                    const vRe = re[i + j + len / 2] * wRe - im[i + j + len / 2] * wIm;
-                    const vIm = re[i + j + len / 2] * wIm + im[i + j + len / 2] * wRe;
-                    re[i + j] = uRe + vRe;
-                    im[i + j] = uIm + vIm;
-                    re[i + j + len / 2] = uRe - vRe;
-                    im[i + j + len / 2] = uIm - vIm;
-                    const nextWRe = wRe * wLenRe - wIm * wLenIm;
-                    wIm = wRe * wLenIm + wIm * wLenRe;
-                    wRe = nextWRe;
-                }
-            }
-        }
-    }
-
-    /** Hann 窗加窗后执行 FFT，返回幅度谱 { mags, dominantBin, fftSize } */
-    _prepareFrequencySeries(values) {
-        if (values.length < 2) return { mags: [], dominantBin: 0, fftSize: 0 };
-        const fftSize = this._nextPow2(values.length);
-        const re = new Array(fftSize).fill(0);
-        const im = new Array(fftSize).fill(0);
-        let mean = 0;
-        if (this.removeDcForFft) {
-            for (let i = 0; i < values.length; i++) mean += values[i];
-            mean /= values.length;
-        }
-        for (let i = 0; i < values.length; i++) {
-            const window = values.length > 1 ? (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (values.length - 1))) : 1;
-            re[i] = ((this.removeDcForFft ? (values[i] - mean) : values[i])) * window;
-        }
-        this._fftInPlace(re, im);
-        const half = Math.max(1, fftSize >> 1);
-        const mags = [];
-        let dominantBin = 1;
-        let dominantMag = -Infinity;
-        for (let i = 0; i <= half; i++) {
-            const mag = Math.hypot(re[i], im[i]) / fftSize;
-            mags.push(mag);
-            if (i > 0 && mag > dominantMag) {
-                dominantMag = mag;
-                dominantBin = i;
-            }
-        }
-        return { mags, dominantBin, fftSize };
-    }
 
     /**
      * 汇总单通道的统计信息，多通道返回 null。
@@ -279,22 +276,26 @@ class Plotter {
         if (!values || values.length === 0) return null;
 
         // 基本统计：基于视口窗口数据
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const pp = max - min;
+        let min = Infinity, max = -Infinity;
         let sum = 0;
         let sumSq = 0;
+        let validCount = 0;
         for (const v of values) {
+            if (!Number.isFinite(v)) continue;
+            min = Math.min(min, v);
+            max = Math.max(max, v);
             sum += v;
             sumSq += v * v;
+            validCount++;
         }
-        const mean = sum / values.length;
-        const variance = Math.max(0, sumSq / values.length - mean * mean);
+        if (!validCount) return null;
+        const pp = max - min;
+        const mean = sum / validCount;
+        const variance = Math.max(0, sumSq / validCount - mean * mean);
         const stdDev = Math.sqrt(variance);
 
         // 主频/主周期：始终基于全量数据（FFT 输入不随视口滚动而变化）
-        const fullData = series.ch.data;
-        const freqSeries = this._prepareFrequencySeries(fullData);
+        const freqSeries = this._frequencyForChannel(series.channelIndex);
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
@@ -316,13 +317,25 @@ class Plotter {
 
     /** 对所有可见通道的全量数据执行 FFT（结果缓存在 Map 中供 draw 复用） */
     _computeFftForVisibleChannels() {
+        const now = performance.now();
+        if (this._fftVersion === this.frames.version ||
+            (this._fftVersion >= 0 && !this.isPaused && now - this._fftAt < 250)) return this._fftCache;
         const results = new Map();
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
-            if (!ch.visible || ch.data.length === 0) continue;
-            results.set(idx, this._prepareFrequencySeries(ch.data));
+            if (!ch.visible || this.frames.length === 0) continue;
+            results.set(idx, globalThis.SerialPlotter.prepareFrequencySeries(
+                this.frames.channelSlice(idx), this.removeDcForFft));
         }
+        this._fftCache = results;
+        this._fftVersion = this.frames.version;
+        this._fftAt = now;
         return results;
+    }
+
+    _frequencyForChannel(index) {
+        const results = this._computeFftForVisibleChannels();
+        return results.get(index) || { mags: [], dominantBin: 0, fftSize: 0 };
     }
 
     /**
@@ -334,7 +347,7 @@ class Plotter {
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
-            if (!ch.visible || ch.data.length === 0) continue;
+            if (!ch.visible || this.frames.length === 0) continue;
             if (this.displayMode === 'frequency') {
                 const freq = fftResults.get(idx);
                 if (!freq || freq.mags.length === 0) continue;
@@ -343,13 +356,13 @@ class Plotter {
                 if (mags.length === 0) continue;
                 series.push({
                     channelIndex: idx, ch,
-                    rawValues: ch.data,
+                    rawValues: this.frames.channelSlice(idx),
                     mags,
                     dominantBin: freq.dominantBin,
                     fftSize: freq.fftSize
                 });
             } else {
-                const rawValues = ch.data.slice(startIdx, actualEnd);
+                const rawValues = this.frames.channelSlice(idx, startIdx, actualEnd);
                 if (rawValues.length === 0) continue;
                 series.push({ channelIndex: idx, ch, rawValues, mags: rawValues, dominantBin: 0, fftSize: rawValues.length });
             }
@@ -357,23 +370,12 @@ class Plotter {
         return series;
     }
 
-    /** 将所有通道数据导出为 CSV 字符串（含表头），无数据时返回 null */
-    exportCSV() {
-        if (!this.channels.length || !this.channels[0].data.length) return null;
-        let csv = ['Index', ...this.channels.map(ch => ch.name)].join(',') + '\r\n';
-        const rows = this.channels[0].data.length;
-        for (let r = 0; r < rows; r++) {
-            const row = [r, ...this.channels.map(ch => ch.data[r] !== undefined ? ch.data[r] : '')];
-            csv += row.join(',') + '\r\n';
-        }
-        return csv;
-    }
-
     /* ── 交互事件 ── */
 
     /** 鼠标滚轮缩放：以鼠标位置为锚点缩放当前模式的视口，factor 0.8/1.25 */
     _onWheel(e) {
         e.preventDefault();
+        this._dirty = true;
         const total = this._scrollTotal();
         if (total < 2) return;
 
@@ -393,22 +395,94 @@ class Plotter {
         if (this.isPaused) this.draw();
     }
 
-    /** 记录鼠标位置用于十字光标绘制 */
-    _onMouseMove(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    _onMouseLeave() {
+        this._dirty = true;
+        this.mousePos = null;
         if (this.isPaused) this.draw();
     }
 
-    _onMouseLeave() {
+    _pointFromPointer(event) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: (event.clientX - rect.left) * this.canvas.width / rect.width,
+            y: (event.clientY - rect.top) * this.canvas.height / rect.height
+        };
+    }
+
+    _onPointerDown(event) {
+        if (event.button !== 0 || !this._drawState) return;
+        const point = this._pointFromPointer(event);
+        const { plotW, plotH } = this._drawState;
+        if (point.x < 0 || point.x > plotW || point.y < 0 || point.y > plotH) return;
+        event.preventDefault();
+        this._selection = {
+            pointerId: event.pointerId, mode: this.displayMode,
+            autoFollow: this._vp.autoFollow,
+            x0: point.x, y0: point.y, x1: point.x, y1: point.y
+        };
+        this._vp.autoFollow = false;
         this.mousePos = null;
+        if (this.canvas.setPointerCapture) this.canvas.setPointerCapture(event.pointerId);
+        this._dirty = true;
+        if (this.isPaused) this.draw();
+    }
+
+    _onPointerMove(event) {
+        const point = this._pointFromPointer(event);
+        if (this._selection) {
+            if (event.pointerId !== this._selection.pointerId) return;
+            const { plotW, plotH } = this._drawState;
+            this._selection.x1 = Math.max(0, Math.min(plotW, point.x));
+            this._selection.y1 = Math.max(0, Math.min(plotH, point.y));
+            this.mousePos = null;
+        } else {
+            this.mousePos = point;
+        }
+        this._dirty = true;
+        if (this.isPaused) this.draw();
+    }
+
+    _onPointerUp(event) {
+        const selection = this._selection;
+        if (!selection || event.pointerId !== selection.pointerId) return;
+        this._onPointerMove(event);
+        this._selection = null;
+        if (this.canvas.releasePointerCapture &&
+            (!this.canvas.hasPointerCapture || this.canvas.hasPointerCapture(event.pointerId)))
+            this.canvas.releasePointerCapture(event.pointerId);
+        const state = this._drawState;
+        const zoom = state && selection.mode === this.displayMode
+            ? globalThis.SerialPlotter.zoomRectToBounds({
+                ...selection, plotWidth: state.plotW, plotHeight: state.plotH,
+                startIndex: state.startIdx, visibleCount: state.visibleCnt,
+                min: state.min, max: state.max
+            }) : null;
+        if (zoom) {
+            this._vp.scrollOffset = zoom.scrollOffset;
+            this._vp.displayCount = zoom.displayCount;
+            this._clampScroll();
+            this._vp.autoFollow = false;
+            this._boxZoomY[this.displayMode] = { min: zoom.yMin, max: zoom.yMax };
+        } else if (selection.mode === this.displayMode) {
+            this._vp.autoFollow = selection.autoFollow;
+        }
+        this._dirty = true;
+        this.draw();
+    }
+
+    _onPointerCancel(event) {
+        if (!this._selection || event.pointerId !== this._selection.pointerId) return;
+        if (this._selection.mode === this.displayMode)
+            this._vp.autoFollow = this._selection.autoFollow;
+        this._selection = null;
+        this._dirty = true;
         if (this.isPaused) this.draw();
     }
 
     /* ── 滚动条 ── */
 
     /** 返回所有通道中的最大数据长度 */
-    _total() { return this.channels.reduce((m, ch) => Math.max(m, ch.data.length), 0); }
+    _total() { return this.frames.length; }
 
     /** 返回当前模式下可滚动的总范围（频域模式为 fftSize/2，时域模式为数据长度） */
     _scrollTotal() {
@@ -434,6 +508,7 @@ class Plotter {
         });
         document.addEventListener('mousemove', (e) => {
             if (!dragging) return;
+            this._dirty = true;
             const wrapW  = this.scrollbarWrap.clientWidth;
             const thumbW = this.scrollbarThumb.offsetWidth;
             const dx     = e.clientX - dragStartX;
@@ -447,6 +522,7 @@ class Plotter {
 
         this.scrollbarWrap.addEventListener('click', (e) => {
             if (e.target === this.scrollbarThumb) return;
+            this._dirty = true;
             const rect  = this.scrollbarWrap.getBoundingClientRect();
             const ratio = (e.clientX - rect.left) / rect.width;
             const total = this._scrollTotal();
@@ -475,12 +551,19 @@ class Plotter {
 
     /** requestAnimationFrame 循环，非暂停状态下持续重绘 */
     renderLoop() {
-        if (!this.isPaused) this.draw();
+        const now = performance.now();
+        if (!this.isPaused && this._dirty && now - this._lastDraw >= 1000 / 30) {
+            this._lastDraw = now;
+            this._dirty = false;
+            this.draw();
+        }
         requestAnimationFrame(() => this.renderLoop());
     }
 
     /** 主绘制方法：背景 → 网格 → 坐标轴 → 波形 → 十字光标 */
     draw() {
+        this._drawState = null;
+        this._updateScrollbar();
         const W = this.canvas.width, H = this.canvas.height;
         const plotW = W - this.pX, plotH = H - this.pY;
 
@@ -513,6 +596,7 @@ class Plotter {
                 .reduce((m, r) => Math.max(m, Math.floor((r.fftSize || 2) / 2)), 0);
             if (maxFftBins > 1) scrollTotal = maxFftBins;
             this._cachedScrollTotal = scrollTotal;
+            this._updateScrollbar();
         }
 
         let startIdx    = Math.max(0, Math.floor(this._vp.scrollOffset));
@@ -532,23 +616,30 @@ class Plotter {
         this._emitStats(summaryText);
 
         let min, max, bounded;
-        if (this.yScaleMode === 'manual' && Number.isFinite(this._yBounds.min) && Number.isFinite(this._yBounds.max) && this._yBounds.max !== this._yBounds.min) {
+        const zoomY = this._boxZoomY[this.displayMode];
+        if (zoomY) {
+            min = zoomY.min;
+            max = zoomY.max;
+        } else if (this.yScaleMode === 'manual' && Number.isFinite(this._yBounds.min) && Number.isFinite(this._yBounds.max) && this._yBounds.max !== this._yBounds.min) {
             min = Math.min(this._yBounds.min, this._yBounds.max);
             max = Math.max(this._yBounds.min, this._yBounds.max);
         } else {
-            const allVals = [];
-            for (const item of series) allVals.push(...item.mags);
-            min = Math.min(...allVals);
-            max = Math.max(...allVals);
+            min = Infinity;
+            max = -Infinity;
+            for (const item of series) for (const value of item.mags) {
+                if (Number.isFinite(value)) { min = Math.min(min, value); max = Math.max(max, value); }
+            }
+            if (!Number.isFinite(min) || !Number.isFinite(max)) { min = -1; max = 1; }
             if (max === min) { max += 1; min -= 1; }
             const pad = (max - min) * 0.08;
             min -= pad; max += pad;
         }
         bounded = max - min;
         const axisMaxIndex = Math.max(1, visibleCnt);
+        this._drawState = { plotW, plotH, startIdx, visibleCnt, min, max };
 
         // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
-        this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = '10px Consolas,monospace';
+        this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = `10px ${this.fontFamily}`;
         this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
         for (let i = 0; i <= 8; i++) {
             const py = plotH - (i/8) * plotH;
@@ -590,25 +681,47 @@ class Plotter {
                 if (!vals || vals.length === 0) continue;
                 this.ctx.strokeStyle = item.ch.color; this.ctx.lineWidth = 1.2;
                 this.ctx.beginPath();
-                for (let i = 0; i < vals.length; i++) {
-                    const x = i * stepX;
-                    const y = plotH - ((vals[i] - min) / bounded) * plotH;
+                const points = globalThis.SerialPlotter.bucketExtrema(vals, plotW);
+                for (let i = 0; i < points.length; i++) {
+                    const x = points[i].index * stepX;
+                    const y = plotH - ((points[i].value - min) / bounded) * plotH;
                     if (i === 0) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
                 }
                 this.ctx.stroke();
-                this.ctx.fillStyle = item.ch.color;
-                for (let i = 0; i < vals.length; i++) {
-                    const x = i * stepX;
-                    const y = plotH - ((vals[i] - min) / bounded) * plotH;
-                    this.ctx.fillRect(x-1.5, y-1.5, 3, 3);
+                if (vals.length <= plotW) {
+                    this.ctx.fillStyle = item.ch.color;
+                    for (let i = 0; i < vals.length; i++) {
+                        if (!Number.isFinite(vals[i])) continue;
+                        const x = i * stepX;
+                        const y = plotH - ((vals[i] - min) / bounded) * plotH;
+                        this.ctx.fillRect(x-1.5, y-1.5, 3, 3);
+                    }
                 }
             }
         }
 
         // —— 十字光标 ——
-        if (this.mousePos) {
+        if (this._selection) {
+            this._drawSelection(plotW, plotH);
+        } else if (this.mousePos) {
             this._drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total, series);
         }
+    }
+
+    _drawSelection(plotW, plotH) {
+        const { x0, y0, x1, y1 } = this._selection;
+        const left = Math.max(0, Math.min(plotW, Math.min(x0, x1)));
+        const top = Math.max(0, Math.min(plotH, Math.min(y0, y1)));
+        const width = Math.max(0, Math.min(plotW, Math.max(x0, x1)) - left);
+        const height = Math.max(0, Math.min(plotH, Math.max(y0, y1)) - top);
+        this.ctx.save();
+        this.ctx.fillStyle = 'rgba(77, 163, 255, 0.18)';
+        this.ctx.strokeStyle = '#8ac4ff';
+        this.ctx.lineWidth = 1;
+        this.ctx.setLineDash([5, 3]);
+        this.ctx.fillRect(left, top, width, height);
+        this.ctx.strokeRect(left, top, width, height);
+        this.ctx.restore();
     }
 
     _drawCrosshair(plotW, plotH, min, bounded, startIdx, visibleCnt, axisMaxIndex, total, series) {
@@ -638,7 +751,7 @@ class Plotter {
         const tipLines = this.displayMode === 'frequency'
             ? [`Bin: ${startIdx + xIdx}`, `Mag: ${yVal.toFixed(6)}`]
             : [`X: ${Math.min(total - 1, startIdx + xIdx)}`, `Y: ${yVal.toFixed(6)}`];
-        ctx.font = '12px Consolas,monospace';
+        ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;
         const tw = Math.max(120, ...tipLines.map(l => ctx.measureText(l).width + tipPad*2));
         const th = tipLines.length * lineH + tipPad;
@@ -658,7 +771,7 @@ class Plotter {
         // 构建 channelIndex → series item 的查找表
         const seriesMap = new Map(series.map(s => [s.channelIndex, s]));
         for (const ch of this.channels) {
-            if (!ch.visible || ch.data.length === 0) continue;
+            if (!ch.visible || this.frames.length === 0) continue;
             const idx = this.channels.indexOf(ch);
             let val = 0;
             if (this.displayMode === 'frequency') {
@@ -668,10 +781,11 @@ class Plotter {
                 const iLow  = startIdx + Math.floor(fIdx);
                 const iHigh = startIdx + Math.ceil(fIdx);
                 const t     = fIdx - Math.floor(fIdx);
-                const vLow  = ch.data[iLow]  !== undefined ? ch.data[iLow]  : 0;
-                const vHigh = ch.data[iHigh] !== undefined ? ch.data[iHigh] : vLow;
+                const vLow  = this.frames.getValue(idx, iLow) ?? 0;
+                const vHigh = this.frames.getValue(idx, iHigh) ?? vLow;
                 val = vLow + t * (vHigh - vLow);
             }
+            if (!Number.isFinite(val)) continue;
             const origY = plotH - ((val - min) / bounded) * plotH;
             labels.push({ ch, val, origY, labelY: origY });
         }
@@ -695,7 +809,7 @@ class Plotter {
         }
 
         // Determine label column: right of crosshair, or left if near right edge
-        ctx.font = '11px Consolas,monospace';
+        ctx.font = `11px ${this.fontFamily}`;
         const sampleLbl = labels.length > 0 ? `${labels[0].ch.name}: ${labels[0].val.toFixed(6)}` : '';
         const LW = ctx.measureText(sampleLbl).width + 16;
         const labelX = (mx + 8 + LW < plotW) ? mx + 8 : mx - LW - 8;
@@ -709,7 +823,7 @@ class Plotter {
 
             // Value label box
             const lbl = `${item.ch.name}: ${item.val.toFixed(6)}`;
-            ctx.font   = '11px Consolas,monospace';
+            ctx.font   = `11px ${this.fontFamily}`;
             const lw   = ctx.measureText(lbl).width + 10;
             const lh   = 16;
             const lx   = labelX;
@@ -724,3 +838,6 @@ class Plotter {
         }
     }
 }
+
+globalThis.SerialPlotter ??= {};
+globalThis.SerialPlotter.Plotter = Plotter;

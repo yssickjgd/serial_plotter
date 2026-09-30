@@ -1,8 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════
  *  app.js — 应用主控制器
  *
- *  职责：将各独立模块（SerialEngine、NetEngine、DataParser、Plotter）
- *        组装为完整应用，处理所有 UI 事件与业务逻辑。
+ *  职责：装配通信、解析、数据缓冲和视图，处理页面交互。
  *
  *  代码结构：
  *    1. 工具函数（纯函数，无副作用）
@@ -14,16 +13,19 @@
  *    7. 连接类型切换
  *    8. 帧格式配置
  *    9. 通道配置 UI
- *   10. 配置持久化（localStorage + JSON 文件导入导出）
+ *   10. 配置控制器的装配及 JSON 文件导入导出
  *   11. 数据路由 & 解析器回调
  *   12. 连接管理（串口 / 网络）
  *   13. 工具栏（暂停、清空、导出 CSV）
- *   14. 发送面板（Hex/Text、定时发送、文件载入）
- *   15. 字节流日志
- *   16. 初始化
+ *   14. 字节流日志与发送控制器
+ *   15. 初始化
  * ═══════════════════════════════════════════════════════════════ */
 
 document.addEventListener('DOMContentLoaded', () => {
+    const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser,
+        MonitorView, SendController, ConfigStore, exportFrameCsv,
+        collectConfigFromView, applyConfigToView,
+        parseIntInRange, parsePort, validateConfig } = globalThis.SerialPlotter;
 
     /* ─────────────────────────────────────────────────────────
      *  1. 工具函数（纯函数，无副作用）
@@ -50,35 +52,6 @@ document.addEventListener('DOMContentLoaded', () => {
             + '.' + now.getMilliseconds().toString().padStart(3, '0');
     };
 
-    /** 将 Hex 字符串中的字节数统计出来（去掉空格后每 2 字符 = 1 字节） */
-    const countHexBytes = (hexStr) => hexStr ? hexStr.replace(/\s/g, '').length / 2 : 0;
-
-    /** Hex 字符串 → Uint8Array */
-    const hexToBytes = (str) => {
-        const clean = str.replace(/[^0-9A-Fa-f]/g, '');
-        const bytes = [];
-        for (let i = 0; i + 1 < clean.length; i += 2)
-            bytes.push(parseInt(clean.substr(i, 2), 16));
-        return new Uint8Array(bytes);
-    };
-
-    /** Uint8Array → Hex 字符串（大写，空格分隔） */
-    const bytesToHex = (arr) =>
-        Array.from(arr).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-
-    /** 文本字符串 → Uint8Array（UTF-8 编码） */
-    const textToBytes = (str) => new TextEncoder().encode(str);
-
-    /** Uint8Array → 文本字符串（Latin1 解码，保持原始字节映射） */
-    const bytesToText = (arr) => new TextDecoder('latin1').decode(arr);
-
-    /** 安全地设置 DOM 元素的 value，元素不存在或值为 undefined 时跳过 */
-    const setDomValue = (id, val) => {
-        const el = document.getElementById(id);
-        if (el && val !== undefined) el.value = val;
-    };
-
-
     /* ─────────────────────────────────────────────────────────
      *  2. 模块实例化 & 全局状态
      * ───────────────────────────────────────────────────────── */
@@ -86,10 +59,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const serialAdapter = new SerialEngine();   // 串口通信适配器
     const netAdapter = new NetEngine();      // 网络通信适配器（通过 bridge.js）
     const parser = new DataParser();     // 二进制帧解析器
-    const plotter = new Plotter('waveform-canvas');  // 波形绘图引擎
+    const frames = new FrameBuffer(1, 1000);
+    const plotter = new Plotter('waveform-canvas', frames);  // 波形绘图引擎
 
     let activeEngine = null;    // 当前激活的通信引擎（serialAdapter 或 netAdapter）
-    let sendTimer = null;    // 定时发送的 interval ID
+    let connecting = false;
     let capturePaused = false;   // 是否暂停数据采集
 
 
@@ -151,6 +125,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // —— 字节流监视台 ——
     const logContent = document.getElementById('data-log');
+    const monitor = new MonitorView(logContent, frames);
+    let monitorOrder = 0;
 
     // —— 发送面板 ——
     const sendModeSelect = document.getElementById('send-mode');
@@ -184,9 +160,7 @@ document.addEventListener('DOMContentLoaded', () => {
         framesPerSec: 0                    // 最新帧率
     };
 
-    /* 定时刷新字节流监视台统计面板
-     * 采用与波形监视台 renderPlotStats 相同的 innerHTML + fmtFixed 模式，
-     * 确保两个监视台的数值显示风格一致（等宽字体、右对齐）。 */
+    /* 定时刷新字节流监视台统计面板。 */
     const statsBarRow = document.querySelector('.stats-bar-row');
 
     setInterval(() => {
@@ -206,7 +180,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
 
-        // 使用 innerHTML 统一渲染，与波形监视台的 renderPlotStats 保持一致
+        // 这些值只由计数器生成，不含用户输入。
         statsBarRow.innerHTML = [
             ['RX:', `${formatBytes(rxBps)}/s`],
             ['TX:', `${formatBytes(txBps)}/s`],
@@ -235,7 +209,7 @@ document.addEventListener('DOMContentLoaded', () => {
             ? '--'
             : fmtFixed(statsData.period, 0, 15);
 
-        plotInfoRow.innerHTML = [
+        const segments = [
             ['通道: ', statsData.channelLabel],
             ['最大值: ', fmtFixed(statsData.max, 6, 15)],
             ['最小值: ', fmtFixed(statsData.min, 6, 15)],
@@ -244,12 +218,16 @@ document.addEventListener('DOMContentLoaded', () => {
             ['标准差: ', fmtFixed(statsData.stdDev, 6, 15)],
             ['主频: ', `${freqHz} Hz`],
             ['主周期: ', `${periodText} sample`]
-        ].map(([label, value]) => `<span class="plot-info-segment">${label} ${value}</span>`).join('');
+        ].map(([label, value]) => {
+            const span = document.createElement('span');
+            span.className = 'plot-info-segment';
+            span.textContent = `${label} ${value}`;
+            return span;
+        });
+        plotInfoRow.replaceChildren(...segments);
     };
 
     plotter.onStatsUpdate = renderPlotStats;
-
-
     /* ─────────────────────────────────────────────────────────
      *  5. Tab 切换（通讯 / 帧格式 / 通道）
      * ───────────────────────────────────────────────────────── */
@@ -359,12 +337,15 @@ document.addEventListener('DOMContentLoaded', () => {
      *  切换时显示/隐藏对应的配置面板，并保存配置。
      * ───────────────────────────────────────────────────────── */
 
-    connTypeSelect.addEventListener('change', () => {
+    const updateConnectionModeUI = () => {
         const v = connTypeSelect.value;
         serialConfigDiv.style.display = v === 'serial' ? '' : 'none';
         netConfigDiv.style.display = v !== 'serial' ? '' : 'none';
         // UDP 和 TCP Server 需要额外配置本地端口
         localPortWrap.style.display = (v === 'udp' || v === 'tcp-server') ? 'flex' : 'none';
+    };
+    connTypeSelect.addEventListener('change', () => {
+        updateConnectionModeUI();
         saveConfig();
     });
 
@@ -391,7 +372,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /** 将当前 UI 上的帧格式配置同步给 parser 和 plotter */
     const updateParserSettings = () => {
-        const ch = parseInt(channelsInput.value) || 1;
+        const ch = parseIntInRange(channelsInput.value, Limits.minChannels, Limits.maxChannels, '通道数');
+        const maxPoints = parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数');
         parser.setFormat({
             enableHeader: headerChk.checked,
             headerHex: headerInput.value,
@@ -403,18 +385,25 @@ document.addEventListener('DOMContentLoaded', () => {
             enableChecksum: checksumChk.checked
         });
         plotter.setChannelCount(ch);
-        plotter.setMaxPoints(parseInt(maxPointsInput.value) || 1000);
+        plotter.setMaxPoints(maxPoints);
         rebuildChannelList();
         syncPlotDisplaySettings();
     };
 
     maxPointsInput.addEventListener('change', () => {
-        plotter.setMaxPoints(parseInt(maxPointsInput.value) || 1000);
-        saveConfig();
+        try {
+            plotter.setMaxPoints(parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数'));
+            monitor.render();
+            saveConfig();
+        } catch (error) {
+            maxPointsInput.value = plotter.maxPoints;
+            alert(error.message);
+        }
     });
 
     applyBtn.addEventListener('click', () => {
-        updateParserSettings();
+        try { updateParserSettings(); }
+        catch (error) { alert(error.message); return; }
         saveConfig();
         // 短暂反馈，让用户知道配置已生效
         applyBtn.textContent = '✓ 已应用';
@@ -555,99 +544,57 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const CONFIG_KEY = 'serialplot_v3_config';
 
+    const configElements = {
+        connType: connTypeSelect,
+        serialBaud: document.getElementById('serial-baud'),
+        serialData: document.getElementById('serial-data'),
+        serialStop: document.getElementById('serial-stop'),
+        serialParity: document.getElementById('serial-parity'),
+        netHost: document.getElementById('net-host'),
+        netPort: document.getElementById('net-port'),
+        netLocalPort: document.getElementById('net-local'),
+        enableHeader: headerChk, headerHex: headerInput,
+        enableFooter: footerChk, footerHex: footerInput,
+        enableChecksum: checksumChk, dataType: dataTypeSelect,
+        endianness: endiannessSelect, channelsCount: channelsInput,
+        maxPoints: maxPointsInput, sendIntervalUnit,
+        plotViewMode, plotYScaleMode, plotFftRemoveDc,
+        plotYMin, plotYMax, wrapFftRemoveDc
+    };
+
     /** 从当前 UI 状态收集完整配置对象 */
-    const getConfig = () => ({
-        connType: connTypeSelect.value,
-        serialBaud: document.getElementById('serial-baud').value,
-        serialData: document.getElementById('serial-data').value,
-        serialStop: document.getElementById('serial-stop').value,
-        serialParity: document.getElementById('serial-parity').value,
-        netHost: document.getElementById('net-host').value,
-        netPort: document.getElementById('net-port').value,
-        netLocalPort: document.getElementById('net-local').value,
-        enableHeader: headerChk.checked,
-        headerHex: headerInput.value,
-        enableFooter: footerChk.checked,
-        footerHex: footerInput.value,
-        enableChecksum: checksumChk.checked,
-        dataType: dataTypeSelect.value,
-        endianness: endiannessSelect.value,
-        channelsCount: channelsInput.value,
-        maxPoints: maxPointsInput.value,
-        sendIntervalUnit: sendIntervalUnit.value,
-        plotViewMode: plotViewMode.value,
-        plotYScaleMode: plotYScaleMode.value,
-        plotFftRemoveDc: plotFftRemoveDc.checked,
-        plotYMinTime: plotYBounds.time.min, plotYMaxTime: plotYBounds.time.max,
-        plotYMinFreq: plotYBounds.frequency.min, plotYMaxFreq: plotYBounds.frequency.max,
-        channels: plotter.getChannelMeta().map(m => ({
-            name: m.name, color: m.color, visible: m.visible
-        }))
-    });
+    const getConfig = () => collectConfigFromView(configElements,
+        plotYBounds, plotter.getChannelMeta());
 
     /** 将配置对象应用到 UI，并同步到 parser / plotter */
     const applyConfig = (cfg) => {
         if (!cfg) return;
-
-        // 连接参数
-        connTypeSelect.value = cfg.connType || 'serial';
-        connTypeSelect.dispatchEvent(new Event('change'));
-        setDomValue('serial-baud', cfg.serialBaud);
-        setDomValue('serial-data', cfg.serialData);
-        setDomValue('serial-stop', cfg.serialStop);
-        setDomValue('serial-parity', cfg.serialParity);
-        setDomValue('net-host', cfg.netHost);
-        setDomValue('net-port', cfg.netPort);
-        setDomValue('net-local', cfg.netLocalPort);
-
-        // 帧格式参数
-        if (cfg.enableHeader !== undefined) headerChk.checked = cfg.enableHeader;
-        if (cfg.enableFooter !== undefined) footerChk.checked = cfg.enableFooter;
-        if (cfg.enableChecksum !== undefined) checksumChk.checked = cfg.enableChecksum;
-        if (cfg.headerHex) headerInput.value = cfg.headerHex;
-        if (cfg.footerHex) footerInput.value = cfg.footerHex;
-        if (cfg.dataType) dataTypeSelect.value = cfg.dataType;
-        if (cfg.endianness) endiannessSelect.value = cfg.endianness;
-        if (cfg.channelsCount) channelsInput.value = cfg.channelsCount;
-        if (cfg.maxPoints) maxPointsInput.value = cfg.maxPoints;
-
-        // 发送 & 绘图选项
-        if (cfg.sendIntervalUnit) sendIntervalUnit.value = cfg.sendIntervalUnit;
-        if (cfg.plotViewMode) plotViewMode.value = cfg.plotViewMode;
-        wrapFftRemoveDc.style.display = plotViewMode.value === 'frequency' ? '' : 'none';
-        if (cfg.plotYScaleMode) plotYScaleMode.value = cfg.plotYScaleMode;
-        if (cfg.plotFftRemoveDc !== undefined) plotFftRemoveDc.checked = cfg.plotFftRemoveDc;
-        // 恢复 Y 轴范围（兼容旧配置的 plotYMin/plotYMax）
-        plotYBounds.time.min = cfg.plotYMinTime ?? cfg.plotYMin ?? '-1';
-        plotYBounds.time.max = cfg.plotYMaxTime ?? cfg.plotYMax ?? '1';
-        plotYBounds.frequency.min = cfg.plotYMinFreq ?? '-1';
-        plotYBounds.frequency.max = cfg.plotYMaxFreq ?? '1';
-        const curMode = (cfg.plotViewMode || 'time') === 'frequency' ? 'frequency' : 'time';
-        plotYMin.value = plotYBounds[curMode].min;
-        plotYMax.value = plotYBounds[curMode].max;
-
-        // 同步帧格式到 parser & plotter
-        toggleConfigSection(headerChk, headerConfigDiv);
-        toggleConfigSection(footerChk, footerConfigDiv);
-        updateParserSettings();
-
-        // 恢复每个通道的自定义设置（名称、颜色、可见性）
-        if (cfg.channels) {
-            cfg.channels.forEach((ch, i) => {
-                plotter.setChannelColor(i, ch.color);
-                plotter.setChannelVisible(i, ch.visible !== false);
-                plotter.setChannelName(i, ch.name || `CH${i + 1}`);
-            });
-            rebuildChannelList();
-        }
-        syncPlotDisplaySettings();
+        validateConfig({ ...getConfig(), ...cfg });
+        applyConfigToView(cfg, {
+            elements: configElements, bounds: plotYBounds, updateConnectionModeUI,
+            updateFrameFormat: () => {
+                toggleConfigSection(headerChk, headerConfigDiv);
+                toggleConfigSection(footerChk, footerConfigDiv);
+                updateParserSettings();
+            },
+            updateChannels: channels => {
+                if (!channels) return;
+                plotter.setChannelSettings(channels);
+                rebuildChannelList();
+            },
+            updatePlot: syncPlotDisplaySettings
+        });
     };
+
+    const configStore = new ConfigStore({
+        storage: localStorage, key: CONFIG_KEY, validate: validateConfig,
+        read: getConfig, apply: applyConfig
+    });
 
     /** 保存当前配置到 localStorage */
     const saveConfig = () => {
         try {
-            localStorage.setItem(CONFIG_KEY, JSON.stringify(getConfig()));
-            cfgStatusText.textContent = '配置已自动保存。';
+            if (configStore.save()) cfgStatusText.textContent = '配置已自动保存。';
         } catch (e) {
             cfgStatusText.textContent = '保存失败: ' + e.message;
         }
@@ -656,9 +603,7 @@ document.addEventListener('DOMContentLoaded', () => {
     /** 从 localStorage 加载配置；无配置时使用默认值初始化 parser */
     const loadConfig = () => {
         try {
-            const raw = localStorage.getItem(CONFIG_KEY);
-            if (raw) {
-                applyConfig(JSON.parse(raw));
+            if (configStore.load()) {
                 cfgStatusText.textContent = '已从本地存储载入配置。';
             } else {
                 updateParserSettings();
@@ -714,30 +659,37 @@ document.addEventListener('DOMContentLoaded', () => {
      * ───────────────────────────────────────────────────────── */
 
     // 所有数据源统一送入 parser
-    const globalDataHandler = (data) => parser.appendData(data);
+    const globalDataHandler = data => {
+        if (capturePaused) return;
+        try { parser.appendData(data); }
+        catch (error) { setCapturePaused(true); }
+    };
     serialAdapter.onData(globalDataHandler);
     netAdapter.onData(globalDataHandler);
 
     // 原始数据到达 → 更新 RX 字节统计
-    parser.onRawData = (hexStr, timeStr) => {
-        if (capturePaused) return;
-        stats.rxBytes += countHexBytes(hexStr);
+    parser.onRawData = (bytes) => {
+        stats.rxBytes += bytes.length;
     };
 
     // 成功解析一帧 → 更新波形 + 记录日志
-    parser.onFrameParsed = (valuesArr, timeStr, hexStr) => {
-        if (capturePaused) return;
-        plotter.addFrame(valuesArr);
-        appendMonitorLine('log-rx-ok', 'RX', timeStr, '', hexStr);
+    parser.onFrameParsed = (valuesArr, timeStr, frameBytes) => {
+        plotter.addFrame(valuesArr, frameBytes, timeStr, ++monitorOrder);
+        monitor.appendFrame();
     };
 
     // 帧校验失败 → 记录错误日志
-    parser.onFrameError = (type, timeStr, hexStr) => {
-        if (capturePaused) return;
+    parser.onFrameError = (type, timeStr, frameBytes) => {
         const label = type === 'checksum' ? '校验失败'
             : type === 'footer' ? '帧尾不匹配'
                 : '解析错误';
-        appendMonitorLine('log-rx-error', 'RX', timeStr, label, hexStr);
+        monitor.appendExtra({ kind: 'error', time: timeStr, reason: label,
+            bytes: frameBytes, order: ++monitorOrder });
+    };
+
+    parser.onCallbackError = error => {
+        console.error('采集数据处理失败:', error);
+        statusText.textContent = `采集已暂停: ${error.message}`;
     };
 
 
@@ -749,18 +701,19 @@ document.addEventListener('DOMContentLoaded', () => {
      * ───────────────────────────────────────────────────────── */
 
     /** 连接状态变化回调（串口和网络共用） */
-    const onConnectionStatusChange = (connected) => {
+    const onConnectionStatusChange = (connected, error) => {
         if (connected) {
             connectBtn.textContent = '主动断开连接';
             connectBtn.classList.replace('btn-primary', 'btn-danger');
             statusIndicator.className = 'status-dot connected';
             connTypeSelect.disabled = true;
         } else {
-            stopSendTimer();
+            sendController.stop();
             connectBtn.textContent = '请求建立连接';
             connectBtn.classList.replace('btn-danger', 'btn-primary');
             statusIndicator.className = 'status-dot disconnected';
-            statusText.textContent = '设备处于离线断开状态。';
+            statusText.textContent = error
+                ? `连接中断: ${error.message}` : '设备处于离线断开状态。';
             activeEngine = null;
             connTypeSelect.disabled = false;
         }
@@ -790,6 +743,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 连接按钮：已连接时断开，未连接时建立连接
     connectBtn.addEventListener('click', async () => {
+        if (connecting) return;
         // 已连接 → 断开
         if (activeEngine) {
             await disconnectActiveEngine();
@@ -798,29 +752,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // 未连接 → 根据模式建立连接
         const mode = connTypeSelect.value;
+        connecting = true;
+        connectBtn.disabled = true;
         statusText.textContent = '正在处理连接要求...';
 
         try {
             if (mode === 'serial') {
                 const config = {
-                    baudRate: parseInt(document.getElementById('serial-baud').value),
+                    baudRate: parseIntInRange(document.getElementById('serial-baud').value,
+                        1, Number.MAX_SAFE_INTEGER, '波特率'),
                     dataBits: parseInt(document.getElementById('serial-data').value),
                     stopBits: parseInt(document.getElementById('serial-stop').value),
                     parity: document.getElementById('serial-parity').value
                 };
                 statusText.textContent = '请于弹出框选择对应的串口通道...';
                 await serialAdapter.connect(config);
+                if (!serialAdapter.port || !serialAdapter.keepReading) throw new Error('串口连接已断开');
                 activeEngine = serialAdapter;
                 statusText.textContent = `串口就位: ${config.baudRate} bps`;
             } else {
+                const port = parsePort(document.getElementById('net-port').value);
+                const localText = document.getElementById('net-local').value.trim();
                 const config = {
                     mode,
                     host: document.getElementById('net-host').value,
-                    port: parseInt(document.getElementById('net-port').value),
-                    localPort: parseInt(document.getElementById('net-local').value)
-                        || parseInt(document.getElementById('net-port').value)
+                    port,
+                    localPort: localText ? parsePort(localText) : port
                 };
                 await netAdapter.connect(config);
+                if (!netAdapter.ws || !netAdapter.keepReading) throw new Error('Bridge 连接已断开');
                 activeEngine = netAdapter;
                 statusText.textContent = 'TCP/UDP Bridge 已连通。';
             }
@@ -828,6 +788,9 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('连接调度中断', e);
             statusText.textContent = `连接失败: ${e.message}`;
             activeEngine = null;
+        } finally {
+            connecting = false;
+            connectBtn.disabled = false;
         }
     });
 
@@ -836,17 +799,19 @@ document.addEventListener('DOMContentLoaded', () => {
      *  13. 工具栏（暂停、清空、导出 CSV）
      * ───────────────────────────────────────────────────────── */
 
-    pauseBtn.addEventListener('click', () => {
-        const paused = plotter.togglePause();
+    const setCapturePaused = paused => {
+        if (plotter.isPaused !== paused) plotter.togglePause();
         capturePaused = paused;
+        if (paused) { parser.reset(); monitor.render(); plotter.draw(); }
         pauseBtn.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
         pauseBtn.className = paused ? 'btn btn-success' : 'btn btn-secondary';
-    });
+    };
+    pauseBtn.addEventListener('click', () => setCapturePaused(!capturePaused));
 
     clearBtn.addEventListener('click', () => {
         plotter.clear();
-        logContent.innerHTML = '';
-        parser.buffer = new Uint8Array(0);
+        monitor.clear();
+        parser.reset();
         parser.frameCount = 0;
         parser.failCount = 0;
         stats.rxBytes = 0;
@@ -858,7 +823,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     exportBtn.addEventListener('click', () => {
-        const csv = plotter.exportCSV();
+        const csv = exportFrameCsv(frames, plotter.getChannelMeta());
         if (!csv) { alert('目前无有效数据可导出。'); return; }
         const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
         const a = document.createElement('a');
@@ -870,107 +835,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     /* ─────────────────────────────────────────────────────────
-     *  14. 发送面板
-     *
-     *  支持 Hex / Text 两种模式，可切换（自动转换内容）。
-     *  支持定时发送（间隔单位：ms / s / Hz）。
-     *  支持从文件载入待发送数据。
-     * ───────────────────────────────────────────────────────── */
-
-    /** 停止定时发送并恢复按钮样式 */
-    const stopSendTimer = () => {
-        if (sendTimer) {
-            clearInterval(sendTimer);
-            sendTimer = null;
-        }
-        sendBtn.textContent = '发送';
-        sendBtn.className = 'btn btn-primary';
-    };
-
-    /** 根据间隔设置计算发送周期（ms），返回 0 表示单次发送 */
-    const getSendPeriodMs = () => {
-        const value = parseFloat(sendIntervalInput.value);
-        if (!Number.isFinite(value) || value <= 0) return 0;
-        switch (sendIntervalUnit.value) {
-            case 's': return value * 1000;
-            case 'hz': return value > 0 ? 1000 / value : 0;
-            default: return value;  // ms
-        }
-    };
-
-    /** 执行一次数据发送 */
-    const doSend = async () => {
-        if (!activeEngine) {
-            stopSendTimer();
-            return;
-        }
-        try {
-            const mode = sendModeSelect.value;
-            const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
-            if (bytes.length === 0) return;
-            await activeEngine.send(bytes);
-            stats.txBytes += bytes.length;
-            appendMonitorLine('log-tx-ok', 'TX', formatMonitorTime(), '', bytesToHex(bytes));
-        } catch (e) {
-            const mode = sendModeSelect.value;
-            const bytes = mode === 'hex' ? hexToBytes(sendInput.value) : textToBytes(sendInput.value);
-            const reason = e && e.message ? e.message : '发送失败';
-            appendMonitorLine('log-tx-error', 'TX', formatMonitorTime(), reason, bytesToHex(bytes));
-            stopSendTimer();
-            void disconnectActiveEngine();
-        }
-    };
-
-    // Hex ↔ Text 模式切换时自动转换输入框内容
-    sendModeSelect.addEventListener('change', () => {
-        try {
-            if (sendModeSelect.value === 'hex') {
-                sendInput.value = bytesToHex(textToBytes(sendInput.value));
-            } else {
-                sendInput.value = bytesToText(hexToBytes(sendInput.value));
-            }
-        } catch (e) { /* 转换失败时保持原内容不变 */ }
-    });
-
-    // 发送按钮：有定时间隔时切换为"停止"，否则单次发送
-    sendBtn.addEventListener('click', () => {
-        const interval = getSendPeriodMs();
-        // 已在定时发送 → 停止
-        if (sendTimer) {
-            stopSendTimer();
-            return;
-        }
-        if (interval > 0) {
-            // 定时发送模式
-            doSend();
-            sendTimer = setInterval(doSend, interval);
-            sendBtn.textContent = '停止';
-            sendBtn.className = 'btn btn-danger';
-        } else {
-            // 单次发送
-            doSend();
-        }
-    });
-
-    // 从文件载入待发送数据
-    loadFileBtn.addEventListener('click', () => sendFileInput.click());
-    sendFileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-            const bytes = new Uint8Array(ev.target.result);
-            sendInput.value = sendModeSelect.value === 'hex' ? bytesToHex(bytes) : bytesToText(bytes);
-        };
-        reader.readAsArrayBuffer(file);
-        e.target.value = '';  // 清空 input 以便重复选择同一文件
-    });
-
-
-    /* ─────────────────────────────────────────────────────────
-     *  15. 字节流日志
-     *
-     *  最多保留 120 条，超限自动移除最早的。
+     *  14. 非 RX 帧事件日志（RX 原始帧由 MonitorView 从 FrameBuffer 读取）
      *  颜色由 CSS class 控制：
      *    log-rx-ok    → 蓝色（接收成功）
      *    log-rx-error → 黄色（接收错误）
@@ -978,29 +843,33 @@ document.addEventListener('DOMContentLoaded', () => {
      *    log-tx-error → 红色（发送失败）
      * ───────────────────────────────────────────────────────── */
 
-    const MAX_LOG_LINES = 120;
-
-    /** 向日志面板追加一行 HTML */
-    const appendLog = (html) => {
-        const div = document.createElement('div');
-        div.innerHTML = html;
-        logContent.appendChild(div);
-        while (logContent.children.length > MAX_LOG_LINES)
-            logContent.removeChild(logContent.firstChild);
-        logContent.scrollTop = logContent.scrollHeight;
-    };
-
     /** 追加一条带时间戳的监视台日志行 */
-    const appendMonitorLine = (className, prefix, timeStr, reason, hexStr) => {
-        const reasonText = reason ? `[${reason}]` : '';
-        const parts = [`[${timeStr}]`, `${prefix}${reasonText}`];
-        if (hexStr) parts.push(hexStr);
-        appendLog(`<span class="${className}">${parts.join(' ')}</span>`);
+    const appendMonitorLine = (kind, timeStr, reason, bytes) => {
+        monitor.appendExtra({ kind,
+            time: timeStr, reason, bytes: Uint8Array.from(bytes), order: ++monitorOrder });
     };
+
+    const sendController = new SendController({
+        mode: sendModeSelect, input: sendInput, fileInput: sendFileInput,
+        interval: sendIntervalInput, intervalUnit: sendIntervalUnit,
+        button: sendBtn, loadButton: loadFileBtn,
+        getEngine: () => activeEngine,
+        onSent: bytes => {
+            stats.txBytes += bytes.length;
+            appendMonitorLine('tx', formatMonitorTime(), '', bytes);
+        },
+        onInputError: error => appendMonitorLine('tx-error',
+            formatMonitorTime(), error.message, new Uint8Array(0)),
+        onSendError: (error, bytes) => {
+            appendMonitorLine('tx-error', formatMonitorTime(),
+                error.message || '发送失败', bytes);
+            void disconnectActiveEngine();
+        }
+    });
 
 
     /* ─────────────────────────────────────────────────────────
-     *  16. 初始化
+     *  15. 初始化
      *
      *  加载保存的配置，并在下一帧同步绘图显示设置。
      * ───────────────────────────────────────────────────────── */

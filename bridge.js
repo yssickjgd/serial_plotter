@@ -2,101 +2,97 @@ const WebSocket = require('ws');
 const net = require('net');
 const dgram = require('dgram');
 
-const PORT = 8081;
-const wss = new WebSocket.Server({ port: PORT }, () => {
-    console.log(`===============================================`);
-    console.log(`[Bridge 服务已启动]`);
-    console.log(`请确保本页面正在运行，Web前端现可通过 ws://localhost:${PORT} 访问本地 TCP/UDP`);
-    console.log(`===============================================`);
-});
-
-wss.on('connection', (ws) => {
-    let mode = null; // 'tcp-client', 'tcp-server', 'udp'
-    let socket = null;
-    let tcpServer = null;
-    let udpRemoteHost = null;
-    let udpRemotePort = null;
-
-    console.log("[WS] 网页端已连接至 Bridge");
-
-    const cleanup = () => {
-        if (socket && !socket.destroyed) socket.destroy && socket.destroy();
-        if (socket && socket.close) socket.close();
-        if (tcpServer) tcpServer.close();
-        socket = null;
-        tcpServer = null;
-    };
-
-    ws.on('message', (message, isBinary) => {
-        if (!isBinary) {
-            try {
-                const config = JSON.parse(message.toString());
-                if (config.cmd === 'connect') {
-                    cleanup();
-                    mode = config.mode;
-                    console.log(`[WS] 收到建立 ${mode} 请求`, config);
-
-                    if (mode === 'tcp-client') {
-                        socket = new net.Socket();
-                        socket.connect(config.port, config.host, () => {
-                            ws.send(JSON.stringify({ event: 'connected', msg: `连接至 TCP Server ${config.host}:${config.port} 成功` }));
-                        });
-                        socket.on('data', (data) => ws.send(data));
-                        socket.on('error', (err) => ws.send(JSON.stringify({ event: 'error', msg: err.message })));
-                        socket.on('close', () => ws.send(JSON.stringify({ event: 'disconnected' })));
-                        
-                    } else if (mode === 'tcp-server') {
-                        tcpServer = net.createServer((sock) => {
-                            console.log(`[TCP Server] 新客户端接入: ${sock.remoteAddress}:${sock.remotePort}`);
-                            if (socket) socket.destroy(); // 极简实现：挤掉老连接，只保持一个最新连接收发
-                            socket = sock;
-                            socket.on('data', (data) => ws.send(data));
-                            socket.on('error', (err) => console.log('TCP 客户端异常', err.message));
-                            ws.send(JSON.stringify({ event: 'connected', msg: `客户端 ${sock.remoteAddress} 已连接` }));
-                        });
-                        const listenPort = config.localPort || config.port;
-                        tcpServer.listen(listenPort, '0.0.0.0', () => {
-                            ws.send(JSON.stringify({ event: 'listening', msg: `正在监听 TCP 端口 ${listenPort}` }));
-                        });
-                        tcpServer.on('error', (err) => ws.send(JSON.stringify({ event: 'error', msg: err.message })));
-                        
-                    } else if (mode === 'udp') {
-                        socket = dgram.createSocket('udp4');
-                        socket.on('message', (msg, rinfo) => {
-                            ws.send(msg); // 转发二进制给网页
-                        });
-                        socket.on('error', (err) => ws.send(JSON.stringify({ event: 'error', msg: err.message })));
-                        
-                        // 绑定本地监听端口
-                        socket.bind(config.localPort || config.port || 0, () => {
-                            const address = socket.address();
-                            ws.send(JSON.stringify({ event: 'listening', msg: `UDP 绑定监听于端口 ${address.port}` }));
-                        });
-                        // 保存目标地址供发送使用
-                        udpRemoteHost = config.host;
-                        udpRemotePort = config.port;
-                    }
-
-                } else if (config.cmd === 'disconnect') {
-                    console.log("[WS] 收到主动断开请求");
-                    cleanup();
-                    ws.send(JSON.stringify({ event: 'disconnected' }));
+function createBridge({ host = '127.0.0.1', port = 8081 } = {}) {
+    const server = new WebSocket.Server({ host, port });
+    server.on('connection', ws => {
+        let mode = null;
+        let socket = null;
+        let tcpServer = null;
+        let generation = 0;
+        let remoteHost = null;
+        let remotePort = null;
+        const sendStatus = (event, msg) => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ event, msg }));
+        };
+        const sendBytes = data => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true });
+        };
+        const cleanup = () => {
+            generation++;
+            const oldSocket = socket;
+            socket = null;
+            mode = null;
+            if (oldSocket) {
+                if (typeof oldSocket.destroy === 'function') oldSocket.destroy();
+                else oldSocket.close();
+            }
+            if (tcpServer) { tcpServer.close(); tcpServer = null; }
+        };
+        const validPort = value => Number.isInteger(value) && value >= 1 && value <= 65535;
+        ws.on('message', (message, isBinary) => {
+            if (isBinary) {
+                if (mode === 'tcp-client' || mode === 'tcp-server') {
+                    if (socket && !socket.destroyed) socket.write(message);
+                } else if (mode === 'udp' && socket && remoteHost && validPort(remotePort)) {
+                    socket.send(message, remotePort, remoteHost);
                 }
-            } catch (e) {
-                console.error("解析控制指令失败", e.message);
+                return;
             }
-        } else {
-            // 是二进制数组，直接经由下层协议发出
-            if ((mode === 'tcp-client' || mode === 'tcp-server') && socket) {
-                socket.write(message);
-            } else if (mode === 'udp' && socket && udpRemoteHost && udpRemotePort) {
-                socket.send(message, 0, message.length, udpRemotePort, udpRemoteHost);
+            let command;
+            try { command = JSON.parse(message.toString()); }
+            catch (_) { sendStatus('error', '无效的控制消息'); return; }
+            if (command.cmd === 'disconnect') { cleanup(); sendStatus('disconnected'); return; }
+            if (command.cmd !== 'connect') { sendStatus('error', '未知控制命令'); return; }
+            cleanup();
+            const localPort = command.localPort == null ? command.port : command.localPort;
+            if (!['tcp-client', 'tcp-server', 'udp'].includes(command.mode)
+                || !validPort(command.port)
+                || ((command.mode === 'udp' || command.mode === 'tcp-server')
+                    && (!Number.isInteger(localPort) || localPort < 0 || localPort > 65535))
+                || (command.mode !== 'tcp-server' && (typeof command.host !== 'string' || !command.host.trim()))) {
+                sendStatus('error', '网络参数无效');
+                return;
             }
-        }
+            mode = command.mode;
+            const current = generation;
+            if (mode === 'tcp-client') {
+                const tcp = net.createConnection({ host: command.host, port: command.port });
+                socket = tcp;
+                tcp.on('connect', () => { if (current === generation) sendStatus('connected'); });
+                tcp.on('data', data => { if (current === generation) sendBytes(data); });
+                tcp.on('error', error => { if (current === generation) sendStatus('error', error.message); });
+                tcp.on('close', () => { if (current === generation) sendStatus('disconnected'); });
+            } else if (mode === 'tcp-server') {
+                tcpServer = net.createServer(client => {
+                    if (current !== generation) { client.destroy(); return; }
+                    if (socket) socket.destroy();
+                    socket = client;
+                    client.on('data', data => { if (current === generation) sendBytes(data); });
+                    client.on('error', error => { if (current === generation) sendStatus('error', error.message); });
+                    sendStatus('connected');
+                });
+                tcpServer.on('error', error => { if (current === generation) sendStatus('error', error.message); });
+                tcpServer.listen(localPort, '0.0.0.0', () => {
+                    if (current === generation) sendStatus('listening');
+                });
+            } else {
+                const udp = dgram.createSocket('udp4');
+                socket = udp;
+                remoteHost = command.host;
+                remotePort = command.port;
+                udp.on('message', data => { if (current === generation) sendBytes(data); });
+                udp.on('error', error => { if (current === generation) sendStatus('error', error.message); });
+                udp.bind(localPort, () => { if (current === generation) sendStatus('listening'); });
+            }
+        });
+        ws.on('close', cleanup);
     });
+    return server;
+}
 
-    ws.on('close', () => {
-        console.log("[WS] 网页端断开，开始清理资源...");
-        cleanup();
-    });
-});
+if (require.main === module) {
+    const server = createBridge();
+    server.on('listening', () => console.log('Bridge 已启动: ws://127.0.0.1:8081'));
+}
+
+module.exports = { createBridge };

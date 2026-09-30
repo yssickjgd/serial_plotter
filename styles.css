@@ -28,6 +28,7 @@
     --text-sub: #495057;
     --sidebar-w: 268px;
     --h-resizer-w: 5px;
+    --mono-font: 'Cascadia Mono', Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', NSimSun, 'Courier New', monospace;
 }
 
 /* ── 全局重置 ── */
@@ -35,7 +36,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-family: var(--mono-font);
 }
 
 /* ── 布局基础 ── */
@@ -270,7 +271,7 @@ code {
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 0.65rem;
-    font-family: 'Consolas', monospace;
+    font-family: var(--mono-font);
 }
 
 /* ── Checkbox ── */
@@ -448,6 +449,11 @@ canvas {
     min-height: 0;
 }
 
+#waveform-canvas {
+    cursor: crosshair;
+    touch-action: none;
+}
+
 .plot-header {
     display: flex;
     flex-direction: column;
@@ -489,7 +495,7 @@ canvas {
     color: #ffffff;
     white-space: nowrap;
     overflow: hidden;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-variant-numeric: tabular-nums;
 }
 
@@ -499,7 +505,7 @@ canvas {
     font-size: 0.72rem;
     color: #ffffff;
     white-space: nowrap;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-variant-numeric: tabular-nums;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -598,7 +604,7 @@ canvas {
     color: #ffffff;
     white-space: nowrap;
     overflow: hidden;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-variant-numeric: tabular-nums;
 }
 
@@ -608,7 +614,7 @@ canvas {
     font-size: 0.72rem;
     color: #ffffff;
     white-space: nowrap;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-variant-numeric: tabular-nums;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -618,14 +624,28 @@ canvas {
 .log-content {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     min-height: 0;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-size: 0.7rem;
     line-height: 1.45;
     color: #00e676;
     padding: 6px 10px;
-    word-break: break-all;
+    white-space: normal;
 }
+
+.monitor-spacer { position: relative; width: 100%; }
+.monitor-measure { position: absolute; visibility: hidden; white-space: pre; }
+.monitor-row {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    line-height: 20px;
+}
+.monitor-prefix, .monitor-data { white-space: pre; }
+.monitor-data { min-width: 0; }
 
 /* ── 日志颜色（蓝=接收成功，黄=接收错误，绿=发送成功，红=发送失败）── */
 .log-content .log-rx-ok {
@@ -742,7 +762,7 @@ canvas {
     background: #1e1e1e;
     border: 1px solid #333;
     color: #ddd;
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: var(--mono-font);
     font-size: 0.7rem;
     padding: 2px 7px;
     border-radius: 3px;

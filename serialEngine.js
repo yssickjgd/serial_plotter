@@ -17,9 +17,13 @@ class SerialEngine {
         this.port = null;
         this.reader = null;
         this.keepReading = false;
+        this.readTask = null;
+        this._closing = null;
+        this._connected = false;
         this.onDataCallback = null;
         this.onConnectStatusChange = null;
         this._onSerialDisconnect = (event) => {
+            if (!this.port) return;
             if (this.port && event && event.port && event.port !== this.port) return;
             void this._handlePortDisconnect();
         };
@@ -33,7 +37,7 @@ class SerialEngine {
     /** 注册数据到达回调 callback(Uint8Array) */
     onData(callback) { this.onDataCallback = callback; }
 
-    /** 注册连接状态变化回调 callback(connected: boolean) */
+    /** 注册连接状态变化回调 callback(connected: boolean, error?: Error) */
     onStatusChange(callback) { this.onConnectStatusChange = callback; }
 
     /* ── 连接管理 ── */
@@ -41,44 +45,45 @@ class SerialEngine {
     /** 请求用户选择串口并打开，成功后启动 readLoop 持续读取 */
     async connect(config) {
         if (!('serial' in navigator)) {
-            alert('当前浏览器暂不支持 Web Serial API');
-            throw new Error('API Not Supported');
+            throw new Error('当前浏览器不支持 Web Serial API');
         }
         try {
-            this.port = await navigator.serial.requestPort();
-            await this.port.open({
+            const port = await navigator.serial.requestPort();
+            await port.open({
                 baudRate: config.baudRate || 115200,
                 dataBits: config.dataBits || 8,
                 stopBits: config.stopBits || 1,
                 parity:   config.parity   || 'none'
             });
+            this.port = port;
             this.keepReading = true;
-            this.readLoop();
+            this.readTask = this.readLoop();
+            this._connected = true;
             if (this.onConnectStatusChange) this.onConnectStatusChange(true);
             return true;
         } catch (error) {
-            console.error('串口异常:', error);
-            if (this.onConnectStatusChange) this.onConnectStatusChange(false);
+            this.port = null;
             throw error;
         }
     }
 
     /** 安全断开串口：取消读取 → 释放读取器 → 关闭端口 → 通知状态 */
     async disconnect() {
-        this.keepReading = false;
-        try {
-            if (this.reader) {
-                try { await this.reader.cancel(); } catch (_) {}
-                try { this.reader.releaseLock(); } catch (_) {}
-            }
-            if (this.port) {
-                try { await this.port.close(); } catch (_) {}
-            }
-        } finally {
-            this.reader = null;
+        if (this._closing) return this._closing;
+        this._closing = (async () => {
+            this.keepReading = false;
+            try { if (this.reader) await this.reader.cancel(); } catch (_) {}
+            try { if (this.readTask) await this.readTask; } catch (_) {}
+            try { if (this.port) await this.port.close(); } catch (_) {}
             this.port = null;
-            if (this.onConnectStatusChange) this.onConnectStatusChange(false);
-        }
+            this.readTask = null;
+            if (this._connected) {
+                this._connected = false;
+                if (this.onConnectStatusChange) this.onConnectStatusChange(false);
+            }
+            this._closing = null;
+        })();
+        return this._closing;
     }
 
     /** 强制断开（接口与 NetEngine 保持一致，内部委托给 disconnect） */
@@ -88,16 +93,7 @@ class SerialEngine {
 
     /** 浏览器串口断开事件处理（用户拔出设备时触发） */
     async _handlePortDisconnect() {
-        this.keepReading = false;
-        try {
-            if (this.reader) await this.reader.cancel();
-        } catch (_) {}
-        try {
-            if (this.reader) this.reader.releaseLock();
-        } catch (_) {}
-        this.reader = null;
-        this.port = null;
-        if (this.onConnectStatusChange) this.onConnectStatusChange(false);
+        await this.disconnect();
     }
 
     /* ── 数据传输 ── */
@@ -115,19 +111,47 @@ class SerialEngine {
 
     /** 持续读取串口数据流，通过 onDataCallback 上报，直到 keepReading 为 false */
     async readLoop() {
+        let failed = false;
+        let failure = null;
         while (this.port && this.port.readable && this.keepReading) {
-            this.reader = this.port.readable.getReader();
+            let reader;
+            try { reader = this.port.readable.getReader(); }
+            catch (error) { failure = error; failed = true; this.keepReading = false; break; }
+            this.reader = reader;
             try {
-                while (true) {
-                    const { value, done } = await this.reader.read();
-                    if (done) break;
+                while (this.keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        if (this.keepReading) {
+                            failure = new Error('串口读取已结束');
+                            failed = true;
+                            this.keepReading = false;
+                        }
+                        break;
+                    }
                     if (value && this.onDataCallback) this.onDataCallback(value);
                 }
             } catch (error) {
-                if (this.keepReading) console.error('读取数据流时出错:', error);
+                if (this.keepReading) {
+                    failure = error;
+                    failed = true;
+                    this.keepReading = false;
+                }
             } finally {
-                if (this.reader) this.reader.releaseLock();
+                reader.releaseLock();
+                if (this.reader === reader) this.reader = null;
+            }
+        }
+        if (failed) {
+            try { if (this.port) await this.port.close(); } catch (_) {}
+            this.port = null;
+            if (this._connected) {
+                this._connected = false;
+                if (this.onConnectStatusChange) this.onConnectStatusChange(false, failure);
             }
         }
     }
 }
+
+globalThis.SerialPlotter ??= {};
+globalThis.SerialPlotter.SerialEngine = SerialEngine;

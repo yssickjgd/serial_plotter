@@ -4,7 +4,9 @@
   "description": "Local WebSocket Bridge for TCP/UDP",
   "main": "bridge.js",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "check": "node scripts/checkStyle.js",
+    "test": "node --test --test-isolation=none tests/*.test.js"
   },
   "dependencies": {
     "ws": "^8.16.0"

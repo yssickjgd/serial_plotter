@@ -16,7 +16,7 @@ SerialPlotter 是一个无需后端框架的浏览器端工具，适合调试单
 - 频域去直流：可选在 FFT 前移除 DC 分量。
 - 多通道显示：支持自定义通道名、颜色、显示/隐藏。
 - 统计信息：单通道时显示最大值、最小值、峰峰值、均值、标准差、主频和周期。
-- 交互查看：支持十字光标、滚动查看、鼠标缩放、手动 Y 轴范围。
+- 交互查看：支持十字光标、滚动查看、滚轮缩放、矩形框选放大和手动 Y 轴范围。
 - 帧解析：支持头部、尾部、8-bit 校验、字节序和多种数据类型。
 - 发送面板：支持 Hex/Text、文件发送、定时发送。
 - 配置管理：支持本地保存、导入、导出。
@@ -52,7 +52,7 @@ SerialPlotter 是一个无需后端框架的浏览器端工具，适合调试单
 git clone https://github.com/yssickjgd/serial_plotter
 ```
 
-然后，在浏览器中打开仓库内的 `index.html` 即可。
+然后，在浏览器中打开仓库内的 `index.html` 即可。前端无需构建或安装依赖；TCP/UDP 模式仍需启动本地 Bridge。
 
 ### 4.2 启用 TCP/UDP 网络功能
 
@@ -69,7 +69,7 @@ npm install
 npm start
 ```
 
-默认会启动本地 WebSocket Bridge，监听 `ws://127.0.0.1:8081`。此时，可配置网络监听环境
+默认会启动本地 WebSocket Bridge，仅监听 `ws://127.0.0.1:8081`。TCP Server 与 UDP 的设备监听端口仍按页面配置工作。
 
 ## 5 使用方法
 
@@ -112,6 +112,8 @@ npm start
 - 频域图：显示 FFT 频谱。
 - 单通道时会显示统计信息。
 - 统计栏会使用通道自定义名称，而不是默认 CH1、CH2。
+- 在绘图区按住鼠标左键拖出矩形，松开后放大框内的横轴与纵轴范围；拖动过小不会触发缩放。时域和频域均可使用。
+- 在绘图区点击右键恢复完整横轴范围，并撤销本次框选带来的纵轴缩放。原有的手动 Y 轴范围会恢复。
 
 ### 6.2 字节流监视台
 
@@ -126,6 +128,8 @@ npm start
 
 - 未通过验证的数据会显示时间戳。
 - 错误原因会直接附在 `RX` 或 `TX` 后面。
+- 较长的 Hex 记录会随监视台宽度自动换行，续行与第一行 Hex 字节的起始列对齐（普通记录为 `RX ` 或 `TX ` 后）。
+- 在底部自动跟随最新记录；向上滚动后固定所查看的记录，滚回底部恢复跟随。记录超出保留窗口后会显示当前最早的记录。
 - 接收速率按真实接收到的数据块统计，不会因为错误帧重复放大。
 
 ## 7 配置文件
@@ -216,23 +220,39 @@ npm start
 - 如果连接断开，程序会自动停止定时发送。
 - 出错信息会出现在字节流监视台，不会再弹出浏览器提示框。
 
-## 10 项目结构
+## 10 项目结构与性能
 
 ```text
-serialplot_new_test/
+serial_plotter/
 ├── app.js
 ├── bridge.js
+├── byteUtils.js
+├── configStore.js
+├── configValidation.js
+├── configView.js
+├── csvExport.js
 ├── dataParser.js
+├── frameBuffer.js
 ├── index.html
+├── monitorView.js
 ├── netEngine.js
 ├── package.json
+├── plotMath.js
 ├── plotter.js
+├── projectLimits.js
+├── sendController.js
+├── spectrum.js
 ├── readme.md
 ├── serialEngine.js
 ├── serial_config.json
 ├── styles.css
-└── web_socket_test.html
+├── scripts/
+└── tests/
 ```
+
+采样与对应原始字节保存在相同长度的有界窗口中。实时绘图最多刷新 30 次/秒，监视台仅创建可见的日志行；暂停采集后可滚动查看窗口内每帧的原始 Hex，CSV 导出包含窗口内全部样本。超过“最大采样点数”时淘汰最早的帧。
+
+在 Node.js 24 环境运行 `npm run check` 检查 JavaScript 语法与空白格式，运行 `npm test` 执行解析、缓冲、通信、配置恢复和压力测试。压力测试会注入 30 万帧（23 通道）并核对保留的最新 5000 帧。实际浏览器绘制流畅度仍与设备和浏览器有关。
 
 ## 11 开源说明
 
@@ -256,5 +276,5 @@ serialplot_new_test/
 - Canvas API: https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API
 - FFT: https://en.wikipedia.org/wiki/Fast_Fourier_transform
 
-最后更新：2026-05-01
+最后更新：2026-09-30
 
