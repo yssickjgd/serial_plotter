@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════
  *  styles.css — 全局样式表
  *
- *  结构：
+ *  字体策略：中文使用项目内的开源 Noto Sans SC；英文/数字沿用等宽字体。
+ *    结构：
  *    1. CSS 变量（:root）
  *    2. 全局重置与布局
  *    3. 侧栏（sidebar、tab-bar、control-group）
@@ -10,6 +11,16 @@
  *    6. 发送面板（send-panel）
  *    7. 滚动条样式
  * ═══════════════════════════════════════════════════════════════ */
+
+@font-face {
+    font-family: 'Plotter CJK Sans';
+    src: local('Noto Sans SC'), url('assets/fonts/noto-sans-sc.woff2') format('woff2');
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    unicode-range: U+2E80-2FFF, U+3000-303F, U+3400-4DBF, U+4E00-9FFF,
+        U+F900-FAFF, U+FE10-FE6F, U+FF00-FFEF, U+20000-323AF;
+}
 
 /* ── CSS 变量 ── */
 :root {
@@ -27,8 +38,11 @@
     --text: #212529;
     --text-sub: #495057;
     --sidebar-w: 268px;
+    --channel-sidebar-w: 320px;
     --h-resizer-w: 5px;
-    --mono-font: 'Cascadia Mono', Consolas, 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', NSimSun, 'Courier New', monospace;
+    --ui-font: 'Plotter CJK Sans', 'Cascadia Mono', Consolas, 'Courier New',
+        'Liberation Mono', 'DejaVu Sans Mono', 'Noto Sans Mono',
+        'Noto Sans CJK SC', 'Source Han Sans SC', 'Microsoft YaHei', SimHei, sans-serif;
 }
 
 /* ── 全局重置 ── */
@@ -36,7 +50,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
 }
 
 /* ── 布局基础 ── */
@@ -45,13 +59,15 @@ body {
     color: var(--text);
     min-height: 100vh;
     display: flex;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
 /* ── 应用外壳 ── */
 .app-container {
     display: flex;
     width: 100vw;
+    min-width: 750px;
     height: 100vh;
     overflow: hidden;
 }
@@ -65,6 +81,18 @@ body {
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+}
+
+.channel-sidebar {
+    width: var(--channel-sidebar-w);
+    min-width: var(--channel-sidebar-w);
+    max-width: var(--channel-sidebar-w);
+    display: flex;
+    flex-direction: column;
+    background: var(--sidebar-bg);
+    border-left: 1px solid var(--border);
+    padding: 8px;
     overflow: hidden;
 }
 
@@ -161,7 +189,7 @@ body {
 
 .channels-list-panel {
     flex: 1;
-    min-height: 180px;
+    min-height: 0;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -169,7 +197,6 @@ body {
 
 .channels-display-panel {
     flex: 0 0 auto;
-    min-height: 180px;
     overflow: auto;
 }
 
@@ -235,10 +262,43 @@ body {
     gap: 3px;
 }
 
+.axis-options {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
 .input-group label {
     font-size: 0.66rem;
     font-weight: 500;
     color: var(--text-sub);
+}
+
+.option-label {
+    font-size: 0.66rem;
+    font-weight: 500;
+    color: var(--text-sub);
+}
+
+.choice-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px 11px;
+    padding: 3px 0;
+}
+
+.choice-group label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: 0.69rem;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.choice-group input[type="radio"] {
+    accent-color: var(--primary);
 }
 
 input[type="text"],
@@ -271,7 +331,7 @@ code {
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 0.65rem;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
 }
 
 /* ── Checkbox ── */
@@ -373,10 +433,39 @@ code {
 /* ── 通道配置列表 ── */
 .channel-row {
     display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 0;
+    flex-direction: column;
+    gap: 6px;
+    padding: 7px 0;
     border-bottom: 1px solid #f0f0f0;
+}
+
+.channel-row-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.channel-transform-options {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 2px 0 2px 40px;
+}
+
+.channel-transform-options[hidden] {
+    display: none;
+}
+
+.channel-transform-option {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+}
+
+.channel-transform-option input[type="number"] {
+    width: 100%;
+    padding: 2px 4px;
 }
 
 .channel-row:last-child {
@@ -388,6 +477,23 @@ code {
     font-weight: 600;
     color: var(--text-sub);
     min-width: 26px;
+}
+
+.channel-expand-toggle {
+    min-width: 40px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+
+.channel-expand-toggle::after {
+    content: '▸';
+    padding-left: 3px;
+}
+
+.channel-expand-toggle[aria-expanded="true"]::after {
+    content: '▾';
 }
 
 .channel-color-swatch {
@@ -415,7 +521,7 @@ code {
     border-radius: 3px;
 }
 
-/* ── 主显示区（右侧）── */
+/* ── 主显示区（中央）── */
 .main-display {
     flex: 1;
     display: flex;
@@ -476,6 +582,7 @@ canvas {
     font-weight: 700;
     color: #ffffff;
     letter-spacing: .2px;
+    white-space: nowrap;
 }
 
 .plot-title-hint {
@@ -495,8 +602,26 @@ canvas {
     color: #ffffff;
     white-space: nowrap;
     overflow: hidden;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-variant-numeric: tabular-nums;
+}
+
+#stat-plot-fps {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+}
+
+.plot-channel-stats {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 8px;
+    align-items: center;
+}
+
+.plot-channel-stats:not(:empty) {
+    border-left: 1px solid #4b5563;
+    padding-left: 14px;
 }
 
 .plot-info-segment {
@@ -505,7 +630,7 @@ canvas {
     font-size: 0.72rem;
     color: #ffffff;
     white-space: nowrap;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-variant-numeric: tabular-nums;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -604,7 +729,7 @@ canvas {
     color: #ffffff;
     white-space: nowrap;
     overflow: hidden;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-variant-numeric: tabular-nums;
 }
 
@@ -614,11 +739,16 @@ canvas {
     font-size: 0.72rem;
     color: #ffffff;
     white-space: nowrap;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-variant-numeric: tabular-nums;
     overflow: hidden;
     text-overflow: ellipsis;
     text-align: left;
+}
+
+@media (max-width: 1100px) {
+    .plot-title-hint { display: none; }
+    .stats-bar-row span { flex-basis: 45%; }
 }
 
 .log-content {
@@ -626,7 +756,7 @@ canvas {
     overflow-y: auto;
     overflow-x: hidden;
     min-height: 0;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-size: 0.7rem;
     line-height: 1.45;
     color: #00e676;
@@ -762,7 +892,7 @@ canvas {
     background: #1e1e1e;
     border: 1px solid #333;
     color: #ddd;
-    font-family: var(--mono-font);
+    font-family: var(--ui-font);
     font-size: 0.7rem;
     padding: 2px 7px;
     border-radius: 3px;

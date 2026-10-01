@@ -24,7 +24,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     const context = vm.createContext({
         document, window: { addEventListener() {} }, performance, requestAnimationFrame() {}, console
     });
-    for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
+    for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js', 'channelTransform.js',
         'spectrum.js', 'csvExport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
@@ -56,8 +56,11 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     const start = performance.now();
     plotter.draw();
+    assert.equal(plotter._drawState.startIdx, 0);
+    assert.equal(plotter._drawState.visibleCnt, 4097,
+        'the default frequency view includes DC through Nyquist');
     console.log(`two-channel FFT draw in ${(performance.now() - start).toFixed(1)} ms`);
-    assert.equal(elements.get('plot-scrollbar-thumb').style.width, '195px');
+    assert.equal(elements.get('plot-scrollbar-thumb').style.width, '100%');
     plotter.setChannelCount(23);
     plotter.setAllChannelsVisible(true);
     for (let i = 0; i < 5000; i++) plotter.addFrame(Array.from({ length: 23 }, (_, c) => i + c));
@@ -65,8 +68,11 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.draw();
     console.log(`23-channel FFT draw in ${(performance.now() - allStart).toFixed(1)} ms`);
     const cachedStart = performance.now();
+    const linesBeforeCachedDraw = lineToCount;
     plotter.draw();
     console.log(`23-channel cached draw in ${(performance.now() - cachedStart).toFixed(1)} ms`);
+    assert.ok(lineToCount - linesBeforeCachedDraw < 40000,
+        `frequency drawing used ${lineToCount - linesBeforeCachedDraw} line segments`);
     plotter.clear();
     assert.equal(plotter._scrollTotal(), 0);
     plotter.setDisplayOptions({ displayMode: 'time' });
@@ -79,4 +85,77 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.setChannelVisible(0, true);
     plotter.draw();
     assert.equal(summary.mean, 1);
+
+    const drawsBefore = plotter.completedDraws;
+    plotter.draw();
+    assert.equal(plotter.completedDraws, drawsBefore + 1);
+    plotter.setChannelSettings([{ name: 'scaled', color: '#112233', visible: true,
+        gainEnabled: true, gain: -2, offsetEnabled: true, offset: 4 }]);
+    plotter.draw();
+    assert.equal(summary.mean, 2);
+    assert.equal(plotter._collectWindowSeries(0, 2, null)[0].rawValues[1], 2);
+    assert.equal(frames.getValue(0, 1), 1);
+    assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).includes('1,2,'));
+
+    plotter.clear();
+    plotter.setChannelCount(1);
+    plotter.setChannelVisible(0, true);
+    for (let i = 0; i < 64; i++) plotter.addFrame([Math.sin(2 * Math.PI * 4 * i / 64)]);
+    plotter.setDisplayOptions({ displayMode: 'frequency', fftWindow: 'rectangular',
+        removeDcForFft: true });
+    const rectangleSpectrum = plotter._frequencyForChannel(0);
+    plotter.setDisplayOptions({ fftWindow: 'flatTop' });
+    const flatSpectrum = plotter._frequencyForChannel(0);
+    assert.notEqual(flatSpectrum, rectangleSpectrum, 'changing the window invalidates the FFT cache');
+    assert.ok(Math.abs(flatSpectrum.mags[4] - 2) < 0.02,
+        'the enabled gain is applied before FFT and the window preserves amplitude');
+    plotter.setChannelSettings([{ visible: true, gainEnabled: true, gain: 0,
+        offsetEnabled: true, offset: 3 }]);
+    plotter.setDisplayOptions({ removeDcForFft: false });
+    const offsetSpectrum = plotter._frequencyForChannel(0);
+    assert.ok(Math.abs(offsetSpectrum.mags[0] - 3) < 1e-10);
+    assert.equal(frames.getValue(0, 0), 0);
+    const visibleSpectra = plotter.completedSpectrumDraws;
+    plotter.addFrame([1]);
+    plotter.draw();
+    assert.equal(plotter.completedSpectrumDraws, visibleSpectra,
+        'redrawing a cached spectrum does not represent a new frequency frame');
+    plotter._fftAt -= 300;
+    plotter.draw();
+    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 1);
+    plotter.setChannelSettings([{ name: 'legacy', visible: true }]);
+    const legacy = plotter.getChannelMeta()[0];
+    assert.deepEqual([legacy.gainEnabled, legacy.gain, legacy.offsetEnabled, legacy.offset],
+        [false, 1, false, 0]);
+
+    // Live samples should advance the frequency plot only when a fresh spectrum is due.
+    let clockMs = 1000;
+    context.performance = { now: () => clockMs };
+    plotter._fftVersion = -1;
+    plotter._lastDraw = 0;
+    plotter.addFrame([1]);
+    const firstDraw = plotter.completedDraws;
+    const firstSpectrum = plotter.completedSpectrumDraws;
+    plotter.renderLoop();
+    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 1);
+    assert.equal(plotter.completedDraws, firstDraw + 1);
+
+    clockMs += 40;
+    plotter.addFrame([2]);
+    plotter.renderLoop();
+    assert.equal(plotter.completedDraws, firstDraw + 1,
+        'fresh samples alone must not redraw the same cached spectrum');
+
+    clockMs += 65;
+    plotter.renderLoop();
+    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 2,
+        'a new spectrum is drawn after 100 ms of incoming data');
+
+    clockMs += 40;
+    plotter.addFrame([3]);
+    plotter.setChannelName(0, 'renamed');
+    plotter.renderLoop();
+    assert.equal(plotter.completedDraws, firstDraw + 3,
+        'a display change redraws promptly while the frequency cache is fresh');
+    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 2);
 });

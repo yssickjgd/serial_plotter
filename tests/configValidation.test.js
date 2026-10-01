@@ -21,4 +21,25 @@ test('import validation accepts old Y bounds while rejecting malformed channels'
     assert.throws(() => validateConfig({ enableHeader: 'false' }), /enableHeader/);
     assert.throws(() => validateConfig({ channels: [{ visible: 'yes' }] }), /通道配置/);
     assert.throws(() => validateConfig({ serialBaud: 'bad' }), /波特率/);
+    assert.throws(() => validateConfig({ plotTimeXUnit: 'ms' }), /时域横轴/);
+    assert.throws(() => validateConfig({ plotFreqXUnit: 'seconds' }), /频域横轴单位/);
+    assert.throws(() => validateConfig({ plotFreqXScale: 'cubic' }), /频域横轴形式/);
+    assert.throws(() => validateConfig({ plotFreqYScale: 'db' }), /频域纵轴形式/);
+    assert.throws(() => validateConfig({ plotViewMode: 'frequency',
+        plotFreqYScale: 'log', plotYScaleMode: 'manual',
+        plotYMinFreq: '-1', plotYMaxFreq: '1' }), /对数纵轴/);
+    assert.equal(validateConfig({ plotViewMode: 'frequency',
+        plotFreqYScale: 'log', plotYScaleMode: 'manual',
+        plotYMinFreq: '0.001', plotYMaxFreq: '10' }).plotFreqYScale, 'log');
+});
+
+test('validates FFT window and finite optional channel calibration', () => {
+    assert.equal(validateConfig({ plotFftWindow: 'flatTop' }).plotFftWindow, 'flatTop');
+    assert.throws(() => validateConfig({ plotFftWindow: 'kaiser' }), /窗函数/);
+    assert.equal(validateConfig({ channels: [{ gainEnabled: true, gain: -2,
+        offsetEnabled: true, offset: 0 }] }).channels[0].gain, -2);
+    for (const channel of [
+        { gainEnabled: 'true' }, { offsetEnabled: 1 },
+        { gain: 'Infinity' }, { offset: 'NaN' }, { gain: '' }
+    ]) assert.throws(() => validateConfig({ channels: [channel] }), /通道配置/);
 });

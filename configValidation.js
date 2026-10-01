@@ -27,7 +27,12 @@ function validateConfig(config) {
         dataType: [['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'float32', 'float64'], '数据类型'],
         endianness: [['little', 'big'], '字节序'],
         plotViewMode: [['time', 'frequency'], '绘图模式'],
-        plotYScaleMode: [['auto', 'manual'], 'Y 轴策略']
+        plotYScaleMode: [['auto', 'manual'], 'Y 轴策略'],
+        plotTimeXUnit: [['samples', 's'], '时域横轴单位'],
+        plotFreqXUnit: [['bins', 'hz'], '频域横轴单位'],
+        plotFreqXScale: [['linear', 'log'], '频域横轴形式'],
+        plotFreqYScale: [['linear', 'log'], '频域纵轴形式'],
+        plotFftWindow: [['rectangular', 'hann', 'hamming', 'blackman', 'flatTop'], 'FFT 窗函数']
     };
     for (const [key, [allowed, label]] of Object.entries(options)) {
         if (config[key] !== undefined && !allowed.includes(config[key])) throw new Error(`${label}无效`);
@@ -46,16 +51,27 @@ function validateConfig(config) {
     if (config.netLocalPort !== undefined && config.netLocalPort !== '') parsePort(config.netLocalPort);
     if (config.enableHeader === true && !validHex(config.headerHex)) throw new Error('帧头 Hex 无效');
     if (config.enableFooter === true && !validHex(config.footerHex)) throw new Error('帧尾 Hex 无效');
+    const validCalibration = value => value === undefined ||
+        ((typeof value === 'number' || typeof value === 'string') &&
+            String(value).trim() !== '' && Number.isFinite(Number(value)));
     if (config.channels !== undefined && (!Array.isArray(config.channels) ||
         config.channels.some(ch => !ch || typeof ch !== 'object' ||
             (ch.name !== undefined && typeof ch.name !== 'string') ||
             (ch.color !== undefined && !/^#[0-9a-f]{6}$/i.test(ch.color)) ||
-            (ch.visible !== undefined && typeof ch.visible !== 'boolean'))))
+            (ch.visible !== undefined && typeof ch.visible !== 'boolean') ||
+            (ch.gainEnabled !== undefined && typeof ch.gainEnabled !== 'boolean') ||
+            (ch.offsetEnabled !== undefined && typeof ch.offsetEnabled !== 'boolean') ||
+            !validCalibration(ch.gain) || !validCalibration(ch.offset))))
         throw new Error('通道配置无效');
     for (const key of ['plotYMin', 'plotYMax', 'plotYMinTime', 'plotYMaxTime', 'plotYMinFreq', 'plotYMaxFreq']) {
         if (config[key] !== undefined && config[key] !== '' && !Number.isFinite(Number(config[key])))
             throw new Error(`${key} 必须是有效数值`);
     }
+    if (config.plotViewMode === 'frequency' && config.plotFreqYScale === 'log' &&
+        config.plotYScaleMode === 'manual' &&
+        (!(Number(config.plotYMinFreq) > 0) ||
+            !(Number(config.plotYMaxFreq) > Number(config.plotYMinFreq))))
+        throw new Error('对数纵轴的自定义范围必须为正，且最大值大于最小值');
     return config;
 }
 

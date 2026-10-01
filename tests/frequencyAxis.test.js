@@ -1,0 +1,128 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+function createPlotter() {
+    const labels = [];
+    const canvasEvents = new Map();
+    const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
+        ? text => ({ width: String(text).length * 6 })
+        : key === 'fillText' ? text => { labels.push(String(text)); }
+            : key === 'moveTo' || key === 'lineTo' ? (x, y) => {
+                assert.ok(Number.isFinite(x) && Number.isFinite(y));
+            }
+            : () => {} });
+    const element = () => ({ style: {}, offsetHeight: 0, clientWidth: 800,
+        addEventListener() {}, getBoundingClientRect: () =>
+            ({ width: 800, height: 400, left: 0, top: 0 }) });
+    const nodes = new Map();
+    const canvas = { ...element(), parentElement: element(), getContext: () => ctx,
+        addEventListener(name, callback) { canvasEvents.set(name, callback); } };
+    nodes.set('waveform-canvas', canvas);
+    const document = { getElementById(id) {
+        if (!nodes.has(id)) nodes.set(id, element());
+        return nodes.get(id);
+    }, addEventListener() {} };
+    const context = vm.createContext({ document, window: { addEventListener() {} },
+        performance, requestAnimationFrame() {}, console });
+    for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
+        'channelTransform.js', 'spectrum.js', 'plotter.js']) {
+        vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
+    }
+    const { FrameBuffer, Plotter } = context.SerialPlotter;
+    const plotter = new Plotter('waveform-canvas', new FrameBuffer(1, 1024));
+    plotter.setChannelCount(1);
+    plotter.setChannelVisible(0, true);
+    for (let i = 0; i < 1024; i++) plotter.addFrame([Math.sin(2 * Math.PI * 100 * i / 1024)]);
+    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    return { plotter, labels, canvasEvents };
+}
+
+test('frequency axis and cursor show hertz after a measured sample rate is available', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setSampleRateHz(1024);
+    plotter.draw();
+    assert.ok(plotter._drawState.min >= 0, 'linear magnitude axis has no negative amplitudes');
+    assert.ok(labels.includes('0 Hz'));
+    assert.ok(labels.includes('512 Hz'), 'rightmost label includes the Nyquist bin');
+    labels.length = 0;
+    plotter.vp.frequency.scrollOffset = 100;
+    plotter.vp.frequency.displayCount = 100;
+    plotter.mousePos = { x: 0, y: 100 };
+    plotter.draw();
+    assert.ok(labels.includes('100 Hz'), 'zoomed axis keeps the absolute bin offset');
+    assert.ok(labels.some(label => label.includes('100 Hz') && label.includes('Bin 100')),
+        'cursor frequency and bin refer to the same sample');
+});
+
+test('wheel zoom keeps the cursor near the same frequency on a log axis', () => {
+    const { plotter, canvasEvents } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqXScale: 'log' });
+    plotter.vp.frequency.displayCount = 400;
+    plotter.draw();
+    const plotW = plotter.canvas.width - plotter.pX;
+    canvasEvents.get('wheel')({ clientX: plotW / 2, deltaY: -1, preventDefault() {} });
+    assert.ok(plotter.vp.frequency.scrollOffset <= 2);
+});
+
+test('rectangle zoom follows both logarithmic axis transforms', () => {
+    const { plotter, canvasEvents } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency',
+        freqXScale: 'log', freqYScale: 'log' });
+    plotter.draw();
+    const plotW = plotter.canvas.width - plotter.pX;
+    const plotH = plotter.canvas.height - plotter.pY;
+    const fire = (name, x, y) => canvasEvents.get(name)({
+        button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {}
+    });
+    fire('pointerdown', 0, plotH / 4);
+    fire('pointerup', plotW / 2, plotH * 3 / 4);
+    assert.equal(plotter.vp.frequency.scrollOffset, 1);
+    assert.ok(plotter.vp.frequency.displayCount >= 20 &&
+        plotter.vp.frequency.displayCount <= 24);
+    assert.ok(plotter._boxZoomY.frequency.min > 0);
+});
+
+test('time seconds, frequency bins, and logarithmic axes use their selected units', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setSampleRateHz(1024);
+    plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 's' });
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('0.999 s'));
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins',
+        freqXScale: 'log', freqYScale: 'log' });
+    labels.length = 0;
+    plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
+    plotter.draw();
+    assert.equal(plotter._drawState.startIdx, 1, 'log frequency skips DC');
+    assert.ok(plotter._drawState.min > 0, 'log amplitude uses positive bounds');
+    assert.ok(labels.includes('1'));
+    assert.ok(labels.includes('512'));
+    assert.ok(labels.some(label => label.includes('Bin 23')),
+        'the cursor in the middle of a log axis lands near the geometric mean');
+});
+
+test('frequency axis does not invent hertz when sample rate is unknown', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.draw();
+    assert.ok(labels.includes('-- Hz'));
+});
+
+test('small nonzero sample intervals remain visible in seconds', () => {
+    const { plotter } = createPlotter();
+    plotter.setSampleRateHz(5000);
+    plotter.setDisplayOptions({ timeXUnit: 's' });
+    assert.equal(plotter._formatTimeIndex(1), '0.0002 s');
+});
+
+test('log amplitude renders a silent spectrum with finite coordinates', () => {
+    const { plotter } = createPlotter();
+    plotter.clear();
+    for (let i = 0; i < 64; i++) plotter.addFrame([0]);
+    plotter.setDisplayOptions({ displayMode: 'frequency',
+        freqXScale: 'log', freqYScale: 'log' });
+    plotter.draw();
+    assert.ok(plotter._drawState.min > 0);
+});

@@ -2,7 +2,9 @@ const CONFIG_VALUE_FIELDS = [
     'serialBaud', 'serialData', 'serialStop', 'serialParity',
     'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
     'dataType', 'endianness', 'channelsCount', 'maxPoints',
-    'sendIntervalUnit', 'plotViewMode', 'plotYScaleMode'
+    'sendIntervalUnit', 'plotViewMode', 'plotYScaleMode',
+    'plotTimeXUnit', 'plotFreqXUnit', 'plotFreqXScale', 'plotFreqYScale',
+    'plotFftWindow'
 ];
 const CONFIG_CHECK_FIELDS = ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc'];
 
@@ -13,23 +15,40 @@ function collectConfigFromView(elements, bounds, channelMeta) {
     Object.assign(config, {
         plotYMinTime: bounds.time.min, plotYMaxTime: bounds.time.max,
         plotYMinFreq: bounds.frequency.min, plotYMaxFreq: bounds.frequency.max,
-        channels: channelMeta.map(({ name, color, visible }) => ({ name, color, visible }))
+        channels: channelMeta.map(({ name, color, visible,
+            gainEnabled, gain, offsetEnabled, offset }) => ({
+            name, color, visible, gainEnabled, gain, offsetEnabled, offset
+        }))
     });
     return config;
 }
 
+function updatePlotOptionVisibility(elements) {
+    const mode = elements.plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+    elements.wrapFftRemoveDc.style.display = mode === 'frequency' ? '' : 'none';
+    elements.wrapPlotTimeAxis.style.display = mode === 'time' ? '' : 'none';
+    elements.wrapPlotFreqAxis.style.display = mode === 'frequency' ? '' : 'none';
+    elements.wrapPlotYBounds.style.display = elements.plotYScaleMode.value === 'manual' ? '' : 'none';
+}
+
 function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
-    updateFrameFormat, updateChannels, updatePlot }) {
+    updateFrameFormat, updateChannels, updatePlot, syncPlotChoices }) {
     elements.connType.value = config.connType || 'serial';
     updateConnectionModeUI();
     for (const key of CONFIG_VALUE_FIELDS) {
         if (config[key] !== undefined) elements[key].value = config[key];
     }
+    for (const [key, defaultValue] of Object.entries({
+        plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
+        plotFreqXScale: 'linear', plotFreqYScale: 'linear', plotFftWindow: 'hann'
+    })) {
+        if (!elements[key].value) elements[key].value = defaultValue;
+    }
     for (const key of CONFIG_CHECK_FIELDS) {
         if (config[key] !== undefined) elements[key].checked = config[key];
     }
+    if (config.plotFftWindow === undefined) elements.plotFftWindow.value = 'hann';
     const mode = elements.plotViewMode.value === 'frequency' ? 'frequency' : 'time';
-    elements.wrapFftRemoveDc.style.display = mode === 'frequency' ? '' : 'none';
     bounds.time.min = config.plotYMinTime ?? config.plotYMin ?? '-1';
     bounds.time.max = config.plotYMaxTime ?? config.plotYMax ?? '1';
     bounds.frequency.min = config.plotYMinFreq ?? '-1';
@@ -39,8 +58,14 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
     updateFrameFormat();
     updateChannels(config.channels);
     updatePlot();
+    updatePlotOptionVisibility(elements);
+    if (syncPlotChoices) syncPlotChoices();
 }
 
 globalThis.SerialPlotter ??= {};
-Object.assign(globalThis.SerialPlotter, { collectConfigFromView, applyConfigToView });
-if (typeof module !== 'undefined') module.exports = { collectConfigFromView, applyConfigToView };
+Object.assign(globalThis.SerialPlotter, {
+    collectConfigFromView, applyConfigToView, updatePlotOptionVisibility
+});
+if (typeof module !== 'undefined') module.exports = {
+    collectConfigFromView, applyConfigToView, updatePlotOptionVisibility
+};

@@ -17,8 +17,9 @@
 | `projectLimits.js`、`byteUtils.js` | 共享的数值范围与字节转换 |
 | `frameBuffer.js` | 同步保存各通道数值与原始帧的有界环形缓冲区 |
 | `plotMath.js` | 像素分桶极值与 CSV 字段转义 |
-| `csvExport.js` | 从完整保留窗口生成 CSV |
-| `spectrum.js` | Hann 窗、FFT 与幅度谱计算 |
+| `channelTransform.js` | 通道放大与偏移的统一数值变换 |
+| `csvExport.js` | 从完整保留窗口生成应用通道变换后的 CSV |
+| `spectrum.js` | 可选窗函数、FFT 与幅度谱计算 |
 | `plotter.js` | Canvas、通道显示、视口交互与频谱缓存；读取应用提供的缓冲区 |
 | `monitorView.js` | 原始帧和 TX/错误事件的可视区域日志 |
 | `configValidation.js` | 导入配置和 UI 数值校验 |
@@ -35,14 +36,14 @@ Web Serial / WebSocket 二进制帧
   → Plotter / MonitorView / CSV 导出（共享同一窗口）
 ```
 
-`DataParser` 的回调参数为 `(values, time, frameBytes)`、`(type, time, frameBytes)` 和 `(chunkBytes, time)`。监视台按可用宽度计算每条记录的行高与虚拟滚动位置，原始字节在记录进入可见区域时才转为 Hex 文本。暂停时入口丢弃新字节，已保留的样本和原始帧仍可滚动查看。导出 CSV 使用窗口内完整样本，而非屏幕上的抽样折线。
+`DataParser` 的回调参数为 `(values, time, frameBytes)`、`(type, time, frameBytes)` 和 `(chunkBytes, time)`。监视台按可用宽度计算每条记录的行高与虚拟滚动位置，原始字节在记录进入可见区域时才转为 Hex 文本。暂停时入口丢弃新字节，已保留的样本和原始帧仍可滚动查看。通道变换在读取时应用于绘图、频谱、统计和 CSV；缓冲区及监视台保留原始值和字节。
 
-时域视口和频域视口的滚动状态独立；两者的手动 Y 轴范围也独立。FFT 仅计算可见通道，采集中至多约每 250 ms 更新一次，设置改变或暂停后立即刷新。
+时域视口和频域视口的滚动状态独立；两者的手动 Y 轴范围也独立。FFT 仅计算可见通道，采集中最短每 100 ms 更新一次；仅有新采样且缓存尚未到期时跳过重复绘图，设置改变或暂停后立即刷新。
 
 绘图区的 Pointer 事件管理矩形框选。`plotMath.js` 将画布矩形映射到当前可见样本与 Y 值范围；`Plotter` 为时域和频域分别保存临时框选视口。框选不会改写持久化的 Y 轴配置，右键清除当前模式的框选范围。
 
 ## 配置与测试
 
-配置仍保存在 `localStorage` 的 `serialplot_v3_config`，导入导出字段维持原格式，并接受旧版 `plotYMin` / `plotYMax`。通道数为 1–24，最大采样点数为 2–100000。
+配置仍保存在 `localStorage` 的 `serialplot_v3_config`，现有字段取值保持兼容，并新增 `plotFftWindow` 及每通道的 `gainEnabled`、`gain`、`offsetEnabled`、`offset`。旧配置默认使用 Hann 窗且关闭通道变换，也接受旧版 `plotYMin` / `plotYMax`。通道数为 1–24，最大采样点数为 2–100000。
 
 在 Node.js 24 环境运行 `npm run check` 检查 JavaScript 语法和空白格式，运行 `npm test` 覆盖解析、缓冲、网络、配置恢复、发送、脚本加载和 30 万帧压力场景。浏览器绘制频率和交互延迟需要在目标 Windows Chrome/Edge 环境中测量。
