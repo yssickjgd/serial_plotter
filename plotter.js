@@ -29,6 +29,8 @@ class Plotter {
         this.frames = frames;
         this._fftCache = new Map();
         this._fftVersion = -1;
+        this._fftInputRange = null;
+        this._fftSourceMode = null;
         this._fftRevision = 0;
         this._fftAt = 0;
         this._lastDraw = 0;
@@ -283,10 +285,12 @@ class Plotter {
     addFrame(valuesArray, frameBytes, timeStr, order) {
         if (this.isPaused) return;
         this.frames.append(valuesArray, frameBytes, timeStr, order);
-        if (this._vp.autoFollow) {
-            const total = this._scrollTotal();
-            this._vp.scrollOffset = Math.max(0, total - this._vp.displayCount);
-        }
+        if (this.vp.time.autoFollow)
+            this.vp.time.scrollOffset = Math.max(0,
+                this.frames.length - this.vp.time.displayCount);
+        if (this.displayMode === 'frequency' && this.vp.frequency.autoFollow)
+            this.vp.frequency.scrollOffset = Math.max(0,
+                this._scrollTotal() - this.vp.frequency.displayCount);
         this._dirty = true;
     }
 
@@ -307,7 +311,11 @@ class Plotter {
     }
 
     /** 切换暂停状态，返回当前是否暂停 */
-    togglePause()          { this.isPaused = !this.isPaused; return this.isPaused; }
+    togglePause() {
+        this.isPaused = !this.isPaused;
+        this._markViewDirty();
+        return this.isPaused;
+    }
 
     /** 使用最近一次有效的接收帧率换算频谱横轴，暂停时保留该值。 */
     setSampleRateHz(rate) {
@@ -352,16 +360,18 @@ class Plotter {
 
     /**
      * 汇总单通道的统计信息，多通道返回 null。
-     * 基本统计（max/min/pp/mean/stdDev）基于视口窗口数据，
-     * 主频/主周期始终基于全量数据（保证滚动时数值稳定）。
+     * 基本统计在时域使用当前视口，在频域使用 FFT 输入范围；
+     * 主频/主周期与频谱使用同一输入范围：实时为全量，暂停为时域视口。
      */
     _buildSummary(visibleSeries, viewMode) {
         if (visibleSeries.length !== 1) {
             return null;
         }
         const series = visibleSeries[0];
-        const values = viewMode === 'frequency'
-            ? this._transformedChannelSlice(series.channelIndex) : series.rawValues;
+        const range = viewMode === 'frequency' ? this._frequencyInputRange() : null;
+        const values = range
+            ? this._transformedChannelSlice(series.channelIndex, range.start, range.end)
+            : series.rawValues;
         if (!values || values.length === 0) return null;
 
         // 基本统计：基于视口窗口数据
@@ -383,7 +393,7 @@ class Plotter {
         const variance = Math.max(0, sumSq / validCount - mean * mean);
         const stdDev = Math.sqrt(variance);
 
-        // 主频/主周期：始终基于全量数据（FFT 输入不随视口滚动而变化）
+        // 主频/主周期：与当前 FFT 输入一致，不随频域视口滚动而变化。
         const freqSeries = this._frequencyForChannel(series.channelIndex);
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
@@ -413,21 +423,39 @@ class Plotter {
         return values;
     }
 
-    /** 对所有可见通道的全量数据执行 FFT（结果缓存在 Map 中供 draw 复用） */
+    /** 实时取全部保留样本；暂停取时域视口内的样本。 */
+    _frequencyInputRange() {
+        const total = this.frames.length;
+        if (!this.isPaused) return { start: 0, end: total };
+        const count = Math.max(2, Math.floor(this.vp.time.displayCount));
+        let start = Math.max(0, Math.floor(this.vp.time.scrollOffset));
+        if (start >= total) start = Math.max(0, total - count);
+        return { start, end: Math.min(total, start + count) };
+    }
+
+    /** 对所有可见通道的当前输入范围执行 FFT，结果缓存在 Map 中供 draw 复用。 */
     _computeFftForVisibleChannels() {
         const now = performance.now();
-        if (this._fftVersion === this.frames.version ||
-            (this._fftVersion >= 0 && !this.isPaused &&
+        const range = this._frequencyInputRange();
+        const sourceMode = this.isPaused ? 'paused' : 'live';
+        const sameRange = this._fftInputRange &&
+            this._fftInputRange.start === range.start && this._fftInputRange.end === range.end;
+        if ((this._fftVersion === this.frames.version && sameRange) ||
+            (this._fftVersion >= 0 && sourceMode === 'live' &&
+                this._fftSourceMode === 'live' &&
                 now - this._fftAt < FFT_REFRESH_INTERVAL_MS)) return this._fftCache;
         const results = new Map();
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
             if (!ch.visible || this.frames.length === 0) continue;
             results.set(idx, globalThis.SerialPlotter.prepareFrequencySeries(
-                this._transformedChannelSlice(idx), this.removeDcForFft, this.fftWindow));
+                this._transformedChannelSlice(idx, range.start, range.end),
+                this.removeDcForFft, this.fftWindow));
         }
         this._fftCache = results;
         this._fftVersion = this.frames.version;
+        this._fftInputRange = range;
+        this._fftSourceMode = sourceMode;
         this._fftAt = now;
         if (results.size > 0) this._fftRevision++;
         return results;
