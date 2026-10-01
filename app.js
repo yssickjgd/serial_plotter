@@ -24,7 +24,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser,
         MonitorView, SendController, ConfigStore, exportFrameCsv,
-        collectConfigFromView, applyConfigToView,
+        collectConfigFromView, applyConfigToView, updatePlotOptionVisibility,
         parseIntInRange, parsePort, validateConfig } = globalThis.SerialPlotter;
 
     /* ─────────────────────────────────────────────────────────
@@ -100,11 +100,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const channelsAllOffBtn = document.getElementById('btn-channels-all-off');
     const plotViewMode = document.getElementById('plot-view-mode');
     const plotYScaleMode = document.getElementById('plot-y-scale-mode');
+    const plotTimeXUnit = document.getElementById('plot-time-x-unit');
+    const plotFreqXUnit = document.getElementById('plot-freq-x-unit');
+    const plotFreqXScale = document.getElementById('plot-freq-x-scale');
+    const plotFreqYScale = document.getElementById('plot-freq-y-scale');
+    const plotFftWindow = document.getElementById('plot-fft-window');
+    const wrapPlotTimeAxis = document.getElementById('wrap-plot-time-axis');
+    const wrapPlotFreqAxis = document.getElementById('wrap-plot-frequency-axis');
     const plotFftRemoveDc = document.getElementById('plot-fft-remove-dc');
     const wrapFftRemoveDc = document.getElementById('wrap-fft-remove-dc');
+    const wrapPlotYBounds = document.getElementById('wrap-plot-y-bounds');
     const plotYMin = document.getElementById('plot-y-min');
     const plotYMax = document.getElementById('plot-y-max');
-    const plotInfoRow = document.getElementById('plot-info-row');
+    const plotChannelStats = document.getElementById('plot-channel-stats');
+    const plotFpsLabel = document.getElementById('stat-plot-fps');
+
+    const plotChoiceGroups = [...document.querySelectorAll('[data-plot-choice]')];
+    const syncPlotChoices = () => {
+        for (const group of plotChoiceGroups) {
+            const value = document.getElementById(group.dataset.plotChoice).value;
+            group.querySelectorAll('input[type="radio"]').forEach(radio => {
+                radio.checked = radio.value === value;
+            });
+        }
+    };
+    for (const group of plotChoiceGroups) group.addEventListener('change', event => {
+        if (!event.target.checked) return;
+        const control = document.getElementById(group.dataset.plotChoice);
+        control.value = event.target.value;
+        control.dispatchEvent(new Event('change'));
+    });
 
     // 时域/频域独立的 Y 轴范围（字符串值，与 UI 输入框同步）
     let plotYBounds = {
@@ -141,6 +166,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebar = document.getElementById('sidebar');
     const mainDisplay = document.getElementById('main-display');
     const hResizer = document.getElementById('h-resizer');
+    const rightResizer = document.getElementById('right-resizer');
+    const channelSidebar = document.getElementById('channel-sidebar');
     const canvasWrapper = document.getElementById('canvas-wrapper');
     const vResizer = document.getElementById('v-resizer');
     const monitorPanel = document.getElementById('monitor-panel');
@@ -162,8 +189,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* 定时刷新字节流监视台统计面板。 */
     const statsBarRow = document.querySelector('.stats-bar-row');
+    const plotFrameCount = () => plotter.displayMode === 'frequency'
+        ? plotter.completedSpectrumDraws : plotter.completedDraws;
+    let plotFpsLastMode = plotter.displayMode;
+    let plotFpsLastDraws = plotFrameCount();
+    let plotFpsLastAt = performance.now();
 
     setInterval(() => {
+        const now = performance.now();
+        const elapsed = Math.max(1, now - plotFpsLastAt);
+        const mode = plotter.displayMode;
+        const currentDraws = plotFrameCount();
+        const drawCount = mode === plotFpsLastMode ? currentDraws - plotFpsLastDraws : 0;
+        plotFpsLabel.textContent = `绘图帧率: ${(drawCount * 1000 / elapsed).toFixed(1)} FPS`;
+        plotFpsLabel.title = mode === 'frequency'
+            ? '频域统计实际更新并绘制的新频谱，不计重复绘制的缓存频谱。'
+            : '时域统计已完成的画布绘制。';
+        plotFpsLastDraws = currentDraws;
+        plotFpsLastMode = mode;
+        plotFpsLastAt = now;
         if (capturePaused) {
             // 暂停期间只同步基准值，避免恢复后出现瞬时峰值
             stats._rxLast = stats.rxBytes;
@@ -193,18 +237,19 @@ document.addEventListener('DOMContentLoaded', () => {
         stats._framesLast = parser.frameCount;
         stats._failsLast = parser.failCount;
         stats.framesPerSec = frames;
+        plotter.setSampleRateHz(frames);
     }, stats._period);
 
     /** 渲染波形统计信息到绘图区标题栏（单通道时显示） */
     const renderPlotStats = (statsData) => {
         if (!statsData) {
-            plotInfoRow.innerHTML = '&nbsp;';
+            plotChannelStats.replaceChildren();
             return;
         }
         // 主频 = dominantBin / fftSize * 帧率（Hz）
-        const freqHz = statsData.freq === null
+        const freqHz = statsData.freq === null || plotter.sampleRateHz <= 0
             ? '--'
-            : fmtFixed(statsData.freq * stats.framesPerSec, 6, 15);
+            : fmtFixed(statsData.freq * plotter.sampleRateHz, 6, 15);
         const periodText = statsData.period === null
             ? '--'
             : fmtFixed(statsData.period, 0, 15);
@@ -224,7 +269,7 @@ document.addEventListener('DOMContentLoaded', () => {
             span.textContent = `${label} ${value}`;
             return span;
         });
-        plotInfoRow.replaceChildren(...segments);
+        plotChannelStats.replaceChildren(...segments);
     };
 
     plotter.onStatsUpdate = renderPlotStats;
@@ -249,20 +294,35 @@ document.addEventListener('DOMContentLoaded', () => {
      *  垂直分隔条：调整波形区 / 监视台高度比例
      * ───────────────────────────────────────────────────────── */
 
-    // —— 水平分隔条（侧栏 ↔ 主区域）——
+    // —— 水平分隔条（左侧设置 ↔ 主区域 ↔ 右侧通道）——
     let hDragging = false, hStartX = 0, hStartW = 0;
+    let rightDragging = false, rightStartX = 0, rightStartW = 0;
+    const appContainer = document.querySelector('.app-container');
+    const minPlotWidth = 320;
+    const dividerWidth = () => hResizer.offsetWidth + rightResizer.offsetWidth;
 
     /** 应用侧栏宽度并触发波形重绘，与 applyVerticalHeights 对应 */
     const applySidebarWidth = (newW) => {
-        const w = Math.max(180, Math.min(500, newW));
+        const available = appContainer.clientWidth - channelSidebar.offsetWidth -
+            dividerWidth() - minPlotWidth;
+        const w = Math.max(180, Math.min(500, available, newW));
         sidebar.style.width = sidebar.style.minWidth = sidebar.style.maxWidth = w + 'px';
+        plotter.resize();
+    };
+
+    const applyRightWidth = newW => {
+        const available = appContainer.clientWidth - sidebar.offsetWidth -
+            dividerWidth() - minPlotWidth;
+        const width = Math.max(240, Math.min(520, available, newW));
+        channelSidebar.style.width = channelSidebar.style.minWidth =
+            channelSidebar.style.maxWidth = width + 'px';
         plotter.resize();
     };
 
     /* 窗口缩小时约束侧栏宽度不超出可用空间 */
     window.addEventListener('resize', () => {
-        const maxW = mainDisplay.clientWidth - 100;
-        if (sidebar.offsetWidth > maxW) applySidebarWidth(maxW);
+        applyRightWidth(channelSidebar.offsetWidth);
+        applySidebarWidth(sidebar.offsetWidth);
     });
 
     hResizer.addEventListener('mousedown', (e) => {
@@ -274,9 +334,23 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
     });
 
+    rightResizer.addEventListener('mousedown', e => {
+        rightDragging = true;
+        rightStartX = e.clientX;
+        rightStartW = channelSidebar.offsetWidth;
+        document.body.style.cursor = 'ew-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
     document.addEventListener('mousemove', (e) => {
         if (!hDragging) return;
         applySidebarWidth(hStartW + (e.clientX - hStartX));
+    });
+
+    document.addEventListener('mousemove', e => {
+        if (!rightDragging) return;
+        applyRightWidth(rightStartW - (e.clientX - rightStartX));
     });
 
     document.addEventListener('mouseup', () => {
@@ -285,6 +359,15 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
     });
+
+    document.addEventListener('mouseup', () => {
+        if (!rightDragging) return;
+        rightDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    });
+    applyRightWidth(channelSidebar.offsetWidth);
+    applySidebarWidth(sidebar.offsetWidth);
 
     // —— 垂直分隔条（波形区 ↔ 监视台）——
     let vDragging = false, vStartY = 0, vStartH = 0;
@@ -425,17 +508,24 @@ document.addEventListener('DOMContentLoaded', () => {
         plotter.setDisplayOptions({
             displayMode: plotViewMode.value,
             yScaleMode: plotYScaleMode.value,
+            timeXUnit: plotTimeXUnit.value,
+            freqXUnit: plotFreqXUnit.value,
+            freqXScale: plotFreqXScale.value,
+            freqYScale: plotFreqYScale.value,
             removeDcForFft: plotFftRemoveDc.checked,
+            fftWindow: plotFftWindow.value,
             yMinTime: plotYBounds.time.min, yMaxTime: plotYBounds.time.max,
             yMinFreq: plotYBounds.frequency.min, yMaxFreq: plotYBounds.frequency.max
         });
-        if (!plotInfoRow.innerHTML) plotInfoRow.innerHTML = '&nbsp;';
     };
 
     /** 重建通道配置列表 UI（在通道数变化或应用帧格式时调用） */
+    const expandedChannelIndices = new Set();
     const rebuildChannelList = () => {
         channelListDiv.innerHTML = '';
         const metas = plotter.getChannelMeta();
+        for (const index of expandedChannelIndices)
+            if (index >= metas.length) expandedChannelIndices.delete(index);
 
         if (metas.length === 0) {
             const p = document.createElement('p');
@@ -449,10 +539,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const row = document.createElement('div');
             row.className = 'channel-row';
 
-            // 通道标签（CH1, CH2, ...）
-            const label = document.createElement('span');
-            label.className = 'channel-row-label';
-            label.textContent = `CH${meta.index + 1}`;
+            // CH 按钮展开该通道的放大与偏移设置。
+            const channelToggle = document.createElement('button');
+            channelToggle.type = 'button';
+            channelToggle.className = 'channel-row-label channel-expand-toggle';
+            channelToggle.textContent = `CH${meta.index + 1}`;
+            channelToggle.ariaExpanded = String(expandedChannelIndices.has(meta.index));
 
             // 颜色选择器
             const colorInput = document.createElement('input');
@@ -484,12 +576,78 @@ document.addEventListener('DOMContentLoaded', () => {
             visChk.title = '显示/隐藏';
             visChk.addEventListener('change', () => {
                 plotter.setChannelVisible(meta.index, visChk.checked);
-                label.style.opacity = visChk.checked ? '1' : '0.4';
+                channelToggle.style.opacity = visChk.checked ? '1' : '0.4';
                 saveConfig();
                 syncPlotDisplaySettings();
             });
 
-            row.append(label, colorInput, nameInput, visChk);
+            const main = document.createElement('div');
+            main.className = 'channel-row-main';
+            main.append(channelToggle, colorInput, nameInput, visChk);
+
+            const transformOptions = document.createElement('div');
+            transformOptions.className = 'channel-transform-options';
+            transformOptions.id = `channel-transform-${meta.index + 1}`;
+            transformOptions.hidden = !expandedChannelIndices.has(meta.index);
+            channelToggle.ariaControls = transformOptions.id;
+            channelToggle.addEventListener('click', () => {
+                if (transformOptions.hidden) expandedChannelIndices.add(meta.index);
+                else expandedChannelIndices.delete(meta.index);
+                transformOptions.hidden = !transformOptions.hidden;
+                channelToggle.ariaExpanded = String(!transformOptions.hidden);
+            });
+            const makeTransform = (key, text, enabled, value) => {
+                const option = document.createElement('div');
+                option.className = 'channel-transform-option';
+                const checkLabel = document.createElement('label');
+                checkLabel.className = 'chk-label';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = enabled;
+                checkLabel.append(checkbox, text);
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.step = 'any';
+                input.value = String(value);
+                input.ariaLabel = `CH${meta.index + 1} ${text}`;
+                input.style.display = enabled ? '' : 'none';
+                option.append(checkLabel, input);
+                const update = () => {
+                    const gainInput = transformOptions.querySelector('[data-transform="gain"]');
+                    const offsetInput = transformOptions.querySelector('[data-transform="offset"]');
+                    const current = plotter.getChannelMeta()[meta.index];
+                    const readNumber = (field, fallback) => {
+                        const number = field.value.trim() === '' ? NaN : Number(field.value);
+                        if (Number.isFinite(number)) return number;
+                        field.setCustomValidity('请输入有限数值');
+                        field.reportValidity();
+                        field.setCustomValidity('');
+                        field.value = String(fallback);
+                        return fallback;
+                    };
+                    const gain = readNumber(gainInput, current.gain);
+                    const offset = readNumber(offsetInput, current.offset);
+                    plotter.setChannelTransform(meta.index, {
+                        gainEnabled: transformOptions.querySelector('[data-enable="gain"]').checked,
+                        gain, offsetEnabled: transformOptions.querySelector('[data-enable="offset"]').checked,
+                        offset
+                    });
+                    saveConfig();
+                };
+                checkbox.dataset.enable = key;
+                input.dataset.transform = key;
+                checkbox.addEventListener('change', () => {
+                    input.style.display = checkbox.checked ? '' : 'none';
+                    update();
+                });
+                input.addEventListener('change', update);
+                return option;
+            };
+            transformOptions.append(
+                makeTransform('gain', '放大系数', meta.gainEnabled, meta.gain),
+                makeTransform('offset', '偏移量', meta.offsetEnabled, meta.offset)
+            );
+            row.append(main, transformOptions);
             channelListDiv.appendChild(row);
         });
     };
@@ -506,14 +664,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
         plotYMin.value = plotYBounds[mode].min;
         plotYMax.value = plotYBounds[mode].max;
-        wrapFftRemoveDc.style.display = mode === 'frequency' ? '' : 'none';
         syncPlotDisplaySettings(); saveConfig();
+        updatePlotOptionVisibility(configElements);
+        syncPlotChoices();
     });
 
     // 其他绘图选项变化时同步
-    [plotYScaleMode, plotFftRemoveDc]
+    [plotYScaleMode, plotFftRemoveDc, plotTimeXUnit,
+        plotFreqXUnit, plotFreqXScale, plotFreqYScale, plotFftWindow]
         .filter(Boolean)
-        .forEach(el => el.addEventListener('change', () => { syncPlotDisplaySettings(); saveConfig(); }));
+        .forEach(el => el.addEventListener('change', () => {
+            syncPlotDisplaySettings();
+            updatePlotOptionVisibility(configElements);
+            syncPlotChoices();
+            saveConfig();
+        }));
 
     // Y 轴范围变化时更新当前模式的 bounds 再同步
     [plotYMin, plotYMax]
@@ -559,7 +724,9 @@ document.addEventListener('DOMContentLoaded', () => {
         endianness: endiannessSelect, channelsCount: channelsInput,
         maxPoints: maxPointsInput, sendIntervalUnit,
         plotViewMode, plotYScaleMode, plotFftRemoveDc,
-        plotYMin, plotYMax, wrapFftRemoveDc
+        plotTimeXUnit, plotFreqXUnit, plotFreqXScale, plotFreqYScale, plotFftWindow,
+        plotYMin, plotYMax, wrapFftRemoveDc, wrapPlotTimeAxis, wrapPlotFreqAxis,
+        wrapPlotYBounds
     };
 
     /** 从当前 UI 状态收集完整配置对象 */
@@ -582,7 +749,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 plotter.setChannelSettings(channels);
                 rebuildChannelList();
             },
-            updatePlot: syncPlotDisplaySettings
+            updatePlot: syncPlotDisplaySettings, syncPlotChoices
         });
     };
 
@@ -643,10 +810,9 @@ document.addEventListener('DOMContentLoaded', () => {
         e.target.value = '';  // 清空 input 以便重复选择同一文件
     });
 
-    // 任意配置字段变化时自动保存（已独立处理的项不重复注册：plotViewMode、plotYMin、plotYMax）
+    // 其余配置字段变化时自动保存；绘图控件已在上方同步并保存。
     [checksumChk, dataTypeSelect, endiannessSelect, channelsInput,
-        headerInput, footerInput, sendIntervalUnit,
-        plotYScaleMode, plotFftRemoveDc]
+        headerInput, footerInput, sendIntervalUnit]
         .filter(Boolean)
         .forEach(el => el.addEventListener('change', saveConfig));
 
@@ -820,6 +986,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stats._txLast = 0;
         stats._framesLast = 0;
         stats._failsLast = 0;
+        stats.framesPerSec = 0;
     });
 
     exportBtn.addEventListener('click', () => {

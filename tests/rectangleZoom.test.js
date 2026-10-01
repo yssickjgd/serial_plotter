@@ -28,7 +28,7 @@ function createPlotter(canvasScale = 1) {
         requestAnimationFrame() {}, console
     });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'spectrum.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;

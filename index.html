@@ -6,7 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="精密科学串口网络分析仪，又称串口绘图助手、串口调试助手，是由中国科学技术大学RoboWalker战队yssickjgd同学开发的一款基于 Web 的串口、TCP/UDP 科学绘图工具，支持实时 FFT 频谱分析、多通道波形监视、自定义帧解析与 CSV 导出。">
     <title>精密科学串口网络分析仪 | Advanced Plotter</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
 
@@ -175,37 +174,73 @@
                 </div>
 
                 <div class="channels-split-pane" id="channels-split-pane">
-                    <div class="control-group channels-list-panel" id="channels-list-panel">
-                        <div class="section-title">通道显示配置</div>
-                        <div class="channel-toolbar">
-                            <p class="hint-text">在帧格式页配置通道数后，点击"应用"自动生成。</p>
-                            <div class="channel-toolbar-actions">
-                                <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
-                                <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
-                            </div>
-                        </div>
-                        <div id="channel-config-list" class="channel-config-list"></div>
-                    </div>
                     <div class="control-group channels-display-panel" id="channels-display-panel">
                         <div class="section-title">通道显示方式</div>
                         <div class="input-group">
-                            <label>波形模式</label>
-                            <select id="plot-view-mode">
-                                <option value="time">时域图</option>
-                                <option value="frequency">频域图</option>
-                            </select>
+                            <span class="option-label">波形模式</span>
+                            <input type="hidden" id="plot-view-mode" value="time" />
+                            <div class="choice-group" data-plot-choice="plot-view-mode" role="radiogroup" aria-label="波形模式">
+                                <label><input type="radio" name="plot-view-mode-choice" value="time" checked />时域图</label>
+                                <label><input type="radio" name="plot-view-mode-choice" value="frequency" />频域图</label>
+                            </div>
+                        </div>
+                        <div id="wrap-plot-time-axis" class="input-group">
+                            <span class="option-label">时域横轴单位</span>
+                            <input type="hidden" id="plot-time-x-unit" value="samples" />
+                            <div class="choice-group" data-plot-choice="plot-time-x-unit" role="radiogroup" aria-label="时域横轴单位">
+                                <label><input type="radio" name="plot-time-x-unit-choice" value="samples" checked />采样点</label>
+                                <label><input type="radio" name="plot-time-x-unit-choice" value="s" />s</label>
+                            </div>
+                        </div>
+                        <div id="wrap-plot-frequency-axis" class="axis-options" style="display:none;">
+                            <div class="input-group">
+                                <span class="option-label">频域横轴单位</span>
+                                <input type="hidden" id="plot-freq-x-unit" value="hz" />
+                                <div class="choice-group" data-plot-choice="plot-freq-x-unit" role="radiogroup" aria-label="频域横轴单位">
+                                    <label><input type="radio" name="plot-freq-x-unit-choice" value="bins" />采样点（FFT Bin）</label>
+                                    <label><input type="radio" name="plot-freq-x-unit-choice" value="hz" checked />Hz</label>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <span class="option-label">频域横轴形式</span>
+                                <input type="hidden" id="plot-freq-x-scale" value="linear" />
+                                <div class="choice-group" data-plot-choice="plot-freq-x-scale" role="radiogroup" aria-label="频域横轴形式">
+                                    <label><input type="radio" name="plot-freq-x-scale-choice" value="linear" checked />线性</label>
+                                    <label><input type="radio" name="plot-freq-x-scale-choice" value="log" />对数</label>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <span class="option-label">频域纵轴形式</span>
+                                <input type="hidden" id="plot-freq-y-scale" value="linear" />
+                                <div class="choice-group" data-plot-choice="plot-freq-y-scale" role="radiogroup" aria-label="频域纵轴形式">
+                                    <label><input type="radio" name="plot-freq-y-scale-choice" value="linear" checked />线性</label>
+                                    <label><input type="radio" name="plot-freq-y-scale-choice" value="log" />对数幅值</label>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <span class="option-label">FFT 窗函数</span>
+                                <input type="hidden" id="plot-fft-window" value="hann" />
+                                <div class="choice-group" data-plot-choice="plot-fft-window" role="radiogroup" aria-label="FFT 窗函数">
+                                    <label><input type="radio" name="plot-fft-window-choice" value="rectangular" />无窗</label>
+                                    <label><input type="radio" name="plot-fft-window-choice" value="hann" checked />Hann</label>
+                                    <label><input type="radio" name="plot-fft-window-choice" value="hamming" />Hamming</label>
+                                    <label><input type="radio" name="plot-fft-window-choice" value="blackman" />Blackman</label>
+                                    <label><input type="radio" name="plot-fft-window-choice" value="flatTop" />Flat-top</label>
+                                </div>
+                            </div>
                         </div>
                         <div class="input-group">
-                            <label>Y 轴策略</label>
-                            <select id="plot-y-scale-mode">
-                                <option value="auto">自动缩放 Y 轴</option>
-                                <option value="manual">自定义 Y 轴范围</option>
-                            </select>
+                            <span class="option-label">Y 轴策略</span>
+                            <input type="hidden" id="plot-y-scale-mode" value="auto" />
+                            <div class="choice-group" data-plot-choice="plot-y-scale-mode" role="radiogroup" aria-label="Y 轴策略">
+                                <label><input type="radio" name="plot-y-scale-mode-choice" value="auto" checked />自动缩放 Y 轴</label>
+                                <label><input type="radio" name="plot-y-scale-mode-choice" value="manual" />自定义 Y 轴范围</label>
+                            </div>
                         </div>
                         <div id="wrap-fft-remove-dc" style="display:none;">
                             <label class="chk-label"><input type="checkbox" id="plot-fft-remove-dc" />频域去直流</label>
                         </div>
-                        <div class="row">
+                        <div class="row" id="wrap-plot-y-bounds" style="display:none;">
                             <div class="input-group">
                                 <label>Y 轴最小值</label>
                                 <input type="number" id="plot-y-min" step="0.1" value="-1" />
@@ -215,7 +250,7 @@
                                 <input type="number" id="plot-y-max" step="0.1" value="1" />
                             </div>
                         </div>
-                        <span class="hint-text">频域模式会对当前窗口数据执行 FFT，并在绘图区显示频谱。</span>
+                        <span class="hint-text">Hz 和 s 按最近测得的接收帧率估算；对数横轴从第 1 个频点开始，对数纵轴只接受正的自定义范围。</span>
                     </div>
                 </div>
             </div>
@@ -224,7 +259,7 @@
         <!-- 水平分隔条：拖拽调整侧栏宽度，与垂直分隔条 v-resizer 共用交互模式 -->
         <div class="h-resizer" id="h-resizer"></div>
 
-        <!-- ══ 右侧：波形 + 监视台 ══ -->
+        <!-- ══ 中央：波形 + 监视台 ══ -->
         <main class="main-display" id="main-display">
             <!-- ── 波形绘图区 ── -->
             <div class="canvas-wrapper box-border" id="canvas-wrapper">
@@ -233,16 +268,10 @@
                         <span class="plot-title">波形监视台</span>
                         <span class="plot-title-hint">右键绘图区重置缩放，单通道时显示通道统计信息，采样点为2的幂次为佳</span>
                     </div>
-                    <!-- 统计信息行：单通道时由 app.js 的 renderPlotStats 动态更新 -->
+                    <!-- 绘图帧率常驻，单通道统计由 app.js 动态更新 -->
                     <div class="plot-info-row" id="plot-info-row">
-                        <span id="stat-channel-label">通道: --</span>
-                        <span id="stat-max">最大值: --</span>
-                        <span id="stat-min">最小值: --</span>
-                        <span id="stat-pp">峰峰值: --</span>
-                        <span id="stat-mean">均值: --</span>
-                        <span id="stat-std-dev">标准差: --</span>
-                        <span id="stat-freq-hz">主频: -- Hz</span>
-                        <span id="stat-period">主周期: -- sample</span>
+                        <span id="stat-plot-fps">绘图帧率: 0 FPS</span>
+                        <div id="plot-channel-stats" class="plot-channel-stats"></div>
                     </div>
                 </div>
                 <canvas id="waveform-canvas"></canvas>
@@ -298,12 +327,27 @@
                 </div>
             </div>
         </main>
+        <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-label="调整通道配置宽度"></div>
+        <aside class="channel-sidebar" id="channel-sidebar" aria-label="通道显示配置">
+            <div class="control-group channels-list-panel" id="channels-list-panel">
+                <div class="section-title">通道显示配置</div>
+                <div class="channel-toolbar">
+                    <p class="hint-text">在帧格式页配置通道数后，点击“应用”自动生成。</p>
+                    <div class="channel-toolbar-actions">
+                        <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
+                        <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
+                    </div>
+                </div>
+                <div id="channel-config-list" class="channel-config-list"></div>
+            </div>
+        </aside>
     </div>
 
     <script src="projectLimits.js"></script>
     <script src="byteUtils.js"></script>
     <script src="frameBuffer.js"></script>
     <script src="plotMath.js"></script>
+    <script src="channelTransform.js"></script>
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
     <script src="monitorView.js"></script>
