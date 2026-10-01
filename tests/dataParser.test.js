@@ -31,6 +31,60 @@ test('reassembles split headers, rejects bad footer and checksum, and keeps raw 
     assert.ok(errors.includes('checksum'));
 });
 
+test('footer resync reports each discarded byte once without overlapping a valid frame', () => {
+    for (const chunks of [
+        [Uint8Array.of(0x10, 0x20, 0x30, 0xEE)],
+        [Uint8Array.of(0x10, 0x20), Uint8Array.of(0x30, 0xEE)]
+    ]) {
+        const parser = new DataParser();
+        parser.setFormat({ enableHeader: false, enableFooter: true, footerHex: 'EE',
+            dataType: 'uint8', channelsCount: 1, enableChecksum: false });
+        const reported = [];
+        parser.onFrameError = (reason, time, bytes) => {
+            assert.equal(reason, 'footer');
+            reported.push({ kind: 'error', bytes: [...bytes] });
+        };
+        parser.onFrameParsed = (values, time, bytes) => {
+            reported.push({ kind: 'frame', bytes: [...bytes] });
+            assert.deepEqual(values, [0x30]);
+        };
+        for (const chunk of chunks) parser.appendData(chunk);
+        assert.deepEqual(reported.flatMap(item => item.bytes), [0x10, 0x20, 0x30, 0xEE]);
+        assert.deepEqual(reported.filter(item => item.kind === 'frame').map(item => item.bytes),
+            [[0x30, 0xEE]]);
+    }
+});
+
+test('header resync keeps rejected and accepted byte ranges separate', () => {
+    const parser = new DataParser();
+    parser.setFormat({ enableHeader: true, headerHex: 'AA', enableFooter: true,
+        footerHex: 'EE', dataType: 'uint8', channelsCount: 1 });
+    const reported = [];
+    parser.onFrameError = (reason, time, bytes) => reported.push([reason, ...bytes]);
+    parser.onFrameParsed = (values, time, bytes) => reported.push(['frame', ...bytes]);
+    parser.appendData(Uint8Array.of(0xAA, 0xAA, 0, 0xEE));
+    assert.deepEqual(reported, [
+        ['footer', 0xAA],
+        ['frame', 0xAA, 0, 0xEE]
+    ]);
+});
+
+test('flushing an incomplete tail reports its bytes once and resets the parser', () => {
+    const parser = new DataParser();
+    parser.setFormat({ enableHeader: false, enableFooter: true, footerHex: 'EE',
+        dataType: 'uint8', channelsCount: 1 });
+    const reported = [];
+    parser.onFrameError = (reason, time, bytes) => reported.push([reason, ...bytes]);
+    parser.onFrameParsed = (values, time, bytes) => reported.push(['frame', ...bytes]);
+    parser.appendData(Uint8Array.of(0x10, 0x20));
+    parser.flushPending();
+    assert.deepEqual(reported, [['footer', 0x10], ['incomplete', 0x20]]);
+    assert.equal(parser.readOffset, 0);
+    assert.equal(parser.writeOffset, 0);
+    parser.appendData(Uint8Array.of(0x30, 0xEE));
+    assert.deepEqual(reported.at(-1), ['frame', 0x30, 0xEE]);
+});
+
 test('decodes signed, unsigned, float and 64-bit payloads', () => {
     const cases = [
         ['int8', [0xFE], -2], ['uint8', [0xFE], 254],

@@ -845,10 +845,11 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // 帧校验失败 → 记录错误日志
+    const frameErrorLabels = {
+        checksum: '校验失败', footer: '帧尾不匹配', incomplete: '帧未完整'
+    };
     parser.onFrameError = (type, timeStr, frameBytes) => {
-        const label = type === 'checksum' ? '校验失败'
-            : type === 'footer' ? '帧尾不匹配'
-                : '解析错误';
+        const label = frameErrorLabels[type] || '解析错误';
         monitor.appendExtra({ kind: 'error', time: timeStr, reason: label,
             bytes: frameBytes, order: ++monitorOrder });
     };
@@ -874,6 +875,7 @@ document.addEventListener('DOMContentLoaded', () => {
             statusIndicator.className = 'status-dot connected';
             connTypeSelect.disabled = true;
         } else {
+            parser.flushPending();
             sendController.stop();
             connectBtn.textContent = '请求建立连接';
             connectBtn.classList.replace('btn-danger', 'btn-primary');
@@ -968,7 +970,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const setCapturePaused = paused => {
         if (plotter.isPaused !== paused) plotter.togglePause();
         capturePaused = paused;
-        if (paused) { parser.reset(); monitor.render(); plotter.draw(); }
+        if (paused) { parser.flushPending(); monitor.render(); plotter.draw(); }
         pauseBtn.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
         pauseBtn.className = paused ? 'btn btn-success' : 'btn btn-secondary';
     };

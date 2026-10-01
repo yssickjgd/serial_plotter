@@ -85,10 +85,18 @@ function bootWithConfig(original) {
     for (const file of scripts) {
         vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
     }
-    let plotter;
+    let plotter, parser, monitor;
+    const OriginalParser = context.SerialPlotter.DataParser;
+    context.SerialPlotter.DataParser = class extends OriginalParser {
+        constructor(...args) { super(...args); parser = this; }
+    };
     const OriginalPlotter = context.SerialPlotter.Plotter;
     context.SerialPlotter.Plotter = class extends OriginalPlotter {
         constructor(...args) { super(...args); plotter = this; }
+    };
+    const OriginalMonitor = context.SerialPlotter.MonitorView;
+    context.SerialPlotter.MonitorView = class extends OriginalMonitor {
+        constructor(...args) { super(...args); monitor = this; }
     };
     ready();
     const fireCanvas = (name, x, y) => getElement('waveform-canvas').listeners[name]({
@@ -98,7 +106,7 @@ function bootWithConfig(original) {
     return { getElement, getStored: () => stored, getWrites: () => writes,
         getChoiceGroup: id => choiceGroups.get(id),
         tick(ms = 1000) { now += ms; intervals.forEach(callback => callback()); },
-        fireCanvas, plotter };
+        fireCanvas, plotter, parser, monitor };
 }
 
 test('page bootstrap restores saved config without overwriting it', () => {
@@ -214,6 +222,18 @@ test('waveform statistic counts completed draws and returns to zero when idle', 
     assert.equal(label.textContent, '绘图帧率: 1.0 FPS');
     tick();
     assert.equal(label.textContent, '绘图帧率: 0.0 FPS');
+});
+
+test('pausing capture reports the incomplete RX tail only once', () => {
+    const config = JSON.stringify({ enableHeader: false, enableFooter: true,
+        footerHex: 'EE', dataType: 'uint8', channelsCount: '1' });
+    const { getElement, parser, monitor } = bootWithConfig(config);
+    parser.appendData(Uint8Array.of(0x10, 0x20));
+    getElement('btn-pause').listeners.click();
+    assert.deepEqual(Array.from(monitor.extras, row => [row.reason, ...row.bytes]), [
+        ['帧尾不匹配', 0x10], ['帧未完整', 0x20]
+    ]);
+    assert.equal(parser.writeOffset, 0);
 });
 
 test('frequency FPS counts refreshed spectra rather than cached redraws', () => {
