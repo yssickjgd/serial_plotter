@@ -26,31 +26,89 @@ function bucketExtrema(values, pixels) {
     return result;
 }
 
+/** Keep chronological extrema for samples sharing the same horizontal pixel. */
+function bucketAxisExtrema(values, xPositions) {
+    const result = [];
+    let pixel = -1, minIndex = -1, maxIndex = -1;
+    const flush = () => {
+        if (minIndex < 0) return;
+        const first = Math.min(minIndex, maxIndex);
+        const last = Math.max(minIndex, maxIndex);
+        result.push({ index: first, value: values[first] });
+        if (last !== first) result.push({ index: last, value: values[last] });
+    };
+    for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i]) || !Number.isFinite(xPositions[i])) continue;
+        const nextPixel = Math.floor(xPositions[i]);
+        if (nextPixel !== pixel) {
+            flush();
+            pixel = nextPixel;
+            minIndex = maxIndex = i;
+        } else {
+            if (values[i] < values[minIndex]) minIndex = i;
+            if (values[i] > values[maxIndex]) maxIndex = i;
+        }
+    }
+    flush();
+    const firstValid = values.findIndex(Number.isFinite);
+    if (firstValid >= 0 && result[0]?.index !== firstValid)
+        result.unshift({ index: firstValid, value: values[firstValid] });
+    let lastValid = values.length - 1;
+    while (lastValid >= 0 && !Number.isFinite(values[lastValid])) lastValid--;
+    if (lastValid >= 0 && result.at(-1)?.index !== lastValid)
+        result.push({ index: lastValid, value: values[lastValid] });
+    return result;
+}
+
 function csvField(value) {
     const text = String(value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+/** Map a data value to its relative position on a linear or positive log axis. */
+function axisFraction(value, min, max, scale = 'linear') {
+    if (!(max > min)) return NaN;
+    if (scale === 'log') {
+        if (!(value > 0) || !(min > 0)) return NaN;
+        return Math.log(value / min) / Math.log(max / min);
+    }
+    return (value - min) / (max - min);
+}
+
+function axisValueAtFraction(fraction, min, max, scale = 'linear') {
+    if (!(max > min)) return NaN;
+    if (scale === 'log') {
+        if (!(min > 0)) return NaN;
+        return min * Math.pow(max / min, fraction);
+    }
+    return min + (max - min) * fraction;
+}
+
 /** Convert a dragged plot rectangle into an inclusive sample window and Y range. */
 function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
-    startIndex, visibleCount, min, max }) {
+    startIndex, visibleCount, min, max, xScale = 'linear', yScale = 'linear' }) {
     if (plotWidth <= 0 || plotHeight <= 0 || visibleCount < 2 || max <= min) return null;
     const left = Math.max(0, Math.min(plotWidth, Math.min(x0, x1)));
     const right = Math.max(0, Math.min(plotWidth, Math.max(x0, x1)));
     const top = Math.max(0, Math.min(plotHeight, Math.min(y0, y1)));
     const bottom = Math.max(0, Math.min(plotHeight, Math.max(y0, y1)));
     if (right - left < 6 || bottom - top < 6) return null;
-    const first = startIndex + Math.ceil(left / plotWidth * (visibleCount - 1));
-    const last = startIndex + Math.floor(right / plotWidth * (visibleCount - 1));
+    const endIndex = startIndex + visibleCount - 1;
+    const first = Math.ceil(axisValueAtFraction(left / plotWidth, startIndex, endIndex, xScale));
+    const last = Math.floor(axisValueAtFraction(right / plotWidth, startIndex, endIndex, xScale));
     if (last <= first) return null;
     return {
         scrollOffset: first,
         displayCount: last - first + 1,
-        yMin: max - bottom / plotHeight * (max - min),
-        yMax: max - top / plotHeight * (max - min)
+        yMin: axisValueAtFraction(1 - bottom / plotHeight, min, max, yScale),
+        yMax: axisValueAtFraction(1 - top / plotHeight, min, max, yScale)
     };
 }
 
-if (typeof module !== 'undefined') module.exports = { bucketExtrema, csvField, zoomRectToBounds };
+if (typeof module !== 'undefined') module.exports = {
+    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, zoomRectToBounds
+};
 globalThis.SerialPlotter ??= {};
-Object.assign(globalThis.SerialPlotter, { bucketExtrema, csvField, zoomRectToBounds });
+Object.assign(globalThis.SerialPlotter, {
+    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, zoomRectToBounds
+});
