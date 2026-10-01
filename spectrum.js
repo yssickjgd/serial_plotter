@@ -37,8 +37,22 @@ function fftInPlace(re, im) {
     }
 }
 
-/** Hann-windowed magnitude spectrum; frequency is expressed as a sample fraction. */
-function prepareFrequencySeries(values, removeDc = false) {
+const FFT_WINDOWS = ['rectangular', 'hann', 'hamming', 'blackman', 'flatTop'];
+
+function windowCoefficient(type, index, length) {
+    if (type === 'rectangular' || length <= 2) return 1;
+    const angle = 2 * Math.PI * index / (length - 1);
+    if (type === 'hann') return 0.5 - 0.5 * Math.cos(angle);
+    if (type === 'hamming') return 0.54 - 0.46 * Math.cos(angle);
+    if (type === 'blackman') return 0.42 - 0.5 * Math.cos(angle) + 0.08 * Math.cos(2 * angle);
+    return 0.21557895 - 0.41663158 * Math.cos(angle) +
+        0.277263158 * Math.cos(2 * angle) - 0.083578947 * Math.cos(3 * angle) +
+        0.006947368 * Math.cos(4 * angle);
+}
+
+/** Windowed, coherent-gain-corrected one-sided amplitude spectrum. */
+function prepareFrequencySeries(values, removeDc = false, windowType = 'hann') {
+    if (!FFT_WINDOWS.includes(windowType)) throw new RangeError('FFT 窗函数无效');
     if (values.length < 2) return { mags: [], dominantBin: 0, fftSize: 0 };
     const fftSize = nextPow2(values.length);
     const re = new Float64Array(fftSize);
@@ -46,24 +60,33 @@ function prepareFrequencySeries(values, removeDc = false) {
     let mean = 0;
     if (removeDc) {
         let count = 0;
-        for (const value of values) if (Number.isFinite(value)) { mean += value; count++; }
-        mean /= count || 1;
+        for (const value of values) if (Number.isFinite(value)) {
+            count++;
+            mean += (value - mean) / count;
+        }
     }
+    let windowGain = 0;
     for (let i = 0; i < values.length; i++) {
-        const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (values.length - 1));
-        re[i] = Number.isFinite(values[i]) ? (values[i] - mean) * window : 0;
+        const window = windowCoefficient(windowType, i, values.length);
+        windowGain += window;
+        if (Number.isFinite(values[i])) {
+            re[i] = (values[i] - mean) * window;
+        }
     }
     fftInPlace(re, im);
     const mags = new Array((fftSize >> 1) + 1);
-    let dominantBin = 1, dominantMag = -Infinity;
+    let dominantBin = 0, dominantMag = -Infinity;
     for (let i = 0; i < mags.length; i++) {
-        const magnitude = Math.hypot(re[i], im[i]) / fftSize;
+        const oneSidedFactor = i === 0 || i === fftSize / 2 ? 1 : 2;
+        const rawMagnitude = Math.hypot(re[i], im[i]);
+        const magnitude = rawMagnitude * oneSidedFactor / windowGain;
         mags[i] = magnitude;
-        if (i > 0 && magnitude > dominantMag) { dominantMag = magnitude; dominantBin = i; }
+        if (rawMagnitude > dominantMag) { dominantMag = rawMagnitude; dominantBin = i; }
     }
     return { mags, dominantBin, fftSize };
 }
 
-if (typeof module !== 'undefined') module.exports = { prepareFrequencySeries };
+if (typeof module !== 'undefined') module.exports = { prepareFrequencySeries, FFT_WINDOWS };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.prepareFrequencySeries = prepareFrequencySeries;
+globalThis.SerialPlotter.FFT_WINDOWS = FFT_WINDOWS;
