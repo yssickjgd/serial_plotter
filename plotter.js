@@ -59,6 +59,7 @@ class Plotter {
         this._drawState = null;
         this._selection = null;
         this._boxZoomY = { time: null, frequency: null };
+        this._zoomBaseY = { time: null, frequency: null };
 
         // 视口状态（时域/频域独立，通过 _vp getter 访问当前模式）
         this.vp = {
@@ -81,9 +82,12 @@ class Plotter {
         // Scrollbar DOM
         this.scrollbarWrap  = document.getElementById('plot-scrollbar-wrap');
         this.scrollbarThumb = document.getElementById('plot-scrollbar-thumb');
+        this.yScrollbarWrap = document.getElementById('plot-y-scrollbar-wrap');
+        this.yScrollbarThumb = document.getElementById('plot-y-scrollbar-thumb');
         this.plotHeader     = document.getElementById('plot-header');
         this.plotInfoRow    = document.getElementById('plot-info-row');
         this._initScrollbar();
+        this._initYScrollbar();
 
         // Canvas events
         this.canvas.addEventListener('wheel',       (e) => this._onWheel(e), { passive: false });
@@ -100,7 +104,7 @@ class Plotter {
             this._vp.displayCount = this.maxPoints;
             this._vp.autoFollow   = true;
             this._clampScroll();
-            this._boxZoomY[this.displayMode] = null;
+            this._clearYZoom(this.displayMode);
             if (this.isPaused) this.draw();
         });
 
@@ -114,6 +118,11 @@ class Plotter {
 
     /** 返回当前显示模式对应的 Y 轴范围对象 */
     get _yBounds() { return this.yBounds[this.displayMode]; }
+
+    _clearYZoom(mode) {
+        this._boxZoomY[mode] = null;
+        this._zoomBaseY[mode] = null;
+    }
 
     _markViewDirty() {
         this._dirty = true;
@@ -255,14 +264,14 @@ class Plotter {
             this._selection = null;
         }
         if (oldScale !== this.yScaleMode) {
-            this._boxZoomY.time = null;
-            this._boxZoomY.frequency = null;
+            this._clearYZoom('time');
+            this._clearYZoom('frequency');
         }
-        if (oldFreqYScale !== this.freqYScale) this._boxZoomY.frequency = null;
+        if (oldFreqYScale !== this.freqYScale) this._clearYZoom('frequency');
         for (const mode of ['time', 'frequency']) {
             if (oldBounds[mode].min !== this.yBounds[mode].min ||
                 oldBounds[mode].max !== this.yBounds[mode].max)
-                this._boxZoomY[mode] = null;
+                this._clearYZoom(mode);
         }
         if (oldMode !== this.displayMode || oldDc !== this.removeDcForFft ||
             oldWindow !== this.fftWindow) this._fftVersion = -1;
@@ -284,8 +293,8 @@ class Plotter {
     /** 清空所有通道数据，重置时域/频域视口到跟随模式 */
     clear() {
         this._selection = null;
-        this._boxZoomY.time = null;
-        this._boxZoomY.frequency = null;
+        this._clearYZoom('time');
+        this._clearYZoom('frequency');
         this.frames.clear();
         this.sampleRateHz = 0;
         this._fftVersion = -1;
@@ -462,19 +471,30 @@ class Plotter {
 
     /* ── 交互事件 ── */
 
-    /** 鼠标滚轮缩放：以鼠标位置为锚点缩放当前模式的视口，factor 0.8/1.25 */
+    /** 绘图区和 X 轴刻度带缩放 X；Y 轴刻度带缩放 Y。 */
     _onWheel(e) {
         e.preventDefault();
+        const point = this._pointFromPointer(e);
+        const plotW = this.canvas.width - this.pX;
+        const plotH = this.canvas.height - this.pY;
+        if (point.x > plotW && point.x <= this.canvas.width &&
+            point.y >= 0 && point.y <= this.canvas.height) {
+            this._zoomYAt(point.y, e.deltaY);
+        } else if (point.x >= 0 && point.x <= plotW &&
+            point.y >= 0 && point.y <= this.canvas.height) {
+            this._zoomXAt(point.x, e.deltaY);
+        }
+    }
+
+    _zoomXAt(mouseX, deltaY) {
         this._markViewDirty();
         const total = this._scrollTotal();
         if (total < 2) return;
-
-        const rect   = this.canvas.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
         const plotW  = this.canvas.width - this.pX;
         const ratio  = Math.max(0, Math.min(1, mouseX / plotW));
-        const factor = e.deltaY < 0 ? 0.8 : 1.25;
-        const nextCount = Math.round(Math.max(2, Math.min(this.maxPoints, this._vp.displayCount * factor)));
+        const factor = deltaY < 0 ? 0.8 : 1.25;
+        const currentCount = Math.min(this._vp.displayCount, total);
+        const nextCount = Math.round(Math.max(2, Math.min(this.maxPoints, total, currentCount * factor)));
         if (this.displayMode === 'frequency' && this.freqXScale === 'log') {
             const first = Math.max(1, this._vp.scrollOffset);
             const last = Math.min(total - 1, first + this._vp.displayCount - 1);
@@ -489,13 +509,45 @@ class Plotter {
             }
             this._vp.scrollOffset = Math.round((low + high) / 2);
         } else {
-            const anchorIdx = this._vp.scrollOffset + ratio * this._vp.displayCount;
+            const anchorIdx = this._vp.scrollOffset + ratio * currentCount;
             this._vp.scrollOffset = Math.round(anchorIdx - ratio * nextCount);
         }
         this._vp.displayCount = nextCount;
         this._vp.autoFollow   = false;
         this._clampScroll();
         this._updateScrollbar();
+        if (this.isPaused) this.draw();
+    }
+
+    _zoomYAt(mouseY, deltaY) {
+        const state = this._drawState;
+        if (!state || !(state.max > state.min)) return;
+        const mode = this.displayMode;
+        const scale = state.yScale;
+        const toDomain = value => scale === 'log' ? Math.log(value) : value;
+        const fromDomain = value => scale === 'log' ? Math.exp(value) : value;
+        const base = this._zoomBaseY[mode] || { min: state.min, max: state.max };
+        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
+        const currentMin = toDomain(state.min), currentMax = toDomain(state.max);
+        const baseSpan = baseMax - baseMin;
+        const currentSpan = currentMax - currentMin;
+        if (!(baseSpan > 0) || !(currentSpan > 0)) return;
+        const anchorRatio = 1 - Math.max(0, Math.min(1, mouseY / state.plotH));
+        const factor = deltaY < 0 ? 0.8 : 1.25;
+        const nextSpan = Math.min(baseSpan, currentSpan * factor);
+        if (nextSpan >= baseSpan * (1 - 1e-12)) {
+            this._clearYZoom(mode);
+        } else {
+            const anchor = currentMin + anchorRatio * currentSpan;
+            const nextMin = Math.max(baseMin,
+                Math.min(baseMax - nextSpan, anchor - anchorRatio * nextSpan));
+            this._zoomBaseY[mode] = base;
+            this._boxZoomY[mode] = {
+                min: fromDomain(nextMin), max: fromDomain(nextMin + nextSpan)
+            };
+        }
+        this._markViewDirty();
+        this._updateYScrollbar();
         if (this.isPaused) this.draw();
     }
 
@@ -567,6 +619,8 @@ class Plotter {
             this._vp.displayCount = zoom.displayCount;
             this._clampScroll();
             this._vp.autoFollow = false;
+            if (!this._zoomBaseY[this.displayMode])
+                this._zoomBaseY[this.displayMode] = { min: state.min, max: state.max };
             this._boxZoomY[this.displayMode] = { min: zoom.yMin, max: zoom.yMax };
         } else if (selection.mode === this.displayMode) {
             this._vp.autoFollow = selection.autoFollow;
@@ -638,6 +692,54 @@ class Plotter {
         });
     }
 
+    _initYScrollbar() {
+        if (!this.yScrollbarWrap || !this.yScrollbarThumb) return;
+        this.yScrollbarWrap.hidden = true;
+        let dragging = false, dragStartY = 0, dragStartTop = 0;
+        this.yScrollbarThumb.addEventListener('mousedown', e => {
+            dragging = true;
+            dragStartY = e.clientY;
+            dragStartTop = parseFloat(this.yScrollbarThumb.style.top) || 0;
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
+            const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
+            this._panYToFraction((dragStartTop + e.clientY - dragStartY) /
+                Math.max(1, height - thumbHeight));
+        });
+        document.addEventListener('mouseup', () => { dragging = false; });
+        this.yScrollbarWrap.addEventListener('click', e => {
+            if (e.target === this.yScrollbarThumb) return;
+            const rect = this.yScrollbarWrap.getBoundingClientRect();
+            const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
+            const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
+            this._panYToFraction((e.clientY - rect.top - thumbHeight / 2) /
+                Math.max(1, height - thumbHeight));
+        });
+    }
+
+    _panYToFraction(fraction) {
+        const base = this._zoomBaseY[this.displayMode];
+        const zoom = this._boxZoomY[this.displayMode];
+        if (!base || !zoom) return;
+        const log = this.displayMode === 'frequency' && this.freqYScale === 'log';
+        const toDomain = value => log ? Math.log(value) : value;
+        const fromDomain = value => log ? Math.exp(value) : value;
+        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
+        const span = toDomain(zoom.max) - toDomain(zoom.min);
+        const travel = baseMax - baseMin - span;
+        if (!(travel > 0)) return;
+        const nextMax = baseMax - Math.max(0, Math.min(1, fraction)) * travel;
+        this._boxZoomY[this.displayMode] = {
+            min: fromDomain(nextMax - span), max: fromDomain(nextMax)
+        };
+        this._markViewDirty();
+        this._updateYScrollbar();
+        if (this.isPaused) this.draw();
+    }
+
     /** 根据当前模式的视口位置和可滚动范围更新滚动条 thumb 的宽度和位置 */
     _updateScrollbar() {
         if (!this.scrollbarWrap || !this.scrollbarThumb) return;
@@ -650,6 +752,34 @@ class Plotter {
         const left   = Math.round((this._vp.scrollOffset / Math.max(1, total - this._vp.displayCount)) * (wrapW - thumbW));
         this.scrollbarThumb.style.width = thumbW + 'px';
         this.scrollbarThumb.style.left  = left  + 'px';
+    }
+
+    _updateYScrollbar() {
+        if (!this.yScrollbarWrap || !this.yScrollbarThumb) return;
+        const base = this._zoomBaseY[this.displayMode];
+        const zoom = this._boxZoomY[this.displayMode];
+        const state = this._drawState;
+        if (!base || !zoom || !state) { this.yScrollbarWrap.hidden = true; return; }
+        const log = state.yScale === 'log';
+        const toDomain = value => log ? Math.log(value) : value;
+        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
+        const zoomMin = toDomain(zoom.min), zoomMax = toDomain(zoom.max);
+        const baseSpan = baseMax - baseMin, zoomSpan = zoomMax - zoomMin;
+        if (!(baseSpan > 0) || !(zoomSpan > 0) || zoomSpan >= baseSpan * (1 - 1e-12)) {
+            this.yScrollbarWrap.hidden = true;
+            return;
+        }
+        const canvasRect = this.canvas.getBoundingClientRect();
+        const parentRect = this.canvas.parentElement.getBoundingClientRect();
+        const height = state.plotH * canvasRect.height / this.canvas.height;
+        const thumbHeight = Math.min(height, Math.max(20, height * zoomSpan / baseSpan));
+        const topFraction = Math.max(0, Math.min(1,
+            (baseMax - zoomMax) / (baseSpan - zoomSpan)));
+        this.yScrollbarWrap.style.top = `${canvasRect.top - parentRect.top}px`;
+        this.yScrollbarWrap.style.height = `${height}px`;
+        this.yScrollbarThumb.style.height = `${thumbHeight}px`;
+        this.yScrollbarThumb.style.top = `${topFraction * (height - thumbHeight)}px`;
+        this.yScrollbarWrap.hidden = false;
     }
 
     /* ── 渲染 ── */
@@ -670,6 +800,7 @@ class Plotter {
     draw() {
         const spectrumRevision = this._fftRevision;
         this._renderFrame();
+        this._updateYScrollbar();
         this.completedDraws++;
         if (this.displayMode === 'frequency' && this._fftRevision !== spectrumRevision)
             this.completedSpectrumDraws++;

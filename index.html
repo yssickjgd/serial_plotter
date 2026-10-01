@@ -197,7 +197,7 @@
                                 <span class="option-label">频域横轴单位</span>
                                 <input type="hidden" id="plot-freq-x-unit" value="hz" />
                                 <div class="choice-group" data-plot-choice="plot-freq-x-unit" role="radiogroup" aria-label="频域横轴单位">
-                                    <label><input type="radio" name="plot-freq-x-unit-choice" value="bins" />采样点（FFT Bin）</label>
+                                    <label><input type="radio" name="plot-freq-x-unit-choice" value="bins" />FFT Bin</label>
                                     <label><input type="radio" name="plot-freq-x-unit-choice" value="hz" checked />Hz</label>
                                 </div>
                             </div>
@@ -266,15 +266,17 @@
                 <div class="plot-header" id="plot-header">
                     <div class="plot-title-row">
                         <span class="plot-title">波形监视台</span>
-                        <span class="plot-title-hint">右键绘图区重置缩放，单通道时显示通道统计信息，采样点为2的幂次为佳</span>
-                    </div>
-                    <!-- 绘图帧率常驻，单通道统计由 app.js 动态更新 -->
-                    <div class="plot-info-row" id="plot-info-row">
                         <span id="stat-plot-fps">绘图帧率: 0 FPS</span>
+                    </div>
+                    <!-- 单通道统计由 app.js 动态更新 -->
+                    <div class="plot-info-row" id="plot-info-row">
                         <div id="plot-channel-stats" class="plot-channel-stats"></div>
                     </div>
                 </div>
                 <canvas id="waveform-canvas"></canvas>
+                <div class="plot-y-scrollbar-wrap" id="plot-y-scrollbar-wrap" hidden>
+                    <div class="plot-y-scrollbar-thumb" id="plot-y-scrollbar-thumb"></div>
+                </div>
                 <div class="plot-scrollbar-wrap" id="plot-scrollbar-wrap">
                     <div class="plot-scrollbar-thumb" id="plot-scrollbar-thumb"></div>
                 </div>

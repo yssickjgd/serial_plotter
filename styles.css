@@ -585,10 +585,13 @@ canvas {
     white-space: nowrap;
 }
 
-.plot-title-hint {
+#stat-plot-fps {
     font-size: 0.68rem;
     color: #ffffff;
     white-space: nowrap;
+    min-width: 20ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
 }
 
 /* 统计信息行（波形监视台），与 .stats-bar-row 共用排版规范 */
@@ -606,22 +609,12 @@ canvas {
     font-variant-numeric: tabular-nums;
 }
 
-#stat-plot-fps {
-    flex: 0 0 auto;
-    font-variant-numeric: tabular-nums;
-}
-
 .plot-channel-stats {
     display: flex;
     flex: 1;
     min-width: 0;
     gap: 8px;
     align-items: center;
-}
-
-.plot-channel-stats:not(:empty) {
-    border-left: 1px solid #4b5563;
-    padding-left: 14px;
 }
 
 .plot-info-segment {
@@ -666,6 +659,30 @@ canvas {
     background: #8a8a8a;
     cursor: grabbing;
 }
+
+.plot-y-scrollbar-wrap {
+    position: absolute;
+    right: 2px;
+    width: 11px;
+    background: #1c1c1c;
+    border-left: 1px solid #333;
+    cursor: pointer;
+}
+
+.plot-y-scrollbar-wrap[hidden] { display: none; }
+
+.plot-y-scrollbar-thumb {
+    position: absolute;
+    left: 2px;
+    width: 7px;
+    background: #4a4a4a;
+    border-radius: 4px;
+    cursor: grab;
+    min-height: 20px;
+}
+
+.plot-y-scrollbar-thumb:hover { background: #6a6a6a; }
+.plot-y-scrollbar-thumb:active { background: #8a8a8a; cursor: grabbing; }
 
 /* ── 垂直分隔条（波形区 ↔ 监视台），与 .h-resizer 共用布局模式 ── */
 .v-resizer {
@@ -747,7 +764,6 @@ canvas {
 }
 
 @media (max-width: 1100px) {
-    .plot-title-hint { display: none; }
     .stats-bar-row span { flex-basis: 45%; }
 }
 

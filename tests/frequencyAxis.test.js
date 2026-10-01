@@ -62,8 +62,24 @@ test('wheel zoom keeps the cursor near the same frequency on a log axis', () => 
     plotter.vp.frequency.displayCount = 400;
     plotter.draw();
     const plotW = plotter.canvas.width - plotter.pX;
-    canvasEvents.get('wheel')({ clientX: plotW / 2, deltaY: -1, preventDefault() {} });
+    canvasEvents.get('wheel')({ clientX: plotW / 2, clientY: 100,
+        deltaY: -1, preventDefault() {} });
     assert.ok(plotter.vp.frequency.scrollOffset <= 2);
+});
+
+test('wheel over a logarithmic Y axis zooms magnitude without changing frequency bins', () => {
+    const { plotter, canvasEvents } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqYScale: 'log' });
+    plotter.draw();
+    const original = { ...plotter._drawState };
+    const count = plotter.vp.frequency.displayCount;
+    canvasEvents.get('wheel')({ clientX: original.plotW + 20,
+        clientY: original.plotH / 2, deltaY: -1, preventDefault() {} });
+    plotter.draw();
+    assert.equal(plotter.vp.frequency.displayCount, count);
+    assert.ok(plotter._drawState.min > original.min);
+    assert.ok(plotter._drawState.max < original.max);
+    assert.ok(plotter._drawState.min > 0);
 });
 
 test('rectangle zoom follows both logarithmic axis transforms', () => {
