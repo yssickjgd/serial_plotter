@@ -1,4 +1,6 @@
-/** Streaming binary-frame parser. Callbacks receive bytes, never preformatted Hex. */
+/** Streaming binary-frame parser. Callbacks receive bytes, never preformatted Hex.
+ * Footer errors report only bytes discarded during resynchronization, without
+ * repeating bytes that might belong to a later valid frame. */
 const parserByteUtils = typeof module !== 'undefined'
     ? require('./byteUtils').ByteUtils : globalThis.SerialPlotter.ByteUtils;
 const parserLimits = typeof module !== 'undefined'
@@ -54,6 +56,14 @@ class DataParser {
     getTypeLength() { return DataParser.TYPE_LENGTH[this.dataType]; }
     reset() { this.readOffset = 0; this.writeOffset = 0; }
 
+    /** Finish a stopped stream without losing bytes that could not form a complete frame. */
+    flushPending() {
+        const pending = this.buffer.slice(this.readOffset, this.writeOffset);
+        this.reset();
+        if (pending.length && this.onFrameError)
+            this._notify(this.onFrameError, 'incomplete', _fmtTime(new Date()), pending);
+    }
+
     appendData(data) {
         if (!(data instanceof Uint8Array)) data = new Uint8Array(data);
         if (!data.length) return;
@@ -94,6 +104,14 @@ class DataParser {
         const footerLen = this.footerBytes.length;
         const payloadLen = this.getTypeLength() * this.channelsCount;
         const frameLen = headerLen + payloadLen + footerLen + Number(this.enableChecksum);
+        let rejectedStart = -1;
+        const flushRejected = () => {
+            if (rejectedStart < 0) return;
+            const discarded = this.buffer.slice(rejectedStart, this.readOffset);
+            rejectedStart = -1;
+            if (this.onFrameError) this._notify(this.onFrameError,
+                'footer', _fmtTime(new Date()), discarded);
+        };
         while (this.writeOffset - this.readOffset >= frameLen) {
             const start = this.readOffset;
             if (headerLen) {
@@ -105,17 +123,18 @@ class DataParser {
             }
             const payloadStart = start + headerLen;
             const footerStart = payloadStart + payloadLen;
-            const frame = this.buffer.slice(start, start + frameLen);
             let footerValid = true;
             for (let j = 0; j < footerLen; j++) {
                 if (this.buffer[footerStart + j] !== this.footerBytes[j]) { footerValid = false; break; }
             }
             if (!footerValid) {
                 this.failCount++;
-                if (this.onFrameError) this._notify(this.onFrameError, 'footer', _fmtTime(new Date()), frame);
+                if (rejectedStart < 0) rejectedStart = start;
                 this.readOffset++;
                 continue;
             }
+            flushRejected();
+            const frame = this.buffer.slice(start, start + frameLen);
             if (this.enableChecksum) {
                 let sum = 0;
                 for (let i = payloadStart; i < footerStart; i++) sum += this.buffer[i];
@@ -148,6 +167,7 @@ class DataParser {
             if (this.onFrameParsed) this._notify(this.onFrameParsed, values, _fmtTime(new Date()), frame);
             this.readOffset += frameLen;
         }
+        flushRejected();
         if (this.readOffset === this.writeOffset) {
             this.reset();
             if (this.buffer.length > 65536) this.buffer = new Uint8Array(256);
