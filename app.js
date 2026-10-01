@@ -545,6 +545,7 @@ document.addEventListener('DOMContentLoaded', () => {
             channelToggle.className = 'channel-row-label channel-expand-toggle';
             channelToggle.textContent = `CH${meta.index + 1}`;
             channelToggle.ariaExpanded = String(expandedChannelIndices.has(meta.index));
+            channelToggle.style.opacity = meta.visible ? '1' : '0.4';
 
             // 颜色选择器
             const colorInput = document.createElement('input');

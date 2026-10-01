@@ -265,3 +265,29 @@ test('channel calibration controls expand only after clicking the CH button', ()
     assert.equal(controls.hidden, true);
     assert.equal(toggle.ariaExpanded, 'false');
 });
+
+test('inactive CH label is gray on first render and after toggling visibility', () => {
+    const { getElement } = bootWithConfig(null);
+    const row = getElement('channel-config-list').children[0];
+    const main = row.children[0];
+    const toggle = main.children[0];
+    const visible = main.children[3];
+    assert.equal(visible.checked, false);
+    assert.equal(toggle.style.opacity, '0.4');
+    visible.checked = true;
+    visible.listeners.change();
+    assert.equal(toggle.style.opacity, '1');
+    visible.checked = false;
+    visible.listeners.change();
+    assert.equal(toggle.style.opacity, '0.4');
+});
+
+test('plot FPS occupies the title row without displacing channel statistics', () => {
+    const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
+    const titleRow = html.match(/<div class="plot-title-row">([\s\S]*?)<\/div>/)?.[1];
+    const statsRow = html.match(/<div class="plot-info-row"[^>]*>([\s\S]*?)<\/div>/)?.[1];
+    assert.match(titleRow, /id="stat-plot-fps"/);
+    assert.doesNotMatch(titleRow, /右键绘图区重置缩放/);
+    assert.doesNotMatch(statsRow, /id="stat-plot-fps"/);
+    assert.match(statsRow, /id="plot-channel-stats"/);
+});

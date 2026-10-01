@@ -5,13 +5,16 @@ const vm = require('node:vm');
 
 function createPlotter(canvasScale = 1) {
     const events = new Map();
+    const documentEvents = new Map();
     const overlays = [];
     const context2d = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? () => ({ width: 20 })
         : key === 'strokeRect' ? (...args) => { overlays.push(args); }
             : () => {} });
-    const element = () => ({ style: {}, offsetHeight: 0, clientWidth: 800,
-        addEventListener() {}, getBoundingClientRect: () => ({ width: 800, height: 400, left: 10, top: 20 }) });
+    const element = () => ({ style: {}, listeners: {}, offsetHeight: 0,
+        clientWidth: 800, clientHeight: 378,
+        addEventListener(name, callback) { this.listeners[name] = callback; },
+        getBoundingClientRect: () => ({ width: 800, height: 400, left: 10, top: 20 }) });
     const canvas = { ...element(), parentElement: element(),
         addEventListener(name, callback) { events.set(name, callback); },
         setPointerCapture() {}, releasePointerCapture() {},
@@ -22,7 +25,10 @@ function createPlotter(canvasScale = 1) {
     const document = { getElementById(id) {
         if (!nodes.has(id)) nodes.set(id, element());
         return nodes.get(id);
-    }, addEventListener() {} };
+    }, addEventListener(name, callback) {
+        if (!documentEvents.has(name)) documentEvents.set(name, []);
+        documentEvents.get(name).push(callback);
+    } };
     const context = vm.createContext({
         document, window: { addEventListener() {} }, performance,
         requestAnimationFrame() {}, console
@@ -37,12 +43,15 @@ function createPlotter(canvasScale = 1) {
     plotter.setChannelVisible(0, true);
     for (let i = 0; i <= 100; i++) plotter.addFrame([i]);
     plotter.draw();
-    const fire = (name, x, y) => events.get(name)({
+    const fire = (name, x, y, extra = {}) => events.get(name)({
         button: 0, pointerId: 1,
         clientX: 10 + x * canvasScale, clientY: 20 + y * canvasScale,
-        preventDefault() {}
+        preventDefault() {}, ...extra
     });
-    return { plotter, fire, events, overlays };
+    const fireDocument = (name, event) => {
+        for (const callback of documentEvents.get(name) || []) callback(event);
+    };
+    return { plotter, fire, fireDocument, nodes, events, overlays };
 }
 
 test('left-button rectangle zoom selects both sample and Y ranges', () => {
@@ -145,4 +154,58 @@ test('frequency rectangle zoom keeps the time viewport separate', () => {
     plotter.draw();
     assert.equal(plotter._drawState.min, frequencyBounds.min);
     assert.equal(plotter._drawState.max, frequencyBounds.max);
+});
+
+test('wheel zoom selects X in the plot or bottom axis and Y beside the right axis', () => {
+    const { plotter, fire, nodes } = createPlotter();
+    const plotW = plotter.canvas.width - plotter.pX;
+    const plotH = plotter.canvas.height - plotter.pY;
+    const originalY = { min: plotter._drawState.min, max: plotter._drawState.max };
+    const yBar = nodes.get('plot-y-scrollbar-wrap');
+    assert.equal(yBar.hidden, true);
+
+    fire('wheel', plotW / 2, plotH / 2, { deltaY: -1 });
+    plotter.draw();
+    const insideCount = plotter.vp.time.displayCount;
+    assert.ok(insideCount < 100);
+    assert.equal(plotter._boxZoomY.time, null);
+
+    fire('wheel', plotW / 2, plotH + 10, { deltaY: -1 });
+    plotter.draw();
+    assert.ok(plotter.vp.time.displayCount < insideCount);
+    assert.equal(plotter._boxZoomY.time, null);
+
+    const xCount = plotter.vp.time.displayCount;
+    fire('wheel', plotW + 20, plotH / 2, { deltaY: -1 });
+    plotter.draw();
+    assert.equal(plotter.vp.time.displayCount, xCount);
+    assert.ok(plotter._drawState.min > originalY.min);
+    assert.ok(plotter._drawState.max < originalY.max);
+    assert.equal(yBar.hidden, false);
+    assert.ok(parseFloat(nodes.get('plot-y-scrollbar-thumb').style.height) < 378);
+});
+
+test('a Y scrollbar pans the zoomed range and right click restores both axes', () => {
+    const { plotter, fire, fireDocument, nodes } = createPlotter();
+    const plotW = plotter.canvas.width - plotter.pX;
+    const plotH = plotter.canvas.height - plotter.pY;
+    fire('pointerdown', plotW / 4, plotH / 4);
+    fire('pointerup', plotW * 3 / 4, plotH * 3 / 4);
+    const yBar = nodes.get('plot-y-scrollbar-wrap');
+    const thumb = nodes.get('plot-y-scrollbar-thumb');
+    assert.equal(yBar.hidden, false);
+    assert.ok(parseFloat(nodes.get('plot-scrollbar-thumb').style.width) < 800);
+    const originalSpan = plotter._drawState.max - plotter._drawState.min;
+    const originalMin = plotter._drawState.min;
+    thumb.listeners.mousedown({ clientY: 100, preventDefault() {} });
+    fireDocument('mousemove', { clientY: 130 });
+    fireDocument('mouseup', {});
+    plotter.draw();
+    assert.ok(plotter._drawState.min < originalMin);
+    assert.ok(Math.abs(plotter._drawState.max - plotter._drawState.min - originalSpan) < 1e-9);
+    fire('contextmenu', 0, 0);
+    plotter.draw();
+    assert.equal(plotter.vp.time.displayCount, plotter.maxPoints);
+    assert.equal(plotter._boxZoomY.time, null);
+    assert.equal(yBar.hidden, true);
 });
