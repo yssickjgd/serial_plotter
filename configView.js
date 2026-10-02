@@ -1,7 +1,7 @@
 const CONFIG_VALUE_FIELDS = [
     'serialBaud', 'serialData', 'serialStop', 'serialParity',
     'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
-    'dataType', 'endianness', 'channelsCount', 'maxPoints',
+    'dataType', 'endianness', 'channelsCount', 'maxPoints', 'plotWindowPoints',
     'sendIntervalUnit', 'plotViewMode', 'plotYScaleMode',
     'plotTimeXUnit', 'plotFreqXUnit', 'plotFreqXScale', 'plotFreqYScale',
     'plotFftWindow'
@@ -38,6 +38,9 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
     for (const key of CONFIG_VALUE_FIELDS) {
         if (config[key] !== undefined) elements[key].value = config[key];
     }
+    if (config.plotWindowPoints === undefined)
+        elements.plotWindowPoints.value = String(Math.min(1000,
+            Number(elements.maxPoints.value) || 1000));
     for (const [key, defaultValue] of Object.entries({
         plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
         plotFreqXScale: 'linear', plotFreqYScale: 'linear', plotFftWindow: 'hann'

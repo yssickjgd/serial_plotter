@@ -23,7 +23,7 @@
 
 document.addEventListener('DOMContentLoaded', () => {
     const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser,
-        MonitorView, SendController, ConfigStore, exportFrameCsv,
+        MonitorView, MonitorSearch, SendController, ConfigStore, exportFrameCsv, writeFrameCsv,
         collectConfigFromView, applyConfigToView, updatePlotOptionVisibility,
         parseIntInRange, parsePort, validateConfig } = globalThis.SerialPlotter;
 
@@ -92,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const endiannessSelect = document.getElementById('endianness');
     const channelsInput = document.getElementById('channels-count');
     const maxPointsInput = document.getElementById('max-points');
+    const plotWindowPointsInput = document.getElementById('plot-window-points');
     const applyBtn = document.getElementById('btn-apply-format');
 
     // —— 通道 Tab ——
@@ -152,6 +153,33 @@ document.addEventListener('DOMContentLoaded', () => {
     const logContent = document.getElementById('data-log');
     const monitor = new MonitorView(logContent, frames);
     let monitorOrder = 0;
+    const waveformToggle = document.getElementById('show-waveform');
+    const monitorDisplayMode = document.getElementById('monitor-display-mode');
+    const monitorSearchMode = document.getElementById('monitor-search-mode');
+    const monitorSearchQuery = document.getElementById('monitor-search-query');
+    const monitorSearchTolerance = document.getElementById('monitor-search-tolerance');
+    const monitorSearchChannel = document.getElementById('monitor-search-channel');
+    const monitorSearchStatus = document.getElementById('monitor-search-status');
+
+    const bindVisibleChoice = (fieldId, values) => {
+        const field = document.getElementById(fieldId);
+        const choices = values.map(value => document.getElementById(`${fieldId}-${value}`));
+        const sync = () => choices.forEach((choice, index) => {
+            choice.checked = field.value === values[index];
+        });
+        choices.forEach((choice, index) => choice.addEventListener('change', () => {
+            if (!choice.checked) return;
+            field.value = values[index];
+            field.dispatchEvent(new Event('change'));
+        }));
+        field.addEventListener('change', sync);
+        sync();
+        return sync;
+    };
+    bindVisibleChoice('monitor-display-mode', ['hex', 'ascii', 'number']);
+    bindVisibleChoice('monitor-search-mode', ['hex', 'ascii', 'number']);
+    bindVisibleChoice('send-mode', ['hex', 'text']);
+    const syncSendIntervalUnit = bindVisibleChoice('send-interval-unit', ['ms', 's', 'hz']);
 
     // —— 发送面板 ——
     const sendModeSelect = document.getElementById('send-mode');
@@ -169,8 +197,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const rightResizer = document.getElementById('right-resizer');
     const channelSidebar = document.getElementById('channel-sidebar');
     const canvasWrapper = document.getElementById('canvas-wrapper');
+    const plotHeader = document.getElementById('plot-header');
     const vResizer = document.getElementById('v-resizer');
     const monitorPanel = document.getElementById('monitor-panel');
+    const monitorHeader = document.getElementById('monitor-header');
+    const monitorStats = document.getElementById('monitor-stats');
+    const byteTools = document.getElementById('byte-tools');
+    const byteSearchTools = document.getElementById('byte-search-tools');
+    const waveTools = document.getElementById('wave-tools');
+    const sendPanel = document.getElementById('send-panel');
 
 
     /* ─────────────────────────────────────────────────────────
@@ -371,14 +406,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // —— 垂直分隔条（波形区 ↔ 监视台）——
     let vDragging = false, vStartY = 0, vStartH = 0;
-    let canvasH = null;  // null 表示首次使用默认比例（62%）
+    let canvasH = null;
+    let canvasRatio = 0.62;
+    let manualVerticalSplit = false;
+    let waveformVisible = true;
+    const minLogHeight = 92; // 四条 20px 记录行和上下各 6px 内边距
+    const mainDisplayVerticalPadding = 16; // 对应 .main-display 的上下各 8px
+
+    const minimumMonitorHeight = () => monitorHeader.offsetHeight + monitorStats.offsetHeight +
+        byteTools.offsetHeight + byteSearchTools.offsetHeight + sendPanel.offsetHeight + minLogHeight + 8;
+    const minimumCanvasHeight = () => Math.max(60, plotHeader.offsetHeight + 24);
+    const verticalUsableHeight = () => Math.max(140, mainDisplay.clientHeight -
+        mainDisplayVerticalPadding - vResizer.offsetHeight);
 
     /** 根据 canvasH 重新分配波形区和监视台的高度，与 applySidebarWidth 对应 */
     const applyVerticalHeights = () => {
-        const totalH = mainDisplay.clientHeight;
-        const vH = vResizer.offsetHeight;
-        if (canvasH === null) canvasH = Math.round((totalH - vH) * 0.62);
-        const monH = Math.max(80, totalH - vH - canvasH);
+        if (!waveformVisible) {
+            canvasWrapper.hidden = true;
+            vResizer.hidden = true;
+            monitorPanel.style.flex = '1';
+            monitorPanel.style.height = '';
+            return;
+        }
+        canvasWrapper.hidden = false;
+        vResizer.hidden = false;
+        const usable = verticalUsableHeight();
+        const minMonitorH = Math.max(minimumMonitorHeight(), manualVerticalSplit ? 0
+            : Math.min(320, Math.max(180, usable * 0.42)));
+        canvasH = Math.max(minimumCanvasHeight(), Math.min(usable - minMonitorH,
+            Math.round(usable * canvasRatio)));
+        const monH = Math.max(minMonitorH, usable - canvasH);
         canvasWrapper.style.flex = 'none';
         canvasWrapper.style.height = canvasH + 'px';
         monitorPanel.style.flex = 'none';
@@ -388,6 +445,198 @@ document.addEventListener('DOMContentLoaded', () => {
 
     applyVerticalHeights();
     window.addEventListener('resize', applyVerticalHeights);
+    if (typeof ResizeObserver !== 'undefined') {
+        const toolsResizeObserver = new ResizeObserver(() => applyVerticalHeights());
+        toolsResizeObserver.observe(byteTools);
+        toolsResizeObserver.observe(byteSearchTools);
+    }
+
+    waveformToggle.addEventListener('change', () => {
+        waveformVisible = waveformToggle.checked;
+        plotter.isVisible = waveformVisible;
+        applyVerticalHeights();
+        if (waveformVisible) plotter.resize();
+    });
+
+    const bindTimeJump = (prefix, jump) => {
+        const mode = document.getElementById(`${prefix}-jump-mode`);
+        const absolute = document.getElementById(`${prefix}-jump-absolute`);
+        const relative = document.getElementById(`${prefix}-jump-relative`);
+        const status = document.getElementById(`${prefix}-jump-status`);
+        for (const value of ['absolute', 'relative']) {
+            const choice = document.getElementById(`${prefix}-jump-mode-${value}`);
+            choice.addEventListener('change', () => {
+                if (!choice.checked) return;
+                mode.value = value;
+                mode.dispatchEvent(new Event('change'));
+            });
+        }
+        mode.addEventListener('change', () => {
+            for (const value of ['absolute', 'relative'])
+                document.getElementById(`${prefix}-jump-mode-${value}`).checked = mode.value === value;
+            absolute.hidden = mode.value !== 'absolute';
+            relative.hidden = mode.value !== 'relative';
+            if (prefix === 'byte') applyVerticalHeights();
+        });
+        document.getElementById(`${prefix}-jump-button`).addEventListener('click', () => {
+            if (!capturePaused) return;
+            if (!frames.length || !Number.isFinite(frames.originTimestamp)) {
+                status.textContent = '尚无带时间戳的采样帧';
+                return;
+            }
+            const seconds = Number(relative.value);
+            const target = mode.value === 'absolute' ? new Date(absolute.value).getTime()
+                : relative.value.trim() !== '' && Number.isFinite(seconds) && seconds >= 0
+                    ? frames.originTimestamp + seconds * 1000 : NaN;
+            if (!Number.isFinite(target)) {
+                status.textContent = '请输入有效时间';
+                return;
+            }
+            const index = frames.nearestTimestampIndex(target);
+            jump(index);
+            status.textContent = `已定位第 ${index + 1} 帧，共 ${frames.length} 帧`;
+        });
+    };
+    bindTimeJump('wave', index => {
+        if (plotViewMode.value !== 'time') {
+            plotViewMode.value = 'time';
+            plotViewMode.dispatchEvent(new Event('change'));
+        }
+        if (!waveformVisible) {
+            waveformToggle.checked = true;
+            waveformToggle.dispatchEvent(new Event('change'));
+        }
+        plotter.jumpToFrame(index);
+    });
+    bindTimeJump('byte', index => monitor.jumpToFrame(index));
+
+    const defaultJumpDateTime = () => {
+        const latestTimestamp = frames.timestampAt(frames.length - 1);
+        const hasFrameTime = Number.isFinite(latestTimestamp);
+        const date = hasFrameTime ? new Date(latestTimestamp) : new Date();
+        const pad = (value, width = 2) => String(value).padStart(width, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+            `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.` +
+            pad(hasFrameTime ? Math.floor(date.getMilliseconds() / 10) * 10
+                : Math.max(10, Math.floor(date.getMilliseconds() / 10) * 10), 3);
+    };
+    const toolPanels = [waveTools, byteTools, byteSearchTools];
+    const toolControlIds = [
+        ...['wave', 'byte'].flatMap(prefix => [
+            `${prefix}-jump-mode-absolute`, `${prefix}-jump-mode-relative`,
+            `${prefix}-jump-absolute`, `${prefix}-jump-relative`, `${prefix}-jump-button`
+        ]),
+        ...['hex', 'ascii', 'number'].map(mode => `monitor-search-mode-${mode}`),
+        'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel',
+        'monitor-search-button', 'monitor-search-prev', 'monitor-search-next',
+        'monitor-search-nearest'
+    ];
+    const syncTimeTools = () => {
+        for (const tools of toolPanels)
+            tools.classList[capturePaused ? 'remove' : 'add']('tools-disabled');
+        for (const id of toolControlIds)
+            document.getElementById(id).disabled = !capturePaused;
+        if (capturePaused) {
+            const value = defaultJumpDateTime();
+            document.getElementById('wave-jump-absolute').value = value;
+            document.getElementById('byte-jump-absolute').value = value;
+        }
+    };
+    syncTimeTools();
+
+    const populateSearchChannels = () => {
+        const selected = monitorSearchChannel.value;
+        monitorSearchChannel.replaceChildren();
+        for (let channel = -1; channel < frames.channelCount; channel++) {
+            const option = document.createElement('option');
+            option.value = String(channel);
+            option.textContent = channel < 0 ? '全部通道' : `CH${channel + 1}`;
+            monitorSearchChannel.appendChild(option);
+        }
+        monitorSearchChannel.value = selected !== '' && Number(selected) < frames.channelCount
+            ? selected : '-1';
+    };
+    populateSearchChannels();
+    monitorDisplayMode.addEventListener('change', () => monitor.setMode(monitorDisplayMode.value));
+    monitorSearchMode.addEventListener('change', () => {
+        const numeric = monitorSearchMode.value === 'number';
+        monitorSearchTolerance.hidden = !numeric;
+        monitorSearchChannel.hidden = !numeric;
+        monitorSearchQuery.placeholder = numeric ? '目标数值' :
+            monitorSearchMode.value === 'ascii' ? 'ASCII 文本' : '十六进制字节';
+        if (numeric) populateSearchChannels();
+        applyVerticalHeights();
+    });
+
+    let searchSession = null;
+    let searchGeneration = 0;
+    let searchMatches = [];
+    let selectedMatch = -1;
+    const showSearchMatch = index => {
+        if (!capturePaused) return;
+        if (!searchMatches.length) {
+            monitorSearchStatus.textContent = '无匹配结果';
+            return;
+        }
+        selectedMatch = (index + searchMatches.length) % searchMatches.length;
+        const match = searchMatches[selectedMatch];
+        const frame = frames.indexAtOrAfterOrder(match.startOrder);
+        if (frames.orderAt(frame) !== match.startOrder) {
+            monitorSearchStatus.textContent = '该结果已被缓冲区覆盖，请重新搜索';
+            return;
+        }
+        monitor.selectSearchMatch(selectedMatch);
+        monitor.jumpToFrame(frame);
+        monitorSearchStatus.textContent = `${selectedMatch + 1} / ${searchMatches.length}`;
+    };
+    document.getElementById('monitor-search-button').addEventListener('click', () => {
+        if (!capturePaused) return;
+        try {
+            const options = MonitorSearch.parseMonitorSearch(monitorSearchMode.value,
+                monitorSearchQuery.value, monitorSearchTolerance.value,
+                Number(monitorSearchChannel.value));
+            searchSession = new MonitorSearch.MonitorSearchSession(frames, options);
+            searchMatches = [];
+            selectedMatch = -1;
+            monitor.setSearchResults([]);
+            monitorDisplayMode.value = options.kind;
+            monitorDisplayMode.dispatchEvent(new Event('change'));
+            const generation = ++searchGeneration;
+            const scan = () => {
+                if (generation !== searchGeneration || !capturePaused) return;
+                try {
+                    let done = false;
+                    for (let batch = 0; batch < 8 && !done; batch++) done = searchSession.step(512);
+                    if (done) {
+                        searchMatches = searchSession.matches;
+                        monitor.setSearchResults(searchMatches);
+                        monitorSearchStatus.textContent = `找到 ${searchMatches.length} 处匹配`;
+                    } else {
+                        monitorSearchStatus.textContent = `搜索中 ${searchSession.position} / ${searchSession.length}`;
+                        setTimeout(scan, 0);
+                    }
+                } catch (error) { monitorSearchStatus.textContent = error.message; }
+            };
+            scan();
+        } catch (error) { monitorSearchStatus.textContent = error.message; }
+    });
+    document.getElementById('monitor-search-prev').addEventListener('click', () =>
+        showSearchMatch(selectedMatch < 0 ? searchMatches.length - 1 : selectedMatch - 1));
+    document.getElementById('monitor-search-next').addEventListener('click', () =>
+        showSearchMatch(selectedMatch + 1));
+    document.getElementById('monitor-search-nearest').addEventListener('click', () => {
+        const order = monitor.cursorOrder ?? monitor.anchor?.order ?? frames.orderAt(frames.length - 1);
+        let low = 0, high = searchMatches.length;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (searchMatches[mid].startOrder < order) low = mid + 1;
+            else high = mid;
+        }
+        const index = low === 0 ? 0 : low >= searchMatches.length ? searchMatches.length - 1
+            : order - searchMatches[low - 1].startOrder <= searchMatches[low].startOrder - order
+                ? low - 1 : low;
+        showSearchMatch(index);
+    });
 
     vResizer.addEventListener('mousedown', (e) => {
         vDragging = true;
@@ -400,9 +649,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.addEventListener('mousemove', (e) => {
         if (!vDragging) return;
-        const totalH = mainDisplay.clientHeight;
-        const vH = vResizer.offsetHeight;
-        canvasH = Math.max(60, Math.min(totalH - vH - 80, vStartH + (e.clientY - vStartY)));
+        const usable = verticalUsableHeight();
+        const minMonitorH = minimumMonitorHeight();
+        canvasH = Math.max(minimumCanvasHeight(), Math.min(usable - minMonitorH,
+            vStartH + (e.clientY - vStartY)));
+        canvasRatio = canvasH / usable;
+        manualVerticalSplit = true;
         applyVerticalHeights();
     });
 
@@ -457,6 +709,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const updateParserSettings = () => {
         const ch = parseIntInRange(channelsInput.value, Limits.minChannels, Limits.maxChannels, '通道数');
         const maxPoints = parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数');
+        const plotWindowPoints = parseIntInRange(plotWindowPointsInput.value,
+            Limits.minPoints, Limits.maxPlotWindowPoints, '波形监视台内采样点数');
         parser.setFormat({
             enableHeader: headerChk.checked,
             headerHex: headerInput.value,
@@ -468,7 +722,11 @@ document.addEventListener('DOMContentLoaded', () => {
             enableChecksum: checksumChk.checked
         });
         plotter.setChannelCount(ch);
+        populateSearchChannels();
         plotter.setMaxPoints(maxPoints);
+        plotter.setPlotWindowPoints(Math.min(plotWindowPoints, maxPoints));
+        plotWindowPointsInput.value = String(plotter.plotWindowPoints);
+        plotWindowPointsInput.max = String(Math.min(maxPoints, Limits.maxPlotWindowPoints));
         rebuildChannelList();
         syncPlotDisplaySettings();
     };
@@ -476,10 +734,24 @@ document.addEventListener('DOMContentLoaded', () => {
     maxPointsInput.addEventListener('change', () => {
         try {
             plotter.setMaxPoints(parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数'));
+            plotWindowPointsInput.value = String(plotter.plotWindowPoints);
+            plotWindowPointsInput.max = String(Math.min(plotter.maxPoints, Limits.maxPlotWindowPoints));
             monitor.render();
             saveConfig();
         } catch (error) {
             maxPointsInput.value = plotter.maxPoints;
+            alert(error.message);
+        }
+    });
+
+    plotWindowPointsInput.addEventListener('change', () => {
+        try {
+            plotter.setPlotWindowPoints(parseIntInRange(plotWindowPointsInput.value,
+                Limits.minPoints, Math.min(plotter.maxPoints, Limits.maxPlotWindowPoints),
+                '波形监视台内采样点数'));
+            saveConfig();
+        } catch (error) {
+            plotWindowPointsInput.value = String(plotter.plotWindowPoints);
             alert(error.message);
         }
     });
@@ -723,7 +995,7 @@ document.addEventListener('DOMContentLoaded', () => {
         enableFooter: footerChk, footerHex: footerInput,
         enableChecksum: checksumChk, dataType: dataTypeSelect,
         endianness: endiannessSelect, channelsCount: channelsInput,
-        maxPoints: maxPointsInput, sendIntervalUnit,
+        maxPoints: maxPointsInput, plotWindowPoints: plotWindowPointsInput, sendIntervalUnit,
         plotViewMode, plotYScaleMode, plotFftRemoveDc,
         plotTimeXUnit, plotFreqXUnit, plotFreqXScale, plotFreqYScale, plotFftWindow,
         plotYMin, plotYMax, wrapFftRemoveDc, wrapPlotTimeAxis, wrapPlotFreqAxis,
@@ -752,6 +1024,7 @@ document.addEventListener('DOMContentLoaded', () => {
             },
             updatePlot: syncPlotDisplaySettings, syncPlotChoices
         });
+        syncSendIntervalUnit();
     };
 
     const configStore = new ConfigStore({
@@ -840,8 +1113,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // 成功解析一帧 → 更新波形 + 记录日志
-    parser.onFrameParsed = (valuesArr, timeStr, frameBytes) => {
-        plotter.addFrame(valuesArr, frameBytes, timeStr, ++monitorOrder);
+    parser.onFrameParsed = (valuesArr, timeStr, frameBytes, timestamp) => {
+        plotter.addFrame(valuesArr, frameBytes, timeStr, ++monitorOrder, timestamp);
         monitor.appendFrame();
     };
 
@@ -971,6 +1244,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const setCapturePaused = paused => {
         if (plotter.isPaused !== paused) plotter.togglePause();
         capturePaused = paused;
+        if (!paused) {
+            searchGeneration++;
+            searchSession = null;
+            searchMatches = [];
+            selectedMatch = -1;
+            monitor.setSearchResults([]);
+            monitorSearchStatus.textContent = '';
+        }
+        syncTimeTools();
         if (paused) { parser.flushPending(); monitor.render(); plotter.draw(); }
         pauseBtn.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
         pauseBtn.className = paused ? 'btn btn-success' : 'btn btn-secondary';
@@ -978,6 +1260,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pauseBtn.addEventListener('click', () => setCapturePaused(!capturePaused));
 
     clearBtn.addEventListener('click', () => {
+        searchGeneration++;
+        searchSession = null;
+        searchMatches = [];
+        selectedMatch = -1;
+        monitorSearchStatus.textContent = '';
         plotter.clear();
         monitor.clear();
         parser.reset();
@@ -992,13 +1279,40 @@ document.addEventListener('DOMContentLoaded', () => {
         stats.framesPerSec = 0;
     });
 
-    exportBtn.addEventListener('click', () => {
-        const csv = exportFrameCsv(frames, plotter.getChannelMeta());
-        if (!csv) { alert('目前无有效数据可导出。'); return; }
-        const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    exportBtn.addEventListener('click', async () => {
+        if (!frames.length) { alert('目前无有效数据可导出。'); return; }
+        const channels = plotter.getChannelMeta();
+        const filename = `Scientific_Plot_Export_${Date.now()}.csv`;
+        if (frames.length > 50000) {
+            if (typeof window.showSaveFilePicker !== 'function') {
+                alert('大容量 CSV 导出需要支持文件系统保存的 Chrome 或 Edge。');
+                return;
+            }
+            let writable;
+            try {
+                const handle = await window.showSaveFilePicker({ suggestedName: filename,
+                    types: [{ description: 'CSV 文件', accept: { 'text/csv': ['.csv'] } }] });
+                writable = await handle.createWritable();
+                exportBtn.disabled = true;
+                await writeFrameCsv(frames, channels, writable, (done, total) => {
+                    exportBtn.textContent = `正在导出 ${Math.round(done / total * 100)}%`;
+                });
+                await writable.close();
+                writable = null;
+            } catch (error) {
+                if (writable) await writable.abort();
+                if (error.name !== 'AbortError') alert(`导出失败: ${error.message}`);
+            } finally {
+                exportBtn.disabled = false;
+                exportBtn.textContent = '导出全部通道至 CSV';
+            }
+            return;
+        }
+        const csv = exportFrameCsv(frames, channels);
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = `Scientific_Plot_Export_${Date.now()}.csv`;
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(a.href);
     });

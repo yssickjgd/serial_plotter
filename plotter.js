@@ -15,6 +15,8 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 const FFT_REFRESH_INTERVAL_MS = 100;
+const plotterLimits = typeof module !== 'undefined'
+    ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 
 class Plotter {
     /** 初始化画布、通道数组、视口状态、事件监听与滚动条 */
@@ -45,7 +47,9 @@ class Plotter {
         ];
 
         this.isPaused     = false;
+        this.isVisible    = true;
         this.maxPoints    = 1000;
+        this.plotWindowPoints = 1000;
         this.pX           = 90;  // right margin for Y axis (needs room for 6 decimal places)
         this.pY           = 22;  // bottom margin for X axis
         this.displayMode  = 'time';
@@ -60,6 +64,8 @@ class Plotter {
         this.onStatsUpdate = null;
         this._drawState = null;
         this._selection = null;
+        this._timeCenterOrder = null;
+        this._scrollbarDirty = false;
         this._boxZoomY = { time: null, frequency: null };
         this._zoomBaseY = { time: null, frequency: null };
 
@@ -102,10 +108,14 @@ class Plotter {
         this.canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             this._selection = null;
+            this._timeCenterOrder = null;
             this._markViewDirty();
-            this._vp.displayCount = this.maxPoints;
+            this._vp.displayCount = this.displayMode === 'time'
+                ? this.plotWindowPoints : this.maxPoints;
             this._vp.autoFollow   = true;
             this._clampScroll();
+            if (this.displayMode === 'time')
+                this._vp.scrollOffset = Math.max(0, this.frames.length - this.plotWindowPoints);
             this._clearYZoom(this.displayMode);
             if (this.isPaused) this.draw();
         });
@@ -282,21 +292,31 @@ class Plotter {
     }
 
     /** 追加一帧数据到各通道缓冲区，超出 maxPoints 时自动丢弃最早数据 */
-    addFrame(valuesArray, frameBytes, timeStr, order) {
+    addFrame(valuesArray, frameBytes, timeStr, order, timestamp) {
         if (this.isPaused) return;
-        this.frames.append(valuesArray, frameBytes, timeStr, order);
-        if (this.vp.time.autoFollow)
-            this.vp.time.scrollOffset = Math.max(0,
-                this.frames.length - this.vp.time.displayCount);
+        const timeView = this.vp.time;
+        const previousLength = this.frames.length;
+        const previousOffset = timeView.scrollOffset;
+        const evictsOldest = previousLength === this.frames.capacity;
+        this.frames.append(valuesArray, frameBytes, timeStr, order, timestamp);
+        if (timeView.autoFollow)
+            timeView.scrollOffset = Math.max(0, this.frames.length - timeView.displayCount);
+        else {
+            if (evictsOldest) timeView.scrollOffset = Math.max(0, previousOffset - 1);
+            this._scrollbarDirty = true;
+        }
         if (this.displayMode === 'frequency' && this.vp.frequency.autoFollow)
             this.vp.frequency.scrollOffset = Math.max(0,
                 this._scrollTotal() - this.vp.frequency.displayCount);
-        this._dirty = true;
+        if (this.displayMode !== 'time' || timeView.autoFollow ||
+            previousLength < previousOffset + timeView.displayCount ||
+            (evictsOldest && previousOffset === 0)) this._dirty = true;
     }
 
     /** 清空所有通道数据，重置时域/频域视口到跟随模式 */
     clear() {
         this._selection = null;
+        this._timeCenterOrder = null;
         this._clearYZoom('time');
         this._clearYZoom('frequency');
         this.frames.clear();
@@ -349,11 +369,52 @@ class Plotter {
         this.frames.resize(size);
         this._cachedScrollTotal = 0;
         this.maxPoints = size;
-        this.vp.time.displayCount = Math.min(this.vp.time.displayCount, size);
+        const windowShrank = this.plotWindowPoints > size;
+        this.plotWindowPoints = Math.min(this.plotWindowPoints, size);
+        this.vp.time.displayCount = Math.min(this.vp.time.displayCount, this.plotWindowPoints);
+        if (windowShrank) {
+            this.vp.time.displayCount = this.plotWindowPoints;
+            this.vp.time.autoFollow = true;
+            this.vp.time.scrollOffset = Math.max(0, this.frames.length - this.plotWindowPoints);
+            this._clearYZoom('time');
+        }
         this.vp.frequency.displayCount = fullFrequencyView ? size
             : Math.min(this.vp.frequency.displayCount, size);
         this._clampScroll();
         this._markViewDirty();
+    }
+
+    setPlotWindowPoints(size) {
+        if (!Number.isSafeInteger(size) || size < plotterLimits.minPoints ||
+            size > Math.min(this.maxPoints, plotterLimits.maxPlotWindowPoints))
+            throw new RangeError(`波形监视台内采样点数需为 ${plotterLimits.minPoints}–${Math.min(
+                this.maxPoints, plotterLimits.maxPlotWindowPoints)}`);
+        if (size === this.plotWindowPoints) return;
+        this._timeCenterOrder = null;
+        this.plotWindowPoints = size;
+        this.vp.time.displayCount = size;
+        this.vp.time.scrollOffset = Math.max(0, this.frames.length - size);
+        this.vp.time.autoFollow = true;
+        this._clearYZoom('time');
+        this._markViewDirty();
+        if (this.displayMode === 'time') this._updateScrollbar();
+        if (this.isPaused) this.draw();
+    }
+
+    jumpToFrame(index) {
+        if (!this.frames.length) return false;
+        const target = Math.max(0, Math.min(this.frames.length - 1, Math.round(index)));
+        const view = this.vp.time;
+        const count = Math.max(2, Math.min(this.plotWindowPoints, view.displayCount));
+        view.displayCount = count;
+        view.scrollOffset = Math.max(0, Math.min(this.frames.length - count,
+            Math.round(target - count / 2)));
+        view.autoFollow = false;
+        this._timeCenterOrder = this.frames.orderAt(target);
+        this._markViewDirty();
+        if (this.displayMode === 'time') this._updateScrollbar();
+        if (this.isPaused && this.isVisible) this.draw();
+        return true;
     }
 
     /* ── FFT & 统计分析 ── */
@@ -426,7 +487,16 @@ class Plotter {
     /** 实时取全部保留样本；暂停取时域视口内的样本。 */
     _frequencyInputRange() {
         const total = this.frames.length;
-        if (!this.isPaused) return { start: 0, end: total };
+        if (!this.isPaused) return { start: Math.max(0, total - this.plotWindowPoints), end: total };
+        if (this._timeCenterOrder !== null) {
+            const center = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
+            if (this.frames.orderAt(center) === this._timeCenterOrder) {
+                const count = Math.max(2, Math.floor(this.vp.time.displayCount));
+                const start = center - Math.floor(count / 2);
+                return { start: Math.max(0, start), end: Math.min(total, start + count) };
+            }
+            this._timeCenterOrder = null;
+        }
         const count = Math.max(2, Math.floor(this.vp.time.displayCount));
         let start = Math.max(0, Math.floor(this.vp.time.scrollOffset));
         if (start >= total) start = Math.max(0, total - count);
@@ -522,7 +592,8 @@ class Plotter {
         const ratio  = Math.max(0, Math.min(1, mouseX / plotW));
         const factor = deltaY < 0 ? 0.8 : 1.25;
         const currentCount = Math.min(this._vp.displayCount, total);
-        const nextCount = Math.round(Math.max(2, Math.min(this.maxPoints, total, currentCount * factor)));
+        const limit = this.displayMode === 'time' ? this.plotWindowPoints : this.maxPoints;
+        const nextCount = Math.round(Math.max(2, Math.min(limit, total, currentCount * factor)));
         if (this.displayMode === 'frequency' && this.freqXScale === 'log') {
             const first = Math.max(1, this._vp.scrollOffset);
             const last = Math.min(total - 1, first + this._vp.displayCount - 1);
@@ -537,9 +608,12 @@ class Plotter {
             }
             this._vp.scrollOffset = Math.round((low + high) / 2);
         } else {
-            const anchorIdx = this._vp.scrollOffset + ratio * currentCount;
+            const anchorIdx = this.displayMode === 'time' && this._timeCenterOrder !== null
+                ? this._drawState.startIdx + ratio * currentCount
+                : this._vp.scrollOffset + ratio * currentCount;
             this._vp.scrollOffset = Math.round(anchorIdx - ratio * nextCount);
         }
+        if (this.displayMode === 'time') this._timeCenterOrder = null;
         this._vp.displayCount = nextCount;
         this._vp.autoFollow   = false;
         this._clampScroll();
@@ -643,6 +717,7 @@ class Plotter {
                 xScale: state.xScale, yScale: state.yScale
             }) : null;
         if (zoom) {
+            if (this.displayMode === 'time') this._timeCenterOrder = null;
             this._vp.scrollOffset = zoom.scrollOffset;
             this._vp.displayCount = zoom.displayCount;
             this._clampScroll();
@@ -690,6 +765,7 @@ class Plotter {
         let dragging = false, dragStartX = 0, dragStartOff = 0;
 
         this.scrollbarThumb.addEventListener('mousedown', (e) => {
+            if (this.displayMode === 'time') this._timeCenterOrder = null;
             dragging = true; dragStartX = e.clientX; dragStartOff = this._vp.scrollOffset;
             e.preventDefault();
         });
@@ -709,6 +785,7 @@ class Plotter {
 
         this.scrollbarWrap.addEventListener('click', (e) => {
             if (e.target === this.scrollbarThumb) return;
+            if (this.displayMode === 'time') this._timeCenterOrder = null;
             this._markViewDirty();
             const rect  = this.scrollbarWrap.getBoundingClientRect();
             const ratio = (e.clientX - rect.left) / rect.width;
@@ -815,9 +892,13 @@ class Plotter {
     /** requestAnimationFrame 循环，非暂停状态下持续重绘 */
     renderLoop() {
         const now = performance.now();
+        if (this._scrollbarDirty && this.displayMode === 'time') {
+            this._updateScrollbar();
+            this._scrollbarDirty = false;
+        }
         const spectrumDue = this._fftVersion < 0 ||
             (this._fftVersion !== this.frames.version && now - this._fftAt >= FFT_REFRESH_INTERVAL_MS);
-        if (!this.isPaused && this._dirty && now - this._lastDraw >= 1000 / 30 &&
+        if (this.isVisible && !this.isPaused && this._dirty && now - this._lastDraw >= 1000 / 30 &&
             (this.displayMode !== 'frequency' || this._viewDirty || spectrumDue)) {
             this.draw();
         }
@@ -826,6 +907,7 @@ class Plotter {
 
     /** Count only completed Canvas redraws, including explicit redraws while paused. */
     draw() {
+        if (!this.isVisible) return;
         const spectrumRevision = this._fftRevision;
         this._renderFrame();
         this._updateYScrollbar();
@@ -882,6 +964,14 @@ class Plotter {
         const dispCnt   = Math.max(2, Math.floor(this._vp.displayCount));
         let actualEnd   = Math.min(startIdx + dispCnt, scrollTotal);
         let visibleCnt  = actualEnd - startIdx;
+        if (this.displayMode === 'time' && this._timeCenterOrder !== null) {
+            const center = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
+            if (this.frames.orderAt(center) === this._timeCenterOrder) {
+                startIdx = center - Math.floor(dispCnt / 2);
+                actualEnd = startIdx + dispCnt;
+                visibleCnt = dispCnt;
+            } else this._timeCenterOrder = null;
+        }
         if (visibleCnt <= 0) {
             this._vp.scrollOffset = Math.max(0, scrollTotal - dispCnt);
             startIdx   = Math.max(0, Math.floor(this._vp.scrollOffset));
@@ -890,7 +980,9 @@ class Plotter {
             actualEnd  = Math.min(startIdx + dispCnt, scrollTotal);
             visibleCnt = actualEnd - startIdx;
         }
-        const series = this._collectWindowSeries(startIdx, actualEnd, fftResults);
+        const dataStart = Math.max(0, startIdx);
+        const dataEnd = Math.min(scrollTotal, actualEnd);
+        const series = this._collectWindowSeries(dataStart, dataEnd, fftResults);
         if (series.length === 0) { this._emitStats(''); return; }
 
         const summaryText = this._buildSummary(series, this.displayMode);
@@ -964,7 +1056,8 @@ class Plotter {
             if (this.displayMode === 'frequency')
                 this.ctx.textAlign = i === 0 ? 'left' : i === xTicks ? 'right' : 'center';
             const label = this.displayMode === 'frequency'
-                ? this._formatFrequencyBin(idx, series[0].fftSize) : this._formatTimeIndex(idx);
+                ? this._formatFrequencyBin(idx, series[0].fftSize)
+                : idx >= 0 && idx < total ? this._formatTimeIndex(idx) : '';
             this.ctx.fillText(label, px, plotH + 3);
         }
 
@@ -1008,7 +1101,7 @@ class Plotter {
                 this.ctx.beginPath();
                 const points = globalThis.SerialPlotter.bucketExtrema(vals, plotW);
                 for (let i = 0; i < points.length; i++) {
-                    const x = points[i].index * stepX;
+                    const x = (points[i].index + dataStart - startIdx) * stepX;
                     const y = plotH - ((points[i].value - min) / bounded) * plotH;
                     if (i === 0) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
                 }
@@ -1017,7 +1110,7 @@ class Plotter {
                     this.ctx.fillStyle = item.ch.color;
                     for (let i = 0; i < vals.length; i++) {
                         if (!Number.isFinite(vals[i])) continue;
-                        const x = i * stepX;
+                        const x = (i + dataStart - startIdx) * stepX;
                         const y = plotH - ((vals[i] - min) / bounded) * plotH;
                         this.ctx.fillRect(x-1.5, y-1.5, 3, 3);
                     }
@@ -1077,7 +1170,8 @@ class Plotter {
         const tipLines = this.displayMode === 'frequency'
             ? [`Freq: ${this._formatFrequencyBin(startIdx + xIdx, series[0].fftSize)} (Bin ${startIdx + xIdx})`,
                 `Mag: ${yScale === 'log' ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}`]
-            : [`X: ${this._formatTimeIndex(Math.min(total - 1, startIdx + xIdx))}`,
+            : [`X: ${startIdx + xIdx >= 0 && startIdx + xIdx < total
+                ? this._formatTimeIndex(startIdx + xIdx) : '--'}`,
                 `Y: ${yVal.toFixed(6)}`];
         ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;

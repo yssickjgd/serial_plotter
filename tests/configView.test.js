@@ -6,7 +6,7 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     const elements = Object.fromEntries([
         'connType', 'serialBaud', 'serialData', 'serialStop', 'serialParity',
         'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
-        'dataType', 'endianness', 'channelsCount', 'maxPoints',
+        'dataType', 'endianness', 'channelsCount', 'maxPoints', 'plotWindowPoints',
         'sendIntervalUnit', 'plotViewMode', 'plotYScaleMode',
         'plotTimeXUnit', 'plotFreqXUnit', 'plotFreqXScale', 'plotFreqYScale',
         'plotFftWindow',
@@ -52,6 +52,7 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     assert.equal(saved.plotFreqXScale, 'log');
     assert.equal(saved.plotFreqYScale, 'log');
     assert.equal(saved.plotFftWindow, 'flatTop');
+    assert.equal(saved.plotWindowPoints, '1000');
     assert.deepEqual(saved.channels[0], { name: 'CH1', color: '#123456', visible: true,
         gainEnabled: true, gain: -2, offsetEnabled: true, offset: 3 });
     applyConfigToView({ channels: [{ name: 'legacy', color: '#123456', visible: true }] }, {
@@ -59,4 +60,9 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
         updateChannels() {}, updatePlot() {}
     });
     assert.equal(elements.plotFftWindow.value, 'hann');
+    applyConfigToView({ maxPoints: '500' }, {
+        elements, bounds, updateConnectionModeUI() {}, updateFrameFormat() {},
+        updateChannels() {}, updatePlot() {}
+    });
+    assert.equal(elements.plotWindowPoints.value, '500');
 });
