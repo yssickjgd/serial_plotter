@@ -1,8 +1,9 @@
 const PROJECT_LIMITS = Object.freeze({
     minChannels: 1,
-    maxChannels: 24,
+    maxChannels: 50,
     minPoints: 2,
-    maxPoints: 100000,
+    maxPoints: 3600000,
+    maxPlotWindowPoints: 65536,
     minPort: 1,
     maxPort: 65535
 });

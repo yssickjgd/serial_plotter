@@ -41,6 +41,12 @@ function validateConfig(config) {
         parseIntInRange(config.channelsCount, validationLimits.minChannels, validationLimits.maxChannels, '通道数');
     if (config.maxPoints !== undefined)
         parseIntInRange(config.maxPoints, validationLimits.minPoints, validationLimits.maxPoints, '采样点数');
+    if (config.plotWindowPoints !== undefined) {
+        const count = parseIntInRange(config.plotWindowPoints, validationLimits.minPoints,
+            validationLimits.maxPlotWindowPoints, '波形监视台内采样点数');
+        if (config.maxPoints !== undefined && count > Number(config.maxPoints))
+            throw new RangeError('波形监视台内采样点数不能大于最大采样点数');
+    }
     if (config.serialBaud !== undefined)
         parseIntInRange(config.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率');
     for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc']) {

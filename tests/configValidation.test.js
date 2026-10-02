@@ -43,3 +43,19 @@ test('validates FFT window and finite optional channel calibration', () => {
         { gain: 'Infinity' }, { offset: 'NaN' }, { gain: '' }
     ]) assert.throws(() => validateConfig({ channels: [channel] }), /通道配置/);
 });
+
+test('plot window points are bounded by the canvas limit and retained capacity', () => {
+    assert.equal(validateConfig({ maxPoints: '100000', plotWindowPoints: '65536' }).plotWindowPoints,
+        '65536');
+    assert.throws(() => validateConfig({ maxPoints: '100000', plotWindowPoints: '65537' }),
+        /波形监视台内采样点数/);
+    assert.throws(() => validateConfig({ maxPoints: '500', plotWindowPoints: '501' }),
+        /波形监视台内采样点数/);
+});
+
+test('one hour at 1000 Hz supports 50 channels while rejecting larger limits', () => {
+    assert.equal(validateConfig({ channelsCount: '50', maxPoints: '3600000',
+        plotWindowPoints: '65536' }).channelsCount, '50');
+    assert.throws(() => validateConfig({ channelsCount: '51' }), /通道数/);
+    assert.throws(() => validateConfig({ maxPoints: '3600001' }), /采样点数/);
+});

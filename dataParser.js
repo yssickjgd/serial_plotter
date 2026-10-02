@@ -164,7 +164,10 @@ class DataParser {
                 }
             }
             this.frameCount++;
-            if (this.onFrameParsed) this._notify(this.onFrameParsed, values, _fmtTime(new Date()), frame);
+            if (this.onFrameParsed) {
+                const receivedAt = new Date();
+                this._notify(this.onFrameParsed, values, _fmtTime(receivedAt), frame, receivedAt.getTime());
+            }
             this.readOffset += frameLen;
         }
         flushRejected();
