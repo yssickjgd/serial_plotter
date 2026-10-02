@@ -152,7 +152,7 @@
                     </div>
                     <div class="input-group">
                         <label>采样通道数 (Channels)</label>
-                        <input type="number" id="channels-count" value="1" min="1" max="24" />
+                        <input type="number" id="channels-count" value="1" min="1" max="50" />
                     </div>
                     <button id="btn-apply-format" class="btn btn-primary" style="margin-top:2px;">应用帧格式配置</button>
                 </div>
@@ -164,7 +164,11 @@
                     <div class="section-title">画板与缓存</div>
                     <div class="input-group">
                         <label>最大采样点数</label>
-                    <input type="number" step="100" min="2" max="100000" id="max-points" value="1000" />
+                    <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
+                    </div>
+                    <div class="input-group">
+                        <label>波形监视台内采样点数</label>
+                        <input type="number" step="100" min="2" max="1000" id="plot-window-points" value="1000" />
                     </div>
                     <div class="row">
                         <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
@@ -268,6 +272,24 @@
                         <span class="plot-title">波形监视台</span>
                         <span id="stat-plot-fps">绘图帧率: 0 FPS</span>
                     </div>
+                    <div class="monitor-tool-row" id="wave-tools">
+                    <span class="tool-label">时间定位</span>
+                    <div class="jump-toolbar" id="wave-jump-toolbar">
+                        <input type="hidden" id="wave-jump-mode" value="absolute" />
+                        <div class="jump-selection-row">
+                            <div class="choice-group jump-mode-choices" role="radiogroup" aria-label="波形时间类型">
+                                <label><input id="wave-jump-mode-absolute" type="radio" name="wave-jump-mode-choice" value="absolute" checked />系统时间</label>
+                                <label><input id="wave-jump-mode-relative" type="radio" name="wave-jump-mode-choice" value="relative" />相对时间</label>
+                            </div>
+                            <div class="jump-time-value">
+                                <input id="wave-jump-absolute" type="datetime-local" step="0.01" aria-label="波形系统时间" />
+                                <input id="wave-jump-relative" type="number" min="0" step="0.01" placeholder="秒" aria-label="波形相对秒数" hidden />
+                            </div>
+                            <button id="wave-jump-button" type="button">跳转</button>
+                            <span id="wave-jump-status" class="jump-status" role="status"></span>
+                        </div>
+                    </div>
+                    </div>
                     <!-- 单通道统计由 app.js 动态更新 -->
                     <div class="plot-info-row" id="plot-info-row">
                         <div id="plot-channel-stats" class="plot-channel-stats"></div>
@@ -287,16 +309,61 @@
 
             <!-- ── 字节流监视台 ── -->
             <div class="monitor-panel box-border" id="monitor-panel">
-                <div class="monitor-header">
+                <div class="monitor-header" id="monitor-header">
                     <span>字节流监视台</span>
+                    <label class="monitor-toggle"><input id="show-waveform" type="checkbox" checked />显示波形监视台</label>
+                    <div class="monitor-format-row">
+                        <span>接收显示</span>
+                        <input type="hidden" id="monitor-display-mode" value="hex" />
+                        <div class="choice-group monitor-format-choices" role="radiogroup" aria-label="字节流接收显示格式">
+                            <label><input id="monitor-display-mode-hex" type="radio" name="monitor-display-mode-choice" value="hex" checked />Hex</label>
+                            <label><input id="monitor-display-mode-ascii" type="radio" name="monitor-display-mode-choice" value="ascii" />ASCII</label>
+                            <label><input id="monitor-display-mode-number" type="radio" name="monitor-display-mode-choice" value="number" />通道数值</label>
+                        </div>
+                    </div>
                 </div>
-
-                <!-- 统计信息行：由 app.js 的 setInterval 定时更新，与波形监视台共用排版规范 -->
-                <div class="stats-bar-row">
+                <div class="stats-bar-row" id="monitor-stats">
                     <span id="stat-rx">RX: 0 B/s</span>
                     <span id="stat-tx">TX: 0 B/s</span>
                     <span id="stat-fps">帧率: 0 f/s</span>
                     <span id="stat-fail">校验失败: 0%</span>
+                </div>
+                <div class="monitor-tool-row" id="byte-tools">
+                <span class="tool-label">时间定位</span>
+                <div class="jump-toolbar" id="byte-jump-toolbar">
+                    <input type="hidden" id="byte-jump-mode" value="absolute" />
+                    <div class="jump-selection-row">
+                        <div class="choice-group jump-mode-choices" role="radiogroup" aria-label="字节流时间类型">
+                            <label><input id="byte-jump-mode-absolute" type="radio" name="byte-jump-mode-choice" value="absolute" checked />系统时间</label>
+                            <label><input id="byte-jump-mode-relative" type="radio" name="byte-jump-mode-choice" value="relative" />相对时间</label>
+                        </div>
+                        <div class="jump-time-value">
+                            <input id="byte-jump-absolute" type="datetime-local" step="0.01" aria-label="字节流系统时间" />
+                            <input id="byte-jump-relative" type="number" min="0" step="0.01" placeholder="秒" aria-label="字节流相对秒数" hidden />
+                        </div>
+                        <button id="byte-jump-button" type="button">跳转</button>
+                        <span id="byte-jump-status" class="jump-status" role="status"></span>
+                    </div>
+                </div>
+                </div>
+                <div class="monitor-tool-row" id="byte-search-tools">
+                <span class="tool-label">搜索</span>
+                <div class="monitor-search-toolbar">
+                    <input type="hidden" id="monitor-search-mode" value="hex" />
+                    <div class="choice-group search-mode-choices" role="radiogroup" aria-label="搜索格式">
+                        <label><input id="monitor-search-mode-hex" type="radio" name="monitor-search-mode-choice" value="hex" checked />Hex</label>
+                        <label><input id="monitor-search-mode-ascii" type="radio" name="monitor-search-mode-choice" value="ascii" />ASCII</label>
+                        <label><input id="monitor-search-mode-number" type="radio" name="monitor-search-mode-choice" value="number" />通道数值</label>
+                    </div>
+                    <input id="monitor-search-query" type="text" placeholder="输入搜索内容" aria-label="搜索内容" />
+                    <input id="monitor-search-tolerance" type="number" min="0" step="any" placeholder="±误差" aria-label="数值误差范围" title="允许的绝对误差；留空表示 0（精确匹配）" hidden />
+                    <select id="monitor-search-channel" aria-label="搜索通道" hidden><option value="-1">全部通道</option></select>
+                    <button id="monitor-search-button" type="button">搜索</button>
+                    <button id="monitor-search-prev" type="button">上一个</button>
+                    <button id="monitor-search-next" type="button">下一个</button>
+                    <button id="monitor-search-nearest" type="button">光标就近</button>
+                    <span id="monitor-search-status" role="status"></span>
+                </div>
                 </div>
 
                 <!-- 可滚动的窗口原始帧记录；只渲染可见行 -->
@@ -306,26 +373,31 @@
                 <!-- <div class="v-resizer-inner" id="log-send-resizer"></div> -->
                 
                 <!-- 发送面板 -->
-                <div class="send-panel">
+                <div class="send-panel" id="send-panel">
                     <div class="send-toolbar">
-                        <select id="send-mode" title="发送格式">
-                            <option value="hex">Hex</option>
-                            <option value="text">Text</option>
-                        </select>
+                        <div class="send-mode-row">
+                            <span>发送显示</span>
+                            <input type="hidden" id="send-mode" value="hex" />
+                            <div class="choice-group send-format-choices" role="radiogroup" aria-label="发送框显示格式">
+                                <label><input id="send-mode-hex" type="radio" name="send-mode-choice" value="hex" checked />Hex</label>
+                                <label><input id="send-mode-text" type="radio" name="send-mode-choice" value="text" />Text</label>
+                            </div>
+                        </div>
                         <div class="interval-wrap">
-                            <label>间隔</label>
+                            <label for="send-interval">间隔</label>
                             <input type="number" id="send-interval" value="0" min="0" step="0.1" title="支持浮点数" />
-                            <select id="send-interval-unit" title="发送间隔单位">
-                                <option value="ms">ms</option>
-                                <option value="s">s</option>
-                                <option value="hz">Hz</option>
-                            </select>
+                            <input type="hidden" id="send-interval-unit" value="ms" />
+                            <div class="choice-group send-interval-choices" role="radiogroup" aria-label="发送间隔单位">
+                                <label><input id="send-interval-unit-ms" type="radio" name="send-interval-unit-choice" value="ms" checked />ms</label>
+                                <label><input id="send-interval-unit-s" type="radio" name="send-interval-unit-choice" value="s" />s</label>
+                                <label><input id="send-interval-unit-hz" type="radio" name="send-interval-unit-choice" value="hz" />Hz</label>
+                            </div>
                         </div>
                         <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
                         <input type="file" id="send-file-input" hidden />
                         <button id="btn-send" class="btn btn-primary">发送</button>
                     </div>
-                    <textarea id="send-input" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
+                    <textarea id="send-input" rows="4" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
                 </div>
             </div>
         </main>
@@ -353,6 +425,7 @@
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
     <script src="monitorView.js"></script>
+    <script src="monitorSearch.js"></script>
     <script src="configValidation.js"></script>
     <script src="configView.js"></script>
     <script src="configStore.js"></script>

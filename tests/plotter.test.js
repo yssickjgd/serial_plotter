@@ -57,8 +57,8 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     const start = performance.now();
     plotter.draw();
     assert.equal(plotter._drawState.startIdx, 0);
-    assert.equal(plotter._drawState.visibleCnt, 4097,
-        'the default frequency view includes DC through Nyquist');
+    assert.equal(plotter._drawState.visibleCnt, 513,
+        'the live spectrum uses the latest 1000 samples and includes DC through Nyquist');
     console.log(`two-channel FFT draw in ${(performance.now() - start).toFixed(1)} ms`);
     assert.equal(elements.get('plot-scrollbar-thumb').style.width, '100%');
     plotter.setChannelCount(23);

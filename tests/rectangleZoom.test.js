@@ -11,7 +11,7 @@ function createPlotter(canvasScale = 1) {
         ? () => ({ width: 20 })
         : key === 'strokeRect' ? (...args) => { overlays.push(args); }
             : () => {} });
-    const element = () => ({ style: {}, listeners: {}, offsetHeight: 0,
+    const element = () => ({ style: {}, listeners: {}, offsetHeight: 0, offsetWidth: 100,
         clientWidth: 800, clientHeight: 378,
         addEventListener(name, callback) { this.listeners[name] = callback; },
         getBoundingClientRect: () => ({ width: 800, height: 400, left: 10, top: 20 }) });
@@ -208,4 +208,58 @@ test('a Y scrollbar pans the zoomed range and right click restores both axes', (
     assert.equal(plotter.vp.time.displayCount, plotter.maxPoints);
     assert.equal(plotter._boxZoomY.time, null);
     assert.equal(yBar.hidden, true);
+});
+
+test('the plot window setting limits time zoom and right click follows its latest samples', () => {
+    const { plotter, fire } = createPlotter();
+    plotter.setPlotWindowPoints(40);
+    assert.equal(plotter.vp.time.displayCount, 40);
+    assert.equal(plotter.vp.time.scrollOffset, 61);
+    fire('wheel', 200, 100, { deltaY: -1 });
+    assert.ok(plotter.vp.time.displayCount < 40);
+    fire('contextmenu', 0, 0);
+    assert.equal(plotter.vp.time.displayCount, 40);
+    assert.equal(plotter.vp.time.scrollOffset, 61);
+    assert.equal(plotter.vp.time.autoFollow, true);
+    plotter.setMaxPoints(30);
+    assert.equal(plotter.plotWindowPoints, 30);
+    assert.equal(plotter.vp.time.displayCount, 30);
+});
+
+test('live X scrollbar keeps the selected samples fixed until they leave the buffer', () => {
+    const { plotter, fireDocument, nodes } = createPlotter();
+    plotter.setMaxPoints(120);
+    plotter.setPlotWindowPoints(20);
+    const thumb = nodes.get('plot-scrollbar-thumb');
+    thumb.listeners.mousedown({ clientX: 0, preventDefault() {} });
+    fireDocument('mousemove', { clientX: -250 });
+    fireDocument('mouseup', {});
+    const viewport = plotter.vp.time;
+    assert.equal(viewport.autoFollow, false,
+        JSON.stringify({ offset: viewport.scrollOffset, count: viewport.displayCount,
+            length: plotter.frames.length }));
+    const selectedOffset = viewport.scrollOffset;
+    const selected = plotter.frames.getValue(0, viewport.scrollOffset);
+    plotter.draw();
+    for (let value = 101; value < 120 + selectedOffset; value++) {
+        plotter.addFrame([value]);
+        assert.equal(plotter.frames.getValue(0, viewport.scrollOffset), selected);
+        assert.equal(plotter._dirty, false);
+    }
+    assert.equal(viewport.scrollOffset, 0);
+    plotter.addFrame([120 + selectedOffset]);
+    assert.equal(plotter.frames.getValue(0, 0), selected + 1);
+    assert.equal(plotter._dirty, true);
+});
+
+test('time jump centers even the first sample using blank edge space', () => {
+    const { plotter } = createPlotter();
+    plotter.setPlotWindowPoints(40);
+    assert.equal(plotter.jumpToFrame(0), true);
+    plotter.draw();
+    assert.equal(plotter._drawState.startIdx, -20);
+    assert.equal(plotter._drawState.visibleCnt, 40);
+    plotter.togglePause();
+    assert.equal(plotter._frequencyInputRange().start, 0);
+    assert.equal(plotter._frequencyInputRange().end, 20);
 });

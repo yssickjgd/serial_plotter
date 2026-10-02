@@ -87,3 +87,24 @@ test('the time viewport keeps following samples while the live frequency plot is
     plotter.togglePause();
     assert.equal(plotter._frequencyForChannel(0).fftSize, 32);
 });
+
+test('live FFT uses only the latest plot window and paused FFT follows zoomed time data', () => {
+    const plotter = createPlotter();
+    for (let i = 0; i < 128; i++) plotter.addFrame([
+        Math.sin(2 * Math.PI * (i < 64 ? 4 : 12) * (i % 64) / 64)
+    ]);
+    plotter.setPlotWindowPoints(64);
+    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    const live = plotter._frequencyForChannel(0);
+    assert.equal(live.fftSize, 64);
+    assert.equal(live.dominantBin, 12);
+
+    plotter.togglePause();
+    plotter.vp.time.scrollOffset = 0;
+    plotter.vp.time.displayCount = 32;
+    const paused = plotter._frequencyForChannel(0);
+    assert.equal(paused.fftSize, 32);
+    assert.equal(paused.dominantBin, 2);
+    plotter.togglePause();
+    assert.equal(plotter._frequencyForChannel(0).dominantBin, 12);
+});
