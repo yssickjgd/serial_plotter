@@ -13,6 +13,22 @@ test('reports consumer callback failures through a dedicated error hook', () => 
     assert.deepEqual(errors, ['view failed']);
 });
 
+test('parsed frames include a system timestamp alongside their display time', () => {
+    const parser = new DataParser();
+    parser.setFormat({ enableHeader: false, enableFooter: false,
+        dataType: 'uint8', channelsCount: 1 });
+    let received;
+    parser.onFrameParsed = (values, time, bytes, timestamp) => {
+        received = { values, time, bytes, timestamp };
+    };
+    const before = Date.now();
+    parser.appendData(Uint8Array.of(7));
+    const after = Date.now();
+    assert.equal(received.values[0], 7);
+    assert.match(received.time, /^\d\d:\d\d:\d\d\.\d\d\d$/);
+    assert.ok(received.timestamp >= before && received.timestamp <= after);
+});
+
 test('reassembles split headers, rejects bad footer and checksum, and keeps raw bytes', () => {
     const parser = new DataParser();
     parser.setFormat({ enableHeader: true, headerHex: 'AA BB', enableFooter: true,
