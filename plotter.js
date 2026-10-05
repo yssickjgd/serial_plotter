@@ -65,6 +65,7 @@ class Plotter {
         this._drawState = null;
         this._selection = null;
         this._timeCenterOrder = null;
+        this.navigationMarkers = { timeOrder: null, matches: [], currentMatch: -1 };
         this._scrollbarDirty = false;
         this._boxZoomY = { time: null, frequency: null };
         this._zoomBaseY = { time: null, frequency: null };
@@ -139,6 +140,13 @@ class Plotter {
     _markViewDirty() {
         this._dirty = true;
         this._viewDirty = true;
+    }
+
+    /** Retain shared time/search markers; only visible matches are drawn. */
+    setNavigationMarkers({ timeOrder = null, matches = [], currentMatch = -1 }, redraw = true) {
+        this.navigationMarkers = { timeOrder, matches, currentMatch };
+        this._markViewDirty();
+        if (redraw && this.isPaused && this.isVisible) this.draw();
     }
 
     /* ── Resize ── */
@@ -317,6 +325,7 @@ class Plotter {
     clear() {
         this._selection = null;
         this._timeCenterOrder = null;
+        this.navigationMarkers = { timeOrder: null, matches: [], currentMatch: -1 };
         this._clearYZoom('time');
         this._clearYZoom('frequency');
         this.frames.clear();
@@ -983,7 +992,11 @@ class Plotter {
         const dataStart = Math.max(0, startIdx);
         const dataEnd = Math.min(scrollTotal, actualEnd);
         const series = this._collectWindowSeries(dataStart, dataEnd, fftResults);
-        if (series.length === 0) { this._emitStats(''); return; }
+        if (series.length === 0) {
+            this._emitStats('');
+            this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
+            return;
+        }
 
         const summaryText = this._buildSummary(series, this.displayMode);
         this._emitStats(summaryText);
@@ -1119,11 +1132,74 @@ class Plotter {
         }
 
         // —— 十字光标 ——
+        this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
         if (this._selection) {
             this._drawSelection(plotW, plotH);
         } else if (this.mousePos) {
             this._drawCrosshair(plotW, plotH, min, max, startIdx, visibleCnt, total, series);
         }
+    }
+
+    _drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt) {
+        if (this.displayMode !== 'time' || visibleCnt < 2 || !this.frames.length) return;
+        const first = Math.max(0, Math.ceil(startIdx));
+        const last = Math.min(this.frames.length - 1, Math.floor(startIdx + visibleCnt - 1));
+        if (first > last) return;
+        const { timeOrder, matches, currentMatch } = this.navigationMarkers;
+        const firstOrder = this.frames.orderAt(first);
+        const lastOrder = this.frames.orderAt(last);
+        const pixelAtOrder = order => {
+            if (order == null || order < firstOrder || order > lastOrder) return null;
+            const index = this.frames.indexAtOrAfterOrder(order);
+            if (this.frames.orderAt(index) !== order) return null;
+            return Math.max(0.5, Math.min(plotW - 0.5,
+                Math.round((index - startIdx) * plotW / (visibleCnt - 1)) + 0.5));
+        };
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#745a00';
+        ctx.beginPath();
+        let low = 0, high = matches.length;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (matches[mid].startOrder < firstOrder) low = mid + 1;
+            else high = mid;
+        }
+        let painted = 0;
+        for (let i = low; i < matches.length && matches[i].startOrder <= lastOrder;) {
+            const x = pixelAtOrder(matches[i].startOrder);
+            if (x === null) { i++; continue; }
+            if (i !== currentMatch) {
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, plotH);
+                painted++;
+            }
+            // Search results can be much denser than pixels; skip the whole pixel bucket.
+            let next = i + 1, end = matches.length;
+            while (next < end) {
+                const mid = Math.floor((next + end) / 2);
+                const order = matches[mid].startOrder;
+                if (order <= lastOrder && pixelAtOrder(order) <= x) next = mid + 1;
+                else end = mid;
+            }
+            i = next;
+        }
+        if (painted) ctx.stroke();
+        const drawSingle = (order, color) => {
+            const x = pixelAtOrder(order);
+            if (x === null) return;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, plotH);
+            ctx.stroke();
+        };
+        drawSingle(timeOrder, '#5c90be');
+        if (currentMatch >= 0 && currentMatch < matches.length)
+            drawSingle(matches[currentMatch].startOrder, '#ff8c00');
+        ctx.restore();
     }
 
     _drawSelection(plotW, plotH) {

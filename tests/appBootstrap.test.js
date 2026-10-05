@@ -23,7 +23,7 @@ function bootWithConfig(original, fixedDate) {
         'serial-baud': '115200', 'serial-data': '8', 'serial-stop': '1',
         'serial-parity': 'none', 'net-port': '9000', 'net-local': '9000',
         'frame-header': 'AB', 'frame-footer': '0D 0A',
-        'monitor-display-mode': 'hex', 'monitor-search-mode': 'hex',
+        'monitor-display-mode': 'hex',
         'send-mode': 'hex', 'send-interval-unit': 'ms'
     };
     const elements = new Map();
@@ -379,15 +379,14 @@ test('time jumps, waveform visibility, and decoded-value search are wired to the
     for (let i = 0; i < 5; i++)
         parser.onFrameParsed([i], `t${i}`, Uint8Array.of(0x41 + i), 1000 + i * 1000);
     getElement('btn-pause').listeners.click();
-    getElement('wave-jump-mode').value = 'relative';
-    getElement('wave-jump-mode').listeners.change();
-    getElement('wave-jump-relative').value = '2';
-    getElement('wave-jump-button').listeners.click();
+    getElement('nav-jump-mode').value = 'relative';
+    getElement('nav-jump-mode').listeners.change();
+    getElement('nav-jump-relative').value = '2';
+    getElement('nav-jump-button').listeners.click();
     assert.equal(plotter._timeCenterOrder, 3);
-    getElement('byte-jump-mode').value = 'relative';
-    getElement('byte-jump-relative').value = '1';
-    getElement('byte-jump-button').listeners.click();
-    assert.equal(monitor.anchor.order, 2);
+    assert.equal(monitor.anchor.order, 3);
+    assert.equal(monitor.cursorOrder, 3);
+    assert.equal(plotter.navigationMarkers.timeOrder, 3);
 
     getElement('show-waveform').checked = false;
     getElement('show-waveform').listeners.change();
@@ -397,92 +396,190 @@ test('time jumps, waveform visibility, and decoded-value search are wired to the
     getElement('show-waveform').listeners.change();
     assert.equal(plotter.isVisible, true);
 
-    getElement('monitor-search-mode').value = 'number';
-    getElement('monitor-search-mode').listeners.change();
+    getElement('monitor-display-mode-number').checked = true;
+    getElement('monitor-display-mode-number').listeners.change();
     getElement('monitor-search-query').value = '2';
     getElement('monitor-search-tolerance').value = '0';
-    getElement('monitor-search-button').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 1);
     assert.equal(monitor.mode, 'number');
+    assert.equal(monitor.anchor.order, 3);
+    assert.equal(monitor.currentMatch, 0);
+    assert.equal(plotter._timeCenterOrder, 3);
+    assert.equal(plotter.navigationMarkers.timeOrder, 3);
+    assert.equal(plotter.navigationMarkers.matches.length, 1);
+    assert.equal(plotter.navigationMarkers.currentMatch, 0);
+    assert.equal(monitor.cursorOrder, 3);
     getElement('monitor-search-next').listeners.click();
     assert.equal(monitor.currentMatch, 0);
     assert.equal(monitor.anchor.order, 3);
+    getElement('nav-jump-relative').value = '4';
+    getElement('nav-jump-button').listeners.click();
+    assert.equal(monitor.anchor.order, 5);
+    assert.equal(monitor.cursorOrder, 5);
+    assert.equal(plotter._timeCenterOrder, 5);
+    assert.equal(plotter.navigationMarkers.timeOrder, 5);
+    assert.equal(plotter.navigationMarkers.currentMatch, 0);
 });
 
-test('absolute system-time jump selects the nearest retained frame', () => {
-    const { getElement, parser, monitor } = bootWithConfig(null);
+test('absolute system-time jump selects the nearest retained frame in both monitors', () => {
+    const { getElement, parser, monitor, plotter } = bootWithConfig(null);
     const entered = '2026-10-02T10:30:00.500';
     const start = new Date(entered).getTime();
     for (let i = 0; i < 3; i++)
         parser.onFrameParsed([i], `t${i}`, Uint8Array.of(i), start + i * 1000);
     getElement('btn-pause').listeners.click();
-    getElement('byte-jump-mode').value = 'absolute';
-    getElement('byte-jump-absolute').value = '2026-10-02T10:30:01.400';
-    getElement('byte-jump-button').listeners.click();
+    getElement('nav-jump-mode').value = 'absolute';
+    getElement('nav-jump-absolute').value = '2026-10-02T10:30:01.400';
+    getElement('nav-jump-button').listeners.click();
     assert.equal(monitor.anchor.order, 2);
+    assert.equal(monitor.cursorOrder, 2);
+    assert.equal(plotter._timeCenterOrder, 2);
+    assert.equal(plotter.navigationMarkers.timeOrder, 2);
 });
 
 test('time tools default to local milliseconds and are available only while paused', () => {
     const { getElement, parser, plotter } = bootWithConfig(null);
-    parser.onFrameParsed([1], 't', Uint8Array.of(1), Date.now());
-    assert.equal(getElement('wave-jump-button').disabled, true);
-    assert.equal(getElement('byte-jump-button').disabled, true);
-    assert.equal(getElement('monitor-search-button').disabled, true);
-    getElement('wave-jump-relative').value = '0';
-    getElement('wave-jump-mode').value = 'relative';
-    getElement('wave-jump-button').listeners.click();
+    const timestamp = Date.now();
+    parser.onFrameParsed([1], 't', Uint8Array.of(1), timestamp);
+    assert.equal(getElement('nav-jump-button').disabled, true);
+    assert.equal(getElement('monitor-search-prev').disabled, true);
+    assert.equal(getElement('monitor-search-next').disabled, true);
+    assert.equal(getElement('monitor-search-nearest').disabled, true);
+    getElement('nav-jump-relative').value = '0';
+    getElement('nav-jump-mode').value = 'relative';
+    getElement('nav-jump-button').listeners.click();
     assert.equal(plotter._timeCenterOrder, null);
 
     getElement('btn-pause').listeners.click();
-    for (const prefix of ['wave', 'byte']) {
-        const before = Date.now();
-        assert.equal(getElement(`${prefix}-jump-button`).disabled, false);
-        const value = getElement(`${prefix}-jump-absolute`).value;
-        assert.match(value, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$/);
-        assert.ok(Math.abs(new Date(value).getTime() - before) < 1000);
-        assert.equal(new Date(value).getMilliseconds() % 10, 0);
-    }
-    assert.equal(getElement('monitor-search-button').disabled, false);
+    const before = Date.now();
+    assert.equal(getElement('nav-jump-button').disabled, false);
+    const value = getElement('nav-jump-absolute').value;
+    assert.match(value, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$/);
+    assert.ok(Math.abs(new Date(value).getTime() - before) < 1000);
+    assert.equal(new Date(value).getMilliseconds() % 10, 0);
+    assert.equal(getElement('monitor-search-prev').disabled, false);
+    assert.equal(getElement('monitor-search-next').disabled, false);
+    assert.equal(getElement('monitor-search-nearest').disabled, false);
     getElement('btn-pause').listeners.click();
-    assert.equal(getElement('wave-jump-button').disabled, true);
-    assert.equal(getElement('byte-jump-button').disabled, true);
-    assert.equal(getElement('monitor-search-button').disabled, true);
+    assert.equal(getElement('nav-jump-button').disabled, true);
+    assert.equal(getElement('monitor-search-prev').disabled, true);
+    assert.equal(getElement('monitor-search-next').disabled, true);
+    assert.equal(getElement('monitor-search-nearest').disabled, true);
 });
 
-test('pausing defaults both time locators to the latest retained frame timestamp', () => {
+test('pausing defaults the shared time locator to the latest retained frame timestamp', () => {
     const { getElement, parser } = bootWithConfig(null, '2026-10-02T11:00:00.000');
     for (const time of ['2026-10-02T10:29:59.120', '2026-10-02T10:30:01.340'])
         parser.onFrameParsed([1], 't', Uint8Array.of(1), new Date(time).getTime());
     getElement('btn-pause').listeners.click();
-    for (const prefix of ['wave', 'byte']) {
-        assert.equal(getElement(`${prefix}-jump-absolute`).value, '2026-10-02T10:30:01.340');
-    }
+    assert.equal(getElement('nav-jump-absolute').value, '2026-10-02T10:30:01.340');
 });
 
-test('time and search labels share their permanently visible control rows', () => {
+test('receive display, time jump, and search are three rows inside the byte monitor', () => {
     const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
-    assert.match(html, /<div class="monitor-tool-row" id="wave-tools">\s*<span class="tool-label">时间定位<\/span>\s*<div class="jump-toolbar"/);
-    assert.match(html, /<div class="monitor-tool-row" id="byte-tools">\s*<span class="tool-label">时间定位<\/span>\s*<div class="jump-toolbar"/);
-    assert.match(html, /<div class="monitor-tool-row" id="byte-search-tools">\s*<span class="tool-label">搜索<\/span>\s*<div class="monitor-search-toolbar"/);
+    assert.match(html, /<section class="navigation-panel" id="navigation-panel"[^>]*>/);
+    assert.match(html, /<div class="monitor-tool-row" id="nav-receive-tools">\s*<span class="tool-label">接收显示<\/span>/);
+    assert.match(html, /<div class="monitor-tool-row" id="nav-time-tools">\s*<span class="tool-label">时间定位<\/span>\s*<div class="jump-toolbar"/);
+    assert.match(html, /<div class="monitor-tool-row" id="nav-search-tools">\s*<span class="tool-label">搜索<\/span>\s*<div class="monitor-search-toolbar"/);
+    assert.ok(html.indexOf('id="v-resizer"') < html.indexOf('id="monitor-panel"'));
+    assert.ok(html.indexOf('id="monitor-panel"') < html.indexOf('id="send-panel"'));
+    assert.ok(html.indexOf('id="send-panel"') < html.indexOf('id="navigation-panel"'));
+    assert.ok(html.indexOf('id="navigation-panel"') < html.indexOf('</main>'));
+    assert.match(html, /<\/section>\s*<\/div>\s*<\/main>/);
+    assert.doesNotMatch(html, /id="monitor-search-button"/);
+    assert.doesNotMatch(html, /id="(?:wave-tools|byte-tools|byte-search-tools)"/);
     assert.doesNotMatch(html, /<details class="monitor-tools"|<summary id="(?:wave|byte)-tools-summary"/);
 });
 
-test('search format radio choices update the search mode and numeric fields', () => {
+test('receive display format determines search type and numeric fields', () => {
     const { getElement } = bootWithConfig(null);
-    assert.equal(getElement('monitor-search-mode-hex').checked, true);
+    assert.equal(getElement('monitor-display-mode-hex').checked, true);
     getElement('btn-pause').listeners.click();
-    const number = getElement('monitor-search-mode-number');
+    const number = getElement('monitor-display-mode-number');
     number.checked = true;
     number.listeners.change();
-    assert.equal(getElement('monitor-search-mode').value, 'number');
+    assert.equal(getElement('monitor-display-mode').value, 'number');
     assert.equal(getElement('monitor-search-tolerance').hidden, false);
     assert.equal(getElement('monitor-search-channel').hidden, false);
-    const ascii = getElement('monitor-search-mode-ascii');
+    const ascii = getElement('monitor-display-mode-ascii');
     ascii.checked = true;
     ascii.listeners.change();
-    assert.equal(getElement('monitor-search-mode').value, 'ascii');
+    assert.equal(getElement('monitor-display-mode').value, 'ascii');
     assert.equal(getElement('monitor-search-tolerance').hidden, true);
     assert.equal(getElement('monitor-search-channel').hidden, true);
+});
+
+
+test('switching receive display format clears prior matches and changes search parsing', () => {
+    const { getElement, parser, monitor } = bootWithConfig(null);
+    parser.onFrameParsed([2], 't', Uint8Array.of(0x41), Date.now());
+    getElement('btn-pause').listeners.click();
+    const numeric = getElement('monitor-display-mode-number');
+    numeric.checked = true;
+    numeric.listeners.change();
+    getElement('monitor-search-query').value = '2';
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 1);
+
+    const ascii = getElement('monitor-display-mode-ascii');
+    ascii.checked = true;
+    ascii.listeners.change();
+    assert.equal(monitor.matches.length, 0);
+    assert.equal(getElement('monitor-search-status').textContent, '');
+    getElement('monitor-search-query').value = 'A';
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 1);
+    assert.equal(monitor.mode, 'ascii');
+});
+
+
+test('direction buttons search from the latest frame and cycle through cached results', () => {
+    const { getElement, parser, monitor, plotter } = bootWithConfig(null);
+    for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
+        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+    getElement('btn-pause').listeners.click();
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.anchor.order, 3);
+    assert.equal(plotter._timeCenterOrder, 3);
+    assert.equal(monitor.currentMatch, 1);
+    const cachedMatches = monitor.matches;
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.anchor.order, 1);
+    assert.equal(monitor.currentMatch, 0);
+    assert.equal(monitor.matches, cachedMatches);
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.anchor.order, 3);
+    getElement('monitor-search-query').value = '42';
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.anchor.order, 2);
+    assert.equal(monitor.currentMatch, 0);
+});
+
+test('first directional search uses the selected byte-row cursor', () => {
+    const { getElement, parser, monitor } = bootWithConfig(null);
+    for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
+        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+    getElement('btn-pause').listeners.click();
+    monitor.cursorOrder = 2;
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.anchor.order, 3);
+    assert.equal(monitor.currentMatch, 1);
+});
+
+test('clicking another byte row redirects the next search action from that cursor', () => {
+    const { getElement, parser, monitor } = bootWithConfig(null);
+    for (const [index, byte] of [0x41, 0x42, 0x41, 0x42, 0x41].entries())
+        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+    getElement('btn-pause').listeners.click();
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.anchor.order, 1);
+    monitor.cursorOrder = 4;
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.anchor.order, 3);
 });
 
 test('numeric tolerance shows a hint while its default remains empty', () => {
@@ -493,28 +590,26 @@ test('numeric tolerance shows a hint while its default remains empty', () => {
     assert.doesNotMatch(input, /\bvalue=/);
 });
 
-test('visible time-mode choices switch the paired time input in both monitors', () => {
+test('shared time-mode choices switch the paired time input', () => {
     const { getElement } = bootWithConfig(null);
-    for (const prefix of ['wave', 'byte']) {
-        const relativeChoice = getElement(`${prefix}-jump-mode-relative`);
-        relativeChoice.checked = true;
-        relativeChoice.listeners.change();
-        assert.equal(getElement(`${prefix}-jump-mode`).value, 'relative');
-        assert.equal(getElement(`${prefix}-jump-relative`).hidden, false);
-        assert.equal(getElement(`${prefix}-jump-absolute`).hidden, true);
-        const absoluteChoice = getElement(`${prefix}-jump-mode-absolute`);
-        absoluteChoice.checked = true;
-        absoluteChoice.listeners.change();
-        assert.equal(getElement(`${prefix}-jump-mode`).value, 'absolute');
-        assert.equal(getElement(`${prefix}-jump-relative`).hidden, true);
-        assert.equal(getElement(`${prefix}-jump-absolute`).hidden, false);
-    }
+    const relativeChoice = getElement('nav-jump-mode-relative');
+    relativeChoice.checked = true;
+    relativeChoice.listeners.change();
+    assert.equal(getElement('nav-jump-mode').value, 'relative');
+    assert.equal(getElement('nav-jump-relative').hidden, false);
+    assert.equal(getElement('nav-jump-absolute').hidden, true);
+    const absoluteChoice = getElement('nav-jump-mode-absolute');
+    absoluteChoice.checked = true;
+    absoluteChoice.listeners.change();
+    assert.equal(getElement('nav-jump-mode').value, 'absolute');
+    assert.equal(getElement('nav-jump-relative').hidden, true);
+    assert.equal(getElement('nav-jump-absolute').hidden, false);
 });
 
 test('pausing at the start of a second still displays a 10 ms fraction', () => {
     const { getElement } = bootWithConfig(null, '2026-10-02T10:30:00.005');
     getElement('btn-pause').listeners.click();
-    assert.equal(getElement('byte-jump-absolute').value, '2026-10-02T10:30:00.010');
+    assert.equal(getElement('nav-jump-absolute').value, '2026-10-02T10:30:00.010');
 });
 
 test('receive, send, and interval radio choices update their existing controls', () => {
@@ -542,45 +637,33 @@ test('restored interval unit selects its visible radio choice', () => {
     assert.equal(getElement('send-interval-unit-s').checked, true);
 });
 
-test('permanent time controls take space from the log down to four rows, then the waveform', () => {
-    const { getElement } = bootWithConfig(null);
+test('nested navigation panel reserves monitor height while preserving four log rows', () => {
+    const { getElement, notifyResize } = bootWithConfig(null);
     const main = getElement('main-display');
     main.clientHeight = 800;
     getElement('v-resizer').offsetHeight = 20;
     getElement('monitor-header').offsetHeight = 40;
     getElement('monitor-stats').offsetHeight = 40;
     getElement('send-panel').offsetHeight = 100;
-    const tools = getElement('byte-tools');
-    tools.offsetHeight = 250;
-    getElement('monitor-search-mode').listeners.change();
-    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 550);
-    assert.ok(parseInt(getElement('canvas-wrapper').style.height, 10) <= 250);
+    const before = parseInt(getElement('canvas-wrapper').style.height, 10);
+    getElement('navigation-panel').offsetHeight = 250;
+    notifyResize('navigation-panel');
+    assert.ok(parseInt(getElement('canvas-wrapper').style.height, 10) < before);
+    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 530);
 });
 
-test('permanent search controls are included in the minimum monitor height', () => {
-    const { getElement } = bootWithConfig(null);
-    getElement('main-display').clientHeight = 800;
-    getElement('v-resizer').offsetHeight = 20;
-    getElement('monitor-header').offsetHeight = 40;
-    getElement('monitor-stats').offsetHeight = 40;
-    getElement('send-panel').offsetHeight = 100;
-    getElement('byte-search-tools').offsetHeight = 250;
-    getElement('monitor-search-mode').listeners.change();
-    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 550);
-});
-
-test('always visible time and search controls preserve a four-row log', () => {
+test('shared time and search controls remain visible with the minimum log space', () => {
     const { getElement } = bootWithConfig(null);
     getElement('main-display').clientHeight = 900;
     getElement('v-resizer').offsetHeight = 20;
     getElement('monitor-header').offsetHeight = 40;
     getElement('monitor-stats').offsetHeight = 40;
     getElement('send-panel').offsetHeight = 154;
-    getElement('byte-tools').offsetHeight = 209;
+    getElement('navigation-panel').offsetHeight = 209;
     getElement('plot-header').offsetHeight = 150;
-    getElement('monitor-search-mode').listeners.change();
-    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 563);
-    assert.notEqual(getElement('wave-tools').hidden, true);
-    assert.notEqual(getElement('byte-tools').hidden, true);
-    assert.notEqual(getElement('byte-search-tools').hidden, true);
+    getElement('monitor-display-mode').listeners.change();
+    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 543);
+    assert.notEqual(getElement('navigation-panel').hidden, true);
+    assert.notEqual(getElement('nav-time-tools').hidden, true);
+    assert.notEqual(getElement('nav-search-tools').hidden, true);
 });

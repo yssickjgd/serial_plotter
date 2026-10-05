@@ -156,7 +156,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let monitorOrder = 0;
     const waveformToggle = document.getElementById('show-waveform');
     const monitorDisplayMode = document.getElementById('monitor-display-mode');
-    const monitorSearchMode = document.getElementById('monitor-search-mode');
     const monitorSearchQuery = document.getElementById('monitor-search-query');
     const monitorSearchTolerance = document.getElementById('monitor-search-tolerance');
     const monitorSearchChannel = document.getElementById('monitor-search-channel');
@@ -178,7 +177,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return sync;
     };
     bindVisibleChoice('monitor-display-mode', ['hex', 'ascii', 'number']);
-    bindVisibleChoice('monitor-search-mode', ['hex', 'ascii', 'number']);
     bindVisibleChoice('send-mode', ['hex', 'text']);
     const syncSendIntervalUnit = bindVisibleChoice('send-interval-unit', ['ms', 's', 'hz']);
 
@@ -200,12 +198,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const canvasWrapper = document.getElementById('canvas-wrapper');
     const plotHeader = document.getElementById('plot-header');
     const vResizer = document.getElementById('v-resizer');
+    const navigationPanel = document.getElementById('navigation-panel');
+    const navTimeTools = document.getElementById('nav-time-tools');
+    const navSearchTools = document.getElementById('nav-search-tools');
     const monitorPanel = document.getElementById('monitor-panel');
     const monitorHeader = document.getElementById('monitor-header');
     const monitorStats = document.getElementById('monitor-stats');
-    const byteTools = document.getElementById('byte-tools');
-    const byteSearchTools = document.getElementById('byte-search-tools');
-    const waveTools = document.getElementById('wave-tools');
     const sendPanel = document.getElementById('send-panel');
 
 
@@ -428,7 +426,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const mainDisplayVerticalPadding = 16; // 对应 .main-display 的上下各 8px
 
     const minimumMonitorHeight = () => monitorHeader.offsetHeight + monitorStats.offsetHeight +
-        byteTools.offsetHeight + byteSearchTools.offsetHeight + sendPanel.offsetHeight + minLogHeight + 8;
+        sendPanel.offsetHeight + navigationPanel.offsetHeight + minLogHeight + 8;
     const minimumCanvasHeight = () => Math.max(60, plotHeader.offsetHeight + 24);
     const verticalUsableHeight = () => Math.max(140, mainDisplay.clientHeight -
         mainDisplayVerticalPadding - vResizer.offsetHeight);
@@ -461,7 +459,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', applyVerticalHeights);
     if (typeof ResizeObserver !== 'undefined') {
         const toolsResizeObserver = new ResizeObserver(() => applyVerticalHeights());
-        for (const section of [plotHeader, byteTools, byteSearchTools, monitorHeader, monitorStats,
+        for (const section of [plotHeader, navigationPanel, monitorHeader, monitorStats,
             sendPanel]) toolsResizeObserver.observe(section);
     }
 
@@ -472,13 +470,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (waveformVisible) plotter.resize();
     });
 
-    const bindTimeJump = (prefix, jump) => {
-        const mode = document.getElementById(`${prefix}-jump-mode`);
-        const absolute = document.getElementById(`${prefix}-jump-absolute`);
-        const relative = document.getElementById(`${prefix}-jump-relative`);
-        const status = document.getElementById(`${prefix}-jump-status`);
+    const focusFrameInBothMonitors = index => {
+        if (plotViewMode.value !== 'time') {
+            plotViewMode.value = 'time';
+            plotViewMode.dispatchEvent(new Event('change'));
+        }
+        plotter.jumpToFrame(index);
+        monitor.jumpToFrame(index);
+    };
+
+    const bindTimeJump = () => {
+        const mode = document.getElementById('nav-jump-mode');
+        const absolute = document.getElementById('nav-jump-absolute');
+        const relative = document.getElementById('nav-jump-relative');
+        const status = document.getElementById('nav-jump-status');
         for (const value of ['absolute', 'relative']) {
-            const choice = document.getElementById(`${prefix}-jump-mode-${value}`);
+            const choice = document.getElementById(`nav-jump-mode-${value}`);
             choice.addEventListener('change', () => {
                 if (!choice.checked) return;
                 mode.value = value;
@@ -487,12 +494,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         mode.addEventListener('change', () => {
             for (const value of ['absolute', 'relative'])
-                document.getElementById(`${prefix}-jump-mode-${value}`).checked = mode.value === value;
+                document.getElementById(`nav-jump-mode-${value}`).checked = mode.value === value;
             absolute.hidden = mode.value !== 'absolute';
             relative.hidden = mode.value !== 'relative';
-            if (prefix === 'byte') applyVerticalHeights();
+            applyVerticalHeights();
         });
-        document.getElementById(`${prefix}-jump-button`).addEventListener('click', () => {
+        document.getElementById('nav-jump-button').addEventListener('click', () => {
             if (!capturePaused) return;
             if (!frames.length || !Number.isFinite(frames.originTimestamp)) {
                 status.textContent = '尚无带时间戳的采样帧';
@@ -507,22 +514,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             const index = frames.nearestTimestampIndex(target);
-            jump(index);
+            const order = frames.orderAt(index);
+            monitor.cursorOrder = order;
+            plotter.setNavigationMarkers({ timeOrder: order,
+                matches: searchMatches, currentMatch: selectedMatch }, false);
+            focusFrameInBothMonitors(index);
             status.textContent = `已定位第 ${index + 1} 帧，共 ${frames.length} 帧`;
         });
     };
-    bindTimeJump('wave', index => {
-        if (plotViewMode.value !== 'time') {
-            plotViewMode.value = 'time';
-            plotViewMode.dispatchEvent(new Event('change'));
-        }
-        if (!waveformVisible) {
-            waveformToggle.checked = true;
-            waveformToggle.dispatchEvent(new Event('change'));
-        }
-        plotter.jumpToFrame(index);
-    });
-    bindTimeJump('byte', index => monitor.jumpToFrame(index));
+    bindTimeJump();
 
     const defaultJumpDateTime = () => {
         const latestTimestamp = frames.timestampAt(frames.length - 1);
@@ -534,15 +534,12 @@ document.addEventListener('DOMContentLoaded', () => {
             pad(hasFrameTime ? Math.floor(date.getMilliseconds() / 10) * 10
                 : Math.max(10, Math.floor(date.getMilliseconds() / 10) * 10), 3);
     };
-    const toolPanels = [waveTools, byteTools, byteSearchTools];
+    const toolPanels = [navTimeTools, navSearchTools];
     const toolControlIds = [
-        ...['wave', 'byte'].flatMap(prefix => [
-            `${prefix}-jump-mode-absolute`, `${prefix}-jump-mode-relative`,
-            `${prefix}-jump-absolute`, `${prefix}-jump-relative`, `${prefix}-jump-button`
-        ]),
-        ...['hex', 'ascii', 'number'].map(mode => `monitor-search-mode-${mode}`),
+        'nav-jump-mode-absolute', 'nav-jump-mode-relative',
+        'nav-jump-absolute', 'nav-jump-relative', 'nav-jump-button',
         'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel',
-        'monitor-search-button', 'monitor-search-prev', 'monitor-search-next',
+        'monitor-search-prev', 'monitor-search-next',
         'monitor-search-nearest'
     ];
     const syncTimeTools = () => {
@@ -552,8 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById(id).disabled = !capturePaused;
         if (capturePaused) {
             const value = defaultJumpDateTime();
-            document.getElementById('wave-jump-absolute').value = value;
-            document.getElementById('byte-jump-absolute').value = value;
+            document.getElementById('nav-jump-absolute').value = value;
         }
     };
     syncTimeTools();
@@ -571,21 +567,40 @@ document.addEventListener('DOMContentLoaded', () => {
             ? selected : '-1';
     };
     populateSearchChannels();
-    monitorDisplayMode.addEventListener('change', () => monitor.setMode(monitorDisplayMode.value));
-    monitorSearchMode.addEventListener('change', () => {
-        const numeric = monitorSearchMode.value === 'number';
-        monitorSearchTolerance.hidden = !numeric;
-        monitorSearchChannel.hidden = !numeric;
-        monitorSearchQuery.placeholder = numeric ? '目标数值' :
-            monitorSearchMode.value === 'ascii' ? 'ASCII 文本' : '十六进制字节';
-        if (numeric) populateSearchChannels();
-        applyVerticalHeights();
-    });
-
     let searchSession = null;
     let searchGeneration = 0;
     let searchMatches = [];
     let selectedMatch = -1;
+    let searchKey = null;
+    let searchReady = false;
+    let pendingSearchAction = null;
+    let cursorOrderAtSelection = null;
+    const syncSearchFields = () => {
+        const numeric = monitorDisplayMode.value === 'number';
+        monitorSearchTolerance.hidden = !numeric;
+        monitorSearchChannel.hidden = !numeric;
+        monitorSearchQuery.placeholder = numeric ? '目标数值' :
+            monitorDisplayMode.value === 'ascii' ? 'ASCII 文本' : '十六进制字节';
+        if (numeric) populateSearchChannels();
+        applyVerticalHeights();
+    };
+    monitorDisplayMode.addEventListener('change', () => {
+        monitor.setMode(monitorDisplayMode.value);
+        searchGeneration++;
+        searchSession = null;
+        searchMatches = [];
+        selectedMatch = -1;
+        searchKey = null;
+        searchReady = false;
+        pendingSearchAction = null;
+        cursorOrderAtSelection = null;
+        monitor.setSearchResults([]);
+        plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
+            matches: [], currentMatch: -1 });
+        monitorSearchStatus.textContent = '';
+        syncSearchFields();
+    });
+    syncSearchFields();
     const showSearchMatch = index => {
         if (!capturePaused) return;
         if (!searchMatches.length) {
@@ -600,57 +615,102 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         monitor.selectSearchMatch(selectedMatch);
-        monitor.jumpToFrame(frame);
+        cursorOrderAtSelection = monitor.cursorOrder;
+        plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
+            matches: searchMatches, currentMatch: selectedMatch }, false);
+        focusFrameInBothMonitors(frame);
         monitorSearchStatus.textContent = `${selectedMatch + 1} / ${searchMatches.length}`;
     };
-    document.getElementById('monitor-search-button').addEventListener('click', () => {
+    const searchInsertionIndex = (order, afterEqual = false) => {
+        let low = 0, high = searchMatches.length;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (searchMatches[mid].startOrder < order ||
+                (afterEqual && searchMatches[mid].startOrder === order)) low = mid + 1;
+            else high = mid;
+        }
+        return low;
+    };
+    const navigateSearch = action => {
+        if (!searchMatches.length) {
+            monitorSearchStatus.textContent = '无匹配结果';
+            return;
+        }
+        if (action === 'nearest') {
+            const order = monitor.cursorOrder ?? monitor.anchor?.order ??
+                frames.orderAt(frames.length - 1);
+            const next = searchInsertionIndex(order);
+            const index = next === 0 ? 0 : next >= searchMatches.length ? searchMatches.length - 1
+                : order - searchMatches[next - 1].startOrder <=
+                    searchMatches[next].startOrder - order ? next - 1 : next;
+            showSearchMatch(index);
+            return;
+        }
+        const useSelection = selectedMatch >= 0 && monitor.cursorOrder === cursorOrderAtSelection;
+        if (useSelection) {
+            showSearchMatch(selectedMatch + (action === 'next' ? 1 : -1));
+            return;
+        }
+        const order = monitor.cursorOrder ?? frames.orderAt(frames.length - 1);
+        const index = action === 'next' ? searchInsertionIndex(order, true)
+            : searchInsertionIndex(order) - 1;
+        showSearchMatch((index + searchMatches.length) % searchMatches.length);
+    };
+    const requestSearch = action => {
         if (!capturePaused) return;
         try {
-            const options = MonitorSearch.parseMonitorSearch(monitorSearchMode.value,
+            const options = MonitorSearch.parseMonitorSearch(monitorDisplayMode.value,
                 monitorSearchQuery.value, monitorSearchTolerance.value,
                 Number(monitorSearchChannel.value));
-            searchSession = new MonitorSearch.MonitorSearchSession(frames, options);
+            const key = JSON.stringify([monitorDisplayMode.value, monitorSearchQuery.value,
+                monitorSearchTolerance.value, monitorSearchChannel.value]);
+            if (key === searchKey) {
+                if (searchReady) navigateSearch(action);
+                else if (searchSession) pendingSearchAction = action;
+                return;
+            }
+            const session = new MonitorSearch.MonitorSearchSession(frames, options);
+            searchKey = key;
+            searchReady = false;
+            pendingSearchAction = action;
+            searchSession = session;
             searchMatches = [];
             selectedMatch = -1;
+            cursorOrderAtSelection = null;
             monitor.setSearchResults([]);
-            monitorDisplayMode.value = options.kind;
-            monitorDisplayMode.dispatchEvent(new Event('change'));
+            plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
+                matches: [], currentMatch: -1 });
             const generation = ++searchGeneration;
             const scan = () => {
                 if (generation !== searchGeneration || !capturePaused) return;
                 try {
                     let done = false;
-                    for (let batch = 0; batch < 8 && !done; batch++) done = searchSession.step(512);
+                    for (let batch = 0; batch < 8 && !done; batch++) done = session.step(512);
                     if (done) {
-                        searchMatches = searchSession.matches;
+                        searchMatches = session.matches;
+                        searchSession = null;
+                        searchReady = true;
                         monitor.setSearchResults(searchMatches);
-                        monitorSearchStatus.textContent = `找到 ${searchMatches.length} 处匹配`;
+                        navigateSearch(pendingSearchAction);
+                        pendingSearchAction = null;
                     } else {
-                        monitorSearchStatus.textContent = `搜索中 ${searchSession.position} / ${searchSession.length}`;
+                        monitorSearchStatus.textContent = `搜索中 ${session.position} / ${session.length}`;
                         setTimeout(scan, 0);
                     }
-                } catch (error) { monitorSearchStatus.textContent = error.message; }
+                } catch (error) {
+                    searchSession = null;
+                    searchKey = null;
+                    searchReady = false;
+                    pendingSearchAction = null;
+                    monitorSearchStatus.textContent = error.message;
+                }
             };
             scan();
         } catch (error) { monitorSearchStatus.textContent = error.message; }
-    });
-    document.getElementById('monitor-search-prev').addEventListener('click', () =>
-        showSearchMatch(selectedMatch < 0 ? searchMatches.length - 1 : selectedMatch - 1));
-    document.getElementById('monitor-search-next').addEventListener('click', () =>
-        showSearchMatch(selectedMatch + 1));
-    document.getElementById('monitor-search-nearest').addEventListener('click', () => {
-        const order = monitor.cursorOrder ?? monitor.anchor?.order ?? frames.orderAt(frames.length - 1);
-        let low = 0, high = searchMatches.length;
-        while (low < high) {
-            const mid = Math.floor((low + high) / 2);
-            if (searchMatches[mid].startOrder < order) low = mid + 1;
-            else high = mid;
-        }
-        const index = low === 0 ? 0 : low >= searchMatches.length ? searchMatches.length - 1
-            : order - searchMatches[low - 1].startOrder <= searchMatches[low].startOrder - order
-                ? low - 1 : low;
-        showSearchMatch(index);
-    });
+    };
+    for (const action of ['prev', 'next', 'nearest'])
+        document.getElementById(`monitor-search-${action}`).addEventListener('click', () =>
+            requestSearch(action));
 
     vResizer.addEventListener('mousedown', (e) => {
         vDragging = true;
@@ -1009,7 +1069,8 @@ document.addEventListener('DOMContentLoaded', () => {
         enableFooter: footerChk, footerHex: footerInput,
         enableChecksum: checksumChk, dataType: dataTypeSelect,
         endianness: endiannessSelect, channelsCount: channelsInput,
-        maxPoints: maxPointsInput, plotWindowPoints: plotWindowPointsInput, sendIntervalUnit,
+        maxPoints: maxPointsInput, plotWindowPoints: plotWindowPointsInput,
+        sendInterval: sendIntervalInput, sendIntervalUnit,
         plotViewMode, plotYScaleMode, plotFftRemoveDc,
         plotTimeXUnit, plotFreqXUnit, plotFreqXScale, plotFreqYScale, plotFftWindow,
         plotYMin, plotYMax, wrapFftRemoveDc, wrapPlotTimeAxis, wrapPlotFreqAxis,
@@ -1263,7 +1324,13 @@ document.addEventListener('DOMContentLoaded', () => {
             searchSession = null;
             searchMatches = [];
             selectedMatch = -1;
+            searchKey = null;
+            searchReady = false;
+            pendingSearchAction = null;
+            cursorOrderAtSelection = null;
             monitor.setSearchResults([]);
+            monitor.cursorOrder = null;
+            plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
             monitorSearchStatus.textContent = '';
         }
         syncTimeTools();
@@ -1278,7 +1345,12 @@ document.addEventListener('DOMContentLoaded', () => {
         searchSession = null;
         searchMatches = [];
         selectedMatch = -1;
+        searchKey = null;
+        searchReady = false;
+        pendingSearchAction = null;
+        cursorOrderAtSelection = null;
         monitorSearchStatus.textContent = '';
+        plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
         plotter.clear();
         monitor.clear();
         parser.reset();

@@ -656,9 +656,6 @@ canvas {
     white-space: nowrap;
     font-size: 0.7rem;
 }
-.monitor-search-toolbar label { display: inline-flex; align-items: center; gap: 4px; }
-.search-mode-choices { flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; padding: 0; }
-.search-mode-choices label { color: #ddd; }
 .monitor-search-toolbar { align-items: center; }
 .search-fields { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
 .search-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; white-space: nowrap; }
@@ -814,6 +811,17 @@ canvas {
     background: #bbc;
 }
 
+.navigation-panel {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    overflow: hidden;
+    container: monitor / inline-size;
+    border-top: 1px solid var(--monitor-divider);
+}
+
+.navigation-panel .monitor-tool-row:last-child { border-bottom: 0; }
+
 /* ── 字节流监视台 ── */
 .monitor-panel {
     --monitor-title-bg: #1a1a1a;
@@ -845,6 +853,7 @@ canvas {
 .monitor-format-row { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; font-size: 0.7rem; }
 .monitor-format-choices { padding: 0; gap: 3px 8px; }
 .monitor-format-choices label { color: #ddd; font-weight: 400; }
+.navigation-panel .monitor-format-row { min-height: 30px; padding: 3px 6px; }
 
 /* ── 字节流监视台统计 ── */
 .stats-bar-row {
