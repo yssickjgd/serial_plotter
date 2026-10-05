@@ -114,6 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotYMin = document.getElementById('plot-y-min');
     const plotYMax = document.getElementById('plot-y-max');
     const plotChannelStats = document.getElementById('plot-channel-stats');
+    const plotInfoRow = document.getElementById('plot-info-row');
     const plotFpsLabel = document.getElementById('stat-plot-fps');
 
     const plotChoiceGroups = [...document.querySelectorAll('[data-plot-choice]')];
@@ -223,7 +224,10 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     /* 定时刷新字节流监视台统计面板。 */
-    const statsBarRow = document.querySelector('.stats-bar-row');
+    const rxValue = document.getElementById('stat-rx-value');
+    const txValue = document.getElementById('stat-tx-value');
+    const frameRateValue = document.getElementById('stat-fps-value');
+    const failureValue = document.getElementById('stat-fail-value');
     const plotFrameCount = () => plotter.displayMode === 'frequency'
         ? plotter.completedSpectrumDraws : plotter.completedDraws;
     let plotFpsLastMode = plotter.displayMode;
@@ -259,13 +263,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
 
-        // 这些值只由计数器生成，不含用户输入。
-        statsBarRow.innerHTML = [
-            ['RX:', `${formatBytes(rxBps)}/s`],
-            ['TX:', `${formatBytes(txBps)}/s`],
-            ['帧率:', `${frames} f/s`],
-            ['校验失败:', `${failPct}%`]
-        ].map(([label, value]) => `<span>${label} ${value}</span>`).join('');
+        rxValue.textContent = `${formatBytes(rxBps)}/s`;
+        txValue.textContent = `${formatBytes(txBps)}/s`;
+        frameRateValue.textContent = `${frames} f/s`;
+        failureValue.textContent = `${failPct}%`;
 
         stats._rxLast = stats.rxBytes;
         stats._txLast = stats.txBytes;
@@ -278,7 +279,7 @@ document.addEventListener('DOMContentLoaded', () => {
     /** 渲染波形统计信息到绘图区标题栏（单通道时显示） */
     const renderPlotStats = (statsData) => {
         if (!statsData) {
-            plotChannelStats.replaceChildren();
+            if (!plotInfoRow.hidden) plotInfoRow.hidden = true;
             return;
         }
         // 主频 = dominantBin / fftSize * 帧率（Hz）
@@ -290,21 +291,34 @@ document.addEventListener('DOMContentLoaded', () => {
             : fmtFixed(statsData.period, 0, 15);
 
         const segments = [
-            ['通道: ', statsData.channelLabel],
-            ['最大值: ', fmtFixed(statsData.max, 6, 15)],
-            ['最小值: ', fmtFixed(statsData.min, 6, 15)],
-            ['峰峰值: ', fmtFixed(statsData.pp, 6, 15)],
-            ['均值: ', fmtFixed(statsData.mean, 6, 15)],
-            ['标准差: ', fmtFixed(statsData.stdDev, 6, 15)],
-            ['主频: ', `${freqHz} Hz`],
-            ['主周期: ', `${periodText} sample`]
-        ].map(([label, value]) => {
-            const span = document.createElement('span');
-            span.className = 'plot-info-segment';
-            span.textContent = `${label} ${value}`;
-            return span;
+            ['通道:', statsData.channelLabel],
+            ['最大值:', fmtFixed(statsData.max, 6, 15)],
+            ['最小值:', fmtFixed(statsData.min, 6, 15)],
+            ['峰峰值:', fmtFixed(statsData.pp, 6, 15)],
+            ['均值:', fmtFixed(statsData.mean, 6, 15)],
+            ['标准差:', fmtFixed(statsData.stdDev, 6, 15)],
+            ['主频:', `${freqHz} Hz`],
+            ['主周期:', `${periodText} sample`]
+        ];
+        if (!plotChannelStats.children.length) {
+            const cells = segments.map(([label]) => {
+                const cell = document.createElement('span');
+                cell.className = 'plot-info-segment monitor-stat-item';
+                const name = document.createElement('span');
+                name.className = 'monitor-stat-label';
+                name.textContent = label;
+                const value = document.createElement('span');
+                value.className = 'monitor-stat-value';
+                cell.append(name, value);
+                return cell;
+            });
+            plotChannelStats.replaceChildren(...cells);
+        }
+        segments.forEach(([, value], index) => {
+            plotChannelStats.children[index].children[1].textContent = index === 0
+                ? value : String(value).trim();
         });
-        plotChannelStats.replaceChildren(...segments);
+        if (plotInfoRow.hidden) plotInfoRow.hidden = false;
     };
 
     plotter.onStatsUpdate = renderPlotStats;
@@ -447,8 +461,8 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', applyVerticalHeights);
     if (typeof ResizeObserver !== 'undefined') {
         const toolsResizeObserver = new ResizeObserver(() => applyVerticalHeights());
-        toolsResizeObserver.observe(byteTools);
-        toolsResizeObserver.observe(byteSearchTools);
+        for (const section of [plotHeader, byteTools, byteSearchTools, monitorHeader, monitorStats,
+            sendPanel]) toolsResizeObserver.observe(section);
     }
 
     waveformToggle.addEventListener('change', () => {

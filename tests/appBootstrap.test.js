@@ -74,6 +74,11 @@ function bootWithConfig(original, fixedDate) {
     let writes = 0;
     let now = 0;
     const intervals = [];
+    const resizeObservers = [];
+    class ResizeObserverForTest {
+        constructor(callback) { this.callback = callback; this.elements = []; resizeObservers.push(this); }
+        observe(element) { this.elements.push(element); }
+    }
     const localStorage = {
         getItem() { return stored; },
         setItem(_key, value) { writes++; stored = value; }
@@ -86,7 +91,8 @@ function bootWithConfig(original, fixedDate) {
         performance: { now: () => now }, TextEncoder, TextDecoder, Event, Date: DateForTest,
         setInterval(callback) { intervals.push(callback); }, clearInterval() {},
         setTimeout() {}, clearTimeout() {},
-        requestAnimationFrame() {}, console: { ...console, warn() {} }
+        requestAnimationFrame() {}, ResizeObserver: ResizeObserverForTest,
+        console: { ...console, warn() {} }
     });
     for (const file of scripts) {
         vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
@@ -112,6 +118,12 @@ function bootWithConfig(original, fixedDate) {
     return { getElement, getStored: () => stored, getWrites: () => writes,
         getChoiceGroup: id => choiceGroups.get(id),
         tick(ms = 1000) { now += ms; intervals.forEach(callback => callback()); },
+        notifyResize(id) {
+            const element = getElement(id);
+            for (const observer of resizeObservers) {
+                if (observer.elements.includes(element)) observer.callback();
+            }
+        },
         fireCanvas, plotter, parser, monitor };
 }
 
@@ -290,12 +302,61 @@ test('inactive CH label is gray on first render and after toggling visibility', 
 
 test('plot FPS occupies the title row without displacing channel statistics', () => {
     const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
-    const titleRow = html.match(/<div class="plot-title-row">([\s\S]*?)<\/div>/)?.[1];
-    const statsRow = html.match(/<div class="plot-info-row"[^>]*>([\s\S]*?)<\/div>/)?.[1];
+    const titleRow = html.match(/<div class="plot-title-row monitor-title-row">([\s\S]*?)<\/div>/)?.[1];
+    const statsRow = html.match(/<div class="plot-info-row monitor-stats-row"[^>]*>([\s\S]*?)<\/div>/)?.[1];
     assert.match(titleRow, /id="stat-plot-fps"/);
     assert.doesNotMatch(titleRow, /右键绘图区重置缩放/);
     assert.doesNotMatch(statsRow, /id="stat-plot-fps"/);
     assert.match(statsRow, /id="plot-channel-stats"/);
+    assert.ok(html.indexOf('id="plot-info-row"') < html.indexOf('id="waveform-canvas"'));
+});
+
+test('wave statistics row appears only when single-channel statistics exist', () => {
+    const { getElement, plotter } = bootWithConfig(null);
+    const row = getElement('plot-info-row');
+    plotter.onStatsUpdate(null);
+    assert.equal(row.hidden, true);
+    plotter.onStatsUpdate({ channelLabel: 'CH1', max: 1, min: -1, pp: 2,
+        mean: 0, stdDev: 0.5, freq: null, period: null });
+    assert.equal(row.hidden, false);
+    assert.equal(getElement('plot-channel-stats').children.length, 8);
+    plotter.onStatsUpdate(null);
+    assert.equal(row.hidden, true);
+});
+
+test('wave statistic labels keep their cells while numeric values change length', () => {
+    const { getElement, plotter } = bootWithConfig(null);
+    const first = { channelLabel: 'CH1', max: 9, min: -1, pp: 10,
+        mean: 4, stdDev: 2, freq: null, period: null };
+    plotter.onStatsUpdate(first);
+    const cells = getElement('plot-channel-stats').children;
+    assert.equal(cells[1].children[0].textContent, '最大值:');
+    assert.equal(cells[1].children[1].textContent.trim(), '9.000000');
+    plotter.onStatsUpdate({ ...first, max: -1234567.125 });
+    assert.equal(getElement('plot-channel-stats').children[1], cells[1]);
+    assert.equal(cells[1].children[0].textContent, '最大值:');
+    assert.equal(cells[1].children[1].textContent.trim(), '-1234567.125000');
+});
+
+test('byte statistic updates the value without rebuilding its label', () => {
+    const { getElement, parser, tick } = bootWithConfig(null);
+    const fpsValue = getElement('stat-fps-value');
+    tick();
+    assert.equal(fpsValue.textContent, '0 f/s');
+    parser.frameCount += 12;
+    tick();
+    assert.equal(fpsValue.textContent, '12 f/s');
+});
+
+test('monitor height responds when header rows grow after a width change', () => {
+    const { getElement, notifyResize } = bootWithConfig(null);
+    const header = getElement('monitor-header');
+    const monitor = getElement('monitor-panel');
+    const before = Number.parseInt(monitor.style.height, 10);
+    header.offsetHeight += 260;
+    notifyResize('monitor-header');
+    assert.ok(Number.parseInt(monitor.style.height, 10) > before);
+    assert.ok(Number.parseInt(getElement('canvas-wrapper').style.height, 10) < 340);
 });
 
 test('changing retained capacity clamps the plot window field and reset range', () => {

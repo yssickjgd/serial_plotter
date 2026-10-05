@@ -541,6 +541,12 @@ code {
 
 /* ── 波形绘图区 ── */
 .canvas-wrapper {
+    --monitor-title-bg: #1a1a1a;
+    --monitor-bar-bg: #151515;
+    --monitor-divider: #333;
+    --monitor-fg: #e6e6e6;
+    --monitor-accent: #a8c8e8;
+    container: monitor / inline-size;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -563,21 +569,24 @@ canvas {
 .plot-header {
     display: flex;
     flex-direction: column;
-    gap: 2px;
     flex-shrink: 0;
-    background: #151515;
-    border-bottom: 1px solid #2b2b2b;
-    padding: 4px 10px;
+    background: var(--monitor-bar-bg);
 }
 
-.plot-title-row {
+.monitor-title-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    min-height: 30px;
+    padding: 4px 10px;
+    background: var(--monitor-title-bg);
+    border-bottom: 1px solid var(--monitor-divider);
+    color: #fff;
 }
 
-.plot-title {
+.plot-title, .monitor-title {
     font-size: 0.78rem;
     font-weight: 700;
     color: #ffffff;
@@ -589,12 +598,10 @@ canvas {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 4px 7px;
-    padding: 4px 10px;
-    background: #151515;
-    border-bottom: 1px solid #2b2b2b;
+    gap: 5px 6px;
+    padding: 3px 6px;
     font-size: 0.7rem;
-    color: #d7d7d7;
+    color: var(--monitor-fg);
 }
 
 .monitor-tool-row {
@@ -602,13 +609,16 @@ canvas {
     align-items: flex-start;
     flex-shrink: 0;
     min-width: 0;
-    background: #151515;
-    border-bottom: 1px solid #2b2b2b;
+    background: var(--monitor-bar-bg);
+    border-bottom: 1px solid var(--monitor-divider);
 }
 .tool-label {
-    flex: 0 0 auto;
-    padding: 5px 0 5px 10px;
-    color: #a8c8e8;
+    flex: 0 0 54px;
+    display: flex;
+    align-items: center;
+    height: 30px;
+    padding: 3px 0 3px 10px;
+    color: var(--monitor-accent);
     font-size: 0.7rem;
     white-space: nowrap;
 }
@@ -617,12 +627,7 @@ canvas {
 .monitor-tool-row .monitor-search-toolbar {
     flex: 1 1 auto;
     min-width: 0;
-    padding: 3px 6px;
-    border-bottom: 0;
 }
-.plot-header .monitor-tool-row { border-bottom: 0; }
-.plot-header .tool-label { padding: 2px 6px 2px 0; }
-.plot-header .jump-toolbar { padding: 1px 0; }
 .jump-selection-row { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 4px; flex: 1 1 auto; min-width: 0; }
 .jump-mode-choices { flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; padding: 0; }
 .jump-mode-choices label { color: #ddd; }
@@ -633,6 +638,7 @@ canvas {
 .jump-status:empty { display: none; }
 .jump-toolbar button, .monitor-search-toolbar button {
     padding: 3px 8px;
+    min-height: 24px;
     border: 1px solid #505050;
     border-radius: 3px;
     color: #f0f0f0;
@@ -640,6 +646,7 @@ canvas {
     cursor: pointer;
 }
 .jump-toolbar button:hover, .monitor-search-toolbar button:hover { background: #454545; }
+.monitor-search-toolbar button { padding-inline: 6px; }
 .jump-status, #monitor-search-status { color: #a5c9f0; }
 .monitor-toggle {
     display: inline-flex;
@@ -652,10 +659,36 @@ canvas {
 .monitor-search-toolbar label { display: inline-flex; align-items: center; gap: 4px; }
 .search-mode-choices { flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; padding: 0; }
 .search-mode-choices label { color: #ddd; }
-#monitor-search-query { flex: 1 1 125px; min-width: 100px; max-width: 220px; }
-#monitor-search-tolerance { width: 90px; }
-#monitor-search-channel { max-width: 115px; }
-#monitor-search-status { flex: 1 1 70px; min-width: 0; }
+.monitor-search-toolbar { align-items: center; }
+.search-fields { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
+.search-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; white-space: nowrap; }
+#monitor-search-query { flex: 0 1 180px; width: 180px; min-width: 100px; }
+#monitor-search-tolerance { flex: 0 0 75px; width: 75px; }
+#monitor-search-channel { flex: 0 0 105px; width: 105px; }
+@container monitor (max-width: 600px) {
+    .search-fields:has(#monitor-search-channel:not([hidden])) { flex: 0 0 100%; }
+    .search-fields:has(#monitor-search-channel:not([hidden])) #monitor-search-query {
+        flex: 1 1 70px;
+        width: auto;
+        min-width: 50px;
+    }
+    .search-fields:has(#monitor-search-channel:not([hidden])) #monitor-search-tolerance {
+        flex: 0 0 65px;
+        width: 65px;
+    }
+    .search-fields:has(#monitor-search-channel:not([hidden])) #monitor-search-channel {
+        flex: 0 0 90px;
+        width: 90px;
+    }
+}
+#monitor-search-status {
+    flex: 0 0 150px;
+    min-width: 0;
+    min-height: 1.2em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 [hidden] { display: none !important; }
 
 #stat-plot-fps {
@@ -667,40 +700,39 @@ canvas {
     font-variant-numeric: tabular-nums;
 }
 
-/* 统计信息行（波形监视台），与 .stats-bar-row 共用排版规范 */
-.plot-info-row {
-    min-height: 18px;
+/* 两个监视台共用统计栏的间距和分隔线。 */
+.monitor-stats-row {
+    background: var(--monitor-bar-bg);
+    border-bottom: 1px solid var(--monitor-divider);
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    color: var(--monitor-fg);
+    font-family: var(--ui-font);
+    font-variant-numeric: tabular-nums;
+}
+
+.monitor-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px 12px;
+    align-items: start;
+    width: 100%;
+}
+
+.monitor-stat-item {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    font-size: 0.72rem;
-    color: #ffffff;
-    white-space: nowrap;
-    overflow: hidden;
-    font-family: var(--ui-font);
-    font-variant-numeric: tabular-nums;
+    align-items: baseline;
+    column-gap: 0.5ch;
+    min-width: 0;
+    color: var(--monitor-fg);
 }
 
-.plot-channel-stats {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    gap: 8px;
-    align-items: center;
-}
+.monitor-stat-label { flex: 0 0 auto; white-space: nowrap; }
+.monitor-stat-value { min-width: 0; overflow-wrap: anywhere; }
 
-.plot-info-segment {
-    flex: 1 1 0;
-    min-width: 0;
-    font-size: 0.72rem;
-    color: #ffffff;
-    white-space: nowrap;
-    font-family: var(--ui-font);
-    font-variant-numeric: tabular-nums;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: left;
+@container monitor (max-width: 700px) {
+    .monitor-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* ── 波形滚动条 ── */
@@ -784,67 +816,40 @@ canvas {
 
 /* ── 字节流监视台 ── */
 .monitor-panel {
+    --monitor-title-bg: #1a1a1a;
+    --monitor-bar-bg: #151515;
+    --monitor-divider: #333;
+    --monitor-fg: #e6e6e6;
+    --monitor-accent: #a8c8e8;
     display: flex;
     flex-direction: column;
     min-height: 100px;
     overflow: hidden;
-    padding-bottom: 6px;
+    container: monitor / inline-size;
 }
 
 .monitor-header {
-    background: #1a1a1a;
-    padding: 4px 10px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: #ffffff;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid #333;
     flex-shrink: 0;
-    flex-wrap: wrap;
-    gap: 4px 10px;
 }
 
-.monitor-format-row { display: flex; align-items: center; gap: 8px; flex: 0 0 100%; font-weight: 400; }
-.monitor-format-row > span { white-space: nowrap; }
-.monitor-format-choices { padding: 0; gap: 3px 10px; }
+.monitor-header-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px 14px;
+    margin-left: auto;
+    min-width: 0;
+}
+
+.monitor-format-row { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; font-size: 0.7rem; }
+.monitor-format-choices { padding: 0; gap: 3px 8px; }
 .monitor-format-choices label { color: #ddd; font-weight: 400; }
 
-/* ── 统计信息栏（波形监视台 .plot-info-row 与字节流监视台 .stats-bar-row 共用样式） ── */
+/* ── 字节流监视台统计 ── */
 .stats-bar-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
     min-height: 18px;
-    background: #151515;
-    padding: 4px 10px;
-    border-bottom: 1px solid #2b2b2b;
     flex-shrink: 0;
-    font-size: 0.72rem;
-    color: #ffffff;
-    white-space: nowrap;
-    overflow: hidden;
-    font-family: var(--ui-font);
-    font-variant-numeric: tabular-nums;
-}
-
-.stats-bar-row span {
-    flex: 1 1 0;
-    min-width: 0;
-    font-size: 0.72rem;
-    color: #ffffff;
-    white-space: nowrap;
-    font-family: var(--ui-font);
-    font-variant-numeric: tabular-nums;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: left;
-}
-
-@media (max-width: 1100px) {
-    .stats-bar-row span { flex-basis: 45%; }
 }
 
 .log-content {
@@ -919,15 +924,14 @@ canvas {
 
 /* ── 发送面板 ── */
 .send-panel {
-    border-top: 1px solid #2a2a2a;
-    background: #161616;
+    border-top: 1px solid var(--monitor-divider);
+    background: var(--monitor-bar-bg);
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 3px;
     padding: 4px 8px 5px;
     min-height: 0;
-    margin-bottom: 6px;
 }
 
 .send-toolbar {
@@ -937,6 +941,7 @@ canvas {
     flex-wrap: wrap;
 }
 
+.send-actions { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 .send-mode-row { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .send-mode-row > span { color: #aaa; font-size: 0.68rem; }
 .send-format-choices, .send-interval-choices { padding: 0; gap: 3px 7px; }

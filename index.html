@@ -268,9 +268,12 @@
             <!-- ── 波形绘图区 ── -->
             <div class="canvas-wrapper box-border" id="canvas-wrapper">
                 <div class="plot-header" id="plot-header">
-                    <div class="plot-title-row">
+                    <div class="plot-title-row monitor-title-row">
                         <span class="plot-title">波形监视台</span>
                         <span id="stat-plot-fps">绘图帧率: 0 FPS</span>
+                    </div>
+                    <div class="plot-info-row monitor-stats-row" id="plot-info-row" hidden>
+                        <div id="plot-channel-stats" class="plot-channel-stats monitor-stat-grid"></div>
                     </div>
                     <div class="monitor-tool-row" id="wave-tools">
                     <span class="tool-label">时间定位</span>
@@ -290,10 +293,7 @@
                         </div>
                     </div>
                     </div>
-                    <!-- 单通道统计由 app.js 动态更新 -->
-                    <div class="plot-info-row" id="plot-info-row">
-                        <div id="plot-channel-stats" class="plot-channel-stats"></div>
-                    </div>
+
                 </div>
                 <canvas id="waveform-canvas"></canvas>
                 <div class="plot-y-scrollbar-wrap" id="plot-y-scrollbar-wrap" hidden>
@@ -309,9 +309,10 @@
 
             <!-- ── 字节流监视台 ── -->
             <div class="monitor-panel box-border" id="monitor-panel">
-                <div class="monitor-header" id="monitor-header">
-                    <span>字节流监视台</span>
-                    <label class="monitor-toggle"><input id="show-waveform" type="checkbox" checked />显示波形监视台</label>
+                <div class="monitor-header monitor-title-row" id="monitor-header">
+                    <span class="monitor-title">字节流监视台</span>
+                    <div class="monitor-header-actions">
+                        <label class="monitor-toggle"><input id="show-waveform" type="checkbox" checked />显示波形监视台</label>
                     <div class="monitor-format-row">
                         <span>接收显示</span>
                         <input type="hidden" id="monitor-display-mode" value="hex" />
@@ -321,12 +322,13 @@
                             <label><input id="monitor-display-mode-number" type="radio" name="monitor-display-mode-choice" value="number" />通道数值</label>
                         </div>
                     </div>
+                    </div>
                 </div>
-                <div class="stats-bar-row" id="monitor-stats">
-                    <span id="stat-rx">RX: 0 B/s</span>
-                    <span id="stat-tx">TX: 0 B/s</span>
-                    <span id="stat-fps">帧率: 0 f/s</span>
-                    <span id="stat-fail">校验失败: 0%</span>
+                <div class="stats-bar-row monitor-stats-row monitor-stat-grid" id="monitor-stats">
+                    <span id="stat-rx" class="monitor-stat-item"><span class="monitor-stat-label">RX:</span><span id="stat-rx-value" class="monitor-stat-value">0 B/s</span></span>
+                    <span id="stat-tx" class="monitor-stat-item"><span class="monitor-stat-label">TX:</span><span id="stat-tx-value" class="monitor-stat-value">0 B/s</span></span>
+                    <span id="stat-fps" class="monitor-stat-item"><span class="monitor-stat-label">帧率:</span><span id="stat-fps-value" class="monitor-stat-value">0 f/s</span></span>
+                    <span id="stat-fail" class="monitor-stat-item"><span class="monitor-stat-label">校验失败:</span><span id="stat-fail-value" class="monitor-stat-value">0%</span></span>
                 </div>
                 <div class="monitor-tool-row" id="byte-tools">
                 <span class="tool-label">时间定位</span>
@@ -355,13 +357,17 @@
                         <label><input id="monitor-search-mode-ascii" type="radio" name="monitor-search-mode-choice" value="ascii" />ASCII</label>
                         <label><input id="monitor-search-mode-number" type="radio" name="monitor-search-mode-choice" value="number" />通道数值</label>
                     </div>
+                    <div class="search-fields">
                     <input id="monitor-search-query" type="text" placeholder="输入搜索内容" aria-label="搜索内容" />
                     <input id="monitor-search-tolerance" type="number" min="0" step="any" placeholder="±误差" aria-label="数值误差范围" title="允许的绝对误差；留空表示 0（精确匹配）" hidden />
                     <select id="monitor-search-channel" aria-label="搜索通道" hidden><option value="-1">全部通道</option></select>
+                    </div>
+                    <div class="search-actions">
                     <button id="monitor-search-button" type="button">搜索</button>
                     <button id="monitor-search-prev" type="button">上一个</button>
                     <button id="monitor-search-next" type="button">下一个</button>
                     <button id="monitor-search-nearest" type="button">光标就近</button>
+                    </div>
                     <span id="monitor-search-status" role="status"></span>
                 </div>
                 </div>
@@ -371,7 +377,7 @@
 
                 <!-- 日志/发送区分隔条（暂未启用） -->
                 <!-- <div class="v-resizer-inner" id="log-send-resizer"></div> -->
-                
+
                 <!-- 发送面板 -->
                 <div class="send-panel" id="send-panel">
                     <div class="send-toolbar">
@@ -393,9 +399,11 @@
                                 <label><input id="send-interval-unit-hz" type="radio" name="send-interval-unit-choice" value="hz" />Hz</label>
                             </div>
                         </div>
-                        <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
-                        <input type="file" id="send-file-input" hidden />
-                        <button id="btn-send" class="btn btn-primary">发送</button>
+                        <div class="send-actions">
+                            <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
+                            <input type="file" id="send-file-input" hidden />
+                            <button id="btn-send" class="btn btn-primary">发送</button>
+                        </div>
                     </div>
                     <textarea id="send-input" rows="4" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
                 </div>
