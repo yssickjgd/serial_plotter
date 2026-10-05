@@ -33,6 +33,17 @@ test('decoded numeric search applies tolerance and channel selection', () => {
     assert.throws(() => parseMonitorSearch('number', '1', '-1'), /误差/);
 });
 
+test('decoded numeric search checks only the selected channel set', () => {
+    const frames = new FrameBuffer(3, 5);
+    frames.append([1, 1, 1], Uint8Array.of(1), 't1', 10);
+    frames.append([2, 1, 1], Uint8Array.of(2), 't2', 11);
+    const matches = run(frames, parseMonitorSearch('number', '1', 0, [0, 2]));
+    assert.deepEqual(matches.map(m => [m.startFrame, m.channel]), [[0, 0], [0, 2], [1, 2]]);
+    assert.throws(() => parseMonitorSearch('number', '1', 0, []), /通道/);
+    assert.throws(() => parseMonitorSearch('number', '1', 0, [0, 0]), /通道/);
+    assert.throws(() => run(frames, parseMonitorSearch('number', '1', 0, [0, 3])), RangeError);
+});
+
 test('byte search finds overlapping sequences without counting rejected prefixes', () => {
     const frames = new FrameBuffer(1, 5);
     frames.append([0], Uint8Array.of(0x41, 0x41), '', 1);

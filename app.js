@@ -159,6 +159,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const monitorSearchQuery = document.getElementById('monitor-search-query');
     const monitorSearchTolerance = document.getElementById('monitor-search-tolerance');
     const monitorSearchChannel = document.getElementById('monitor-search-channel');
+    const monitorSearchChannelToggle = document.getElementById('monitor-search-channel-toggle');
+    const monitorSearchChannelOptions = document.getElementById('monitor-search-channel-options');
     const monitorSearchStatus = document.getElementById('monitor-search-status');
 
     const bindVisibleChoice = (fieldId, values) => {
@@ -178,7 +180,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     bindVisibleChoice('monitor-display-mode', ['hex', 'ascii', 'number']);
     bindVisibleChoice('send-mode', ['hex', 'text']);
-    const syncSendIntervalUnit = bindVisibleChoice('send-interval-unit', ['ms', 's', 'hz']);
+    const syncSendIntervalUnit = bindVisibleChoice('send-interval-unit', ['s', 'hz']);
 
     // —— 发送面板 ——
     const sendModeSelect = document.getElementById('send-mode');
@@ -483,6 +485,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const mode = document.getElementById('nav-jump-mode');
         const absolute = document.getElementById('nav-jump-absolute');
         const relative = document.getElementById('nav-jump-relative');
+        const relativeUnit = document.getElementById('nav-jump-relative-unit');
         const status = document.getElementById('nav-jump-status');
         for (const value of ['absolute', 'relative']) {
             const choice = document.getElementById(`nav-jump-mode-${value}`);
@@ -497,6 +500,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById(`nav-jump-mode-${value}`).checked = mode.value === value;
             absolute.hidden = mode.value !== 'absolute';
             relative.hidden = mode.value !== 'relative';
+            relativeUnit.hidden = mode.value !== 'relative';
             applyVerticalHeights();
         });
         document.getElementById('nav-jump-button').addEventListener('click', () => {
@@ -531,22 +535,27 @@ document.addEventListener('DOMContentLoaded', () => {
         const pad = (value, width = 2) => String(value).padStart(width, '0');
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
             `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.` +
-            pad(hasFrameTime ? Math.floor(date.getMilliseconds() / 10) * 10
-                : Math.max(10, Math.floor(date.getMilliseconds() / 10) * 10), 3);
+            pad(date.getMilliseconds(), 3);
     };
+    let channelCheckboxes = [];
     const toolPanels = [navTimeTools, navSearchTools];
     const toolControlIds = [
         'nav-jump-mode-absolute', 'nav-jump-mode-relative',
         'nav-jump-absolute', 'nav-jump-relative', 'nav-jump-button',
-        'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel',
+        'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel-toggle',
         'monitor-search-prev', 'monitor-search-next',
-        'monitor-search-nearest'
+        'monitor-search-nearest-wave', 'monitor-search-nearest-byte'
     ];
     const syncTimeTools = () => {
         for (const tools of toolPanels)
             tools.classList[capturePaused ? 'remove' : 'add']('tools-disabled');
         for (const id of toolControlIds)
             document.getElementById(id).disabled = !capturePaused;
+        for (const { input } of channelCheckboxes) input.disabled = !capturePaused;
+        if (!capturePaused) {
+            monitorSearchChannelOptions.hidden = true;
+            monitorSearchChannelToggle.ariaExpanded = 'false';
+        }
         if (capturePaused) {
             const value = defaultJumpDateTime();
             document.getElementById('nav-jump-absolute').value = value;
@@ -554,18 +563,63 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     syncTimeTools();
 
-    const populateSearchChannels = () => {
-        const selected = monitorSearchChannel.value;
-        monitorSearchChannel.replaceChildren();
-        for (let channel = -1; channel < frames.channelCount; channel++) {
-            const option = document.createElement('option');
-            option.value = String(channel);
-            option.textContent = channel < 0 ? '全部通道' : `CH${channel + 1}`;
-            monitorSearchChannel.appendChild(option);
-        }
-        monitorSearchChannel.value = selected !== '' && Number(selected) < frames.channelCount
-            ? selected : '-1';
+    let selectedSearchChannels = null; // null means all channels
+    const selectedChannelFilter = () => selectedSearchChannels === null
+        ? -1 : [...selectedSearchChannels].sort((left, right) => left - right);
+    const syncSearchChannelSelection = () => {
+        const all = selectedSearchChannels === null;
+        for (const { input, channel } of channelCheckboxes)
+            input.checked = channel < 0 ? all : !all && selectedSearchChannels.has(channel);
+        const names = all ? [] : [...selectedSearchChannels]
+            .sort((left, right) => left - right).map(channel => `CH${channel + 1}`);
+        monitorSearchChannelToggle.textContent = all ? '全部通道' :
+            names.length <= 2 ? names.join('、') : `已选 ${names.length} 通道`;
+        monitorSearchChannelToggle.title = all ? '搜索全部通道' : names.join('、');
     };
+    const populateSearchChannels = () => {
+        if (selectedSearchChannels !== null) {
+            selectedSearchChannels = new Set([...selectedSearchChannels]
+                .filter(channel => channel < frames.channelCount));
+            if (!selectedSearchChannels.size) selectedSearchChannels = null;
+        }
+        channelCheckboxes = [];
+        monitorSearchChannelOptions.replaceChildren();
+        for (let channel = -1; channel < frames.channelCount; channel++) {
+            const label = document.createElement('label');
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.value = String(channel);
+            input.disabled = !capturePaused;
+            label.append(input, channel < 0 ? '全部通道' : `CH${channel + 1}`);
+            input.addEventListener('change', () => {
+                if (channel < 0) selectedSearchChannels = null;
+                else {
+                    if (selectedSearchChannels === null) selectedSearchChannels = new Set();
+                    if (input.checked) selectedSearchChannels.add(channel);
+                    else selectedSearchChannels.delete(channel);
+                    if (!selectedSearchChannels.size) selectedSearchChannels = null;
+                }
+                syncSearchChannelSelection();
+            });
+            channelCheckboxes.push({ input, channel });
+            monitorSearchChannelOptions.appendChild(label);
+        }
+        syncSearchChannelSelection();
+    };
+    monitorSearchChannelToggle.addEventListener('click', () => {
+        monitorSearchChannelOptions.hidden = !monitorSearchChannelOptions.hidden;
+        monitorSearchChannelToggle.ariaExpanded = String(!monitorSearchChannelOptions.hidden);
+    });
+    document.addEventListener('click', event => {
+        if (monitorSearchChannelOptions.hidden || monitorSearchChannel.contains(event.target)) return;
+        monitorSearchChannelOptions.hidden = true;
+        monitorSearchChannelToggle.ariaExpanded = 'false';
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        monitorSearchChannelOptions.hidden = true;
+        monitorSearchChannelToggle.ariaExpanded = 'false';
+    });
     populateSearchChannels();
     let searchSession = null;
     let searchGeneration = 0;
@@ -579,6 +633,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const numeric = monitorDisplayMode.value === 'number';
         monitorSearchTolerance.hidden = !numeric;
         monitorSearchChannel.hidden = !numeric;
+        if (!numeric) {
+            monitorSearchChannelOptions.hidden = true;
+            monitorSearchChannelToggle.ariaExpanded = 'false';
+        }
         monitorSearchQuery.placeholder = numeric ? '目标数值' :
             monitorDisplayMode.value === 'ascii' ? 'ASCII 文本' : '十六进制字节';
         if (numeric) populateSearchChannels();
@@ -636,9 +694,12 @@ document.addEventListener('DOMContentLoaded', () => {
             monitorSearchStatus.textContent = '无匹配结果';
             return;
         }
-        if (action === 'nearest') {
-            const order = monitor.cursorOrder ?? monitor.anchor?.order ??
-                frames.orderAt(frames.length - 1);
+        if (action === 'nearest-wave' || action === 'nearest-byte') {
+            const waveFrame = plotter.currentTimeFrameIndex();
+            const order = action === 'nearest-wave' && waveFrame >= 0
+                ? frames.orderAt(waveFrame)
+                : monitor.cursorOrder ?? monitor.anchor?.order ??
+                    frames.orderAt(frames.length - 1);
             const next = searchInsertionIndex(order);
             const index = next === 0 ? 0 : next >= searchMatches.length ? searchMatches.length - 1
                 : order - searchMatches[next - 1].startOrder <=
@@ -661,9 +722,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const options = MonitorSearch.parseMonitorSearch(monitorDisplayMode.value,
                 monitorSearchQuery.value, monitorSearchTolerance.value,
-                Number(monitorSearchChannel.value));
+                selectedChannelFilter());
             const key = JSON.stringify([monitorDisplayMode.value, monitorSearchQuery.value,
-                monitorSearchTolerance.value, monitorSearchChannel.value]);
+                monitorSearchTolerance.value, selectedChannelFilter()]);
             if (key === searchKey) {
                 if (searchReady) navigateSearch(action);
                 else if (searchSession) pendingSearchAction = action;
@@ -708,7 +769,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scan();
         } catch (error) { monitorSearchStatus.textContent = error.message; }
     };
-    for (const action of ['prev', 'next', 'nearest'])
+    for (const action of ['prev', 'next', 'nearest-wave', 'nearest-byte'])
         document.getElementById(`monitor-search-${action}`).addEventListener('click', () =>
             requestSearch(action));
 

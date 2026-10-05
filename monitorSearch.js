@@ -10,8 +10,14 @@ function parseMonitorSearch(kind, query, tolerance = 0, channel = -1) {
             throw new Error('请输入有限的目标数值');
         if (!Number.isFinite(error) || error < 0)
             throw new Error('误差范围必须是非负有限数值');
-        if (!Number.isInteger(channel) || channel < -1)
+        if (Array.isArray(channel)) {
+            if (!channel.length || channel.some(index => !Number.isInteger(index) || index < 0) ||
+                new Set(channel).size !== channel.length)
+                throw new Error('通道选择无效');
+            channel = [...channel].sort((left, right) => left - right);
+        } else if (!Number.isInteger(channel) || channel < -1) {
             throw new Error('通道选择无效');
+        }
         return { kind, value, tolerance: error, channel };
     }
     let bytes;
@@ -27,8 +33,13 @@ function parseMonitorSearch(kind, query, tolerance = 0, channel = -1) {
 
 class MonitorSearchSession {
     constructor(frames, options) {
-        if (options.kind === 'number' && options.channel >= frames.channelCount)
-            throw new RangeError('搜索通道超出当前帧格式');
+        if (options.kind === 'number') {
+            this.numericChannels = Array.isArray(options.channel) ? options.channel :
+                options.channel < 0 ? Array.from({ length: frames.channelCount }, (_, index) => index)
+                    : [options.channel];
+            if (this.numericChannels.some(channel => channel >= frames.channelCount))
+                throw new RangeError('搜索通道超出当前帧格式');
+        }
         this.frames = frames;
         this.options = options;
         this.length = frames.length;
@@ -57,9 +68,7 @@ class MonitorSearchSession {
         const { frames, options } = this;
         for (let frame = this.position; frame < end; frame++) {
             if (options.kind === 'number') {
-                const first = options.channel < 0 ? 0 : options.channel;
-                const last = options.channel < 0 ? frames.channelCount : first + 1;
-                for (let channel = first; channel < last; channel++) {
+                for (const channel of this.numericChannels) {
                     const value = frames.getValue(channel, frame);
                     if (Number.isFinite(value) && Math.abs(value - options.value) <= options.tolerance)
                         this.matches.push({ startOrder: frames.orderAt(frame), endOrder: frames.orderAt(frame),

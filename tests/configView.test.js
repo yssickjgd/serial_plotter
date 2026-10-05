@@ -65,4 +65,11 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
         updateChannels() {}, updatePlot() {}
     });
     assert.equal(elements.plotWindowPoints.value, '500');
+    elements.sendInterval = { value: '1500' };
+    applyConfigToView({ sendIntervalUnit: 'ms' }, {
+        elements, bounds, updateConnectionModeUI() {}, updateFrameFormat() {},
+        updateChannels() {}, updatePlot() {}
+    });
+    assert.equal(elements.sendIntervalUnit.value, 's');
+    assert.equal(elements.sendInterval.value, '1.5');
 });

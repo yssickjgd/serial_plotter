@@ -38,6 +38,12 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
     for (const key of CONFIG_VALUE_FIELDS) {
         if (config[key] !== undefined) elements[key].value = config[key];
     }
+    if (elements.sendIntervalUnit.value === 'ms') {
+        const milliseconds = Number(elements.sendInterval?.value);
+        if (Number.isFinite(milliseconds) && elements.sendInterval)
+            elements.sendInterval.value = String(milliseconds / 1000);
+        elements.sendIntervalUnit.value = 's';
+    }
     if (config.plotWindowPoints === undefined)
         elements.plotWindowPoints.value = String(Math.min(1000,
             Number(elements.maxPoints.value) || 1000));

@@ -11,6 +11,23 @@ function element(value = '') {
     };
 }
 
+test('seconds and hertz inputs produce millisecond timer periods', () => {
+    const { SendController } = require('../sendController');
+    const interval = element('0.025');
+    const intervalUnit = element('s');
+    const controller = new SendController({
+        mode: element('hex'), input: element('AA'), fileInput: element(),
+        interval, intervalUnit, button: element(), loadButton: element(),
+        getEngine: () => null, onSent() {}
+    });
+    assert.equal(controller.periodMs(), 25);
+    intervalUnit.value = 'hz';
+    interval.value = '20';
+    assert.equal(controller.periodMs(), 50);
+    interval.value = '0';
+    assert.equal(controller.periodMs(), 0);
+});
+
 test('file preview mode does not change bytes sent to an active engine', async () => {
     const { SendController } = require('../sendController');
     const mode = element('text');

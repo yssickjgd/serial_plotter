@@ -44,8 +44,8 @@ class SendController {
     periodMs() {
         const value = Number(this.interval.value);
         if (!Number.isFinite(value) || value <= 0) return 0;
-        if (this.intervalUnit.value === 's') return value * 1000;
         if (this.intervalUnit.value === 'hz') return 1000 / value;
+        if (this.intervalUnit.value === 's') return value * 1000;
         return value;
     }
 

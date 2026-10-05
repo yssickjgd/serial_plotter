@@ -16,7 +16,7 @@
   "endianness": "little",
   "channelsCount": "23",
   "maxPoints": "5000",
-  "sendIntervalUnit": "ms",
+  "sendIntervalUnit": "s",
   "plotViewMode": "frequency",
   "plotYScaleMode": "auto",
   "plotFftRemoveDc": true,
