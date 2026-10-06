@@ -58,7 +58,7 @@ class Plotter {
         this.freqXUnit = 'hz';
         this.freqXScale = 'linear';
         this.freqYScale = 'linear';
-        this.yScaleMode   = 'auto';
+        this.yScaleModes = { time: 'auto', frequency: 'auto' };
         this.removeDcForFft = false;
         this.fftWindow = 'hann';
         this.onStatsUpdate = null;
@@ -79,7 +79,7 @@ class Plotter {
         // Y 轴范围（时域/频域独立，通过 _yBounds getter 访问当前模式）
         this.yBounds = {
             time:      { min: -1, max: 1 },
-            frequency: { min: -1, max: 1 }
+            frequency: { min: 0.001, max: 1 }
         };
 
         // 频域模式下 FFT bins 总数（由 draw() 更新，供 _clampScroll 使用）
@@ -131,6 +131,8 @@ class Plotter {
 
     /** 返回当前显示模式对应的 Y 轴范围对象 */
     get _yBounds() { return this.yBounds[this.displayMode]; }
+    get yScaleMode() { return this.yScaleModes[this.displayMode]; }
+    set yScaleMode(value) { this.yScaleModes[this.displayMode] = value; }
 
     _clearYZoom(mode) {
         this._boxZoomY[mode] = null;
@@ -261,7 +263,7 @@ class Plotter {
         const oldMode = this.displayMode;
         const oldDc = this.removeDcForFft;
         const oldWindow = this.fftWindow;
-        const oldScale = this.yScaleMode;
+        const oldScales = { ...this.yScaleModes };
         const oldFreqYScale = this.freqYScale;
         const oldBounds = {
             time: { ...this.yBounds.time },
@@ -269,6 +271,8 @@ class Plotter {
         };
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
+        if (opts.yScaleModeTime) this.yScaleModes.time = opts.yScaleModeTime;
+        if (opts.yScaleModeFreq) this.yScaleModes.frequency = opts.yScaleModeFreq;
         if (opts.timeXUnit) this.timeXUnit = opts.timeXUnit;
         if (opts.freqXUnit) this.freqXUnit = opts.freqXUnit;
         if (opts.freqXScale) this.freqXScale = opts.freqXScale;
@@ -283,13 +287,11 @@ class Plotter {
             this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
             this._selection = null;
         }
-        if (oldScale !== this.yScaleMode) {
-            this._clearYZoom('time');
-            this._clearYZoom('frequency');
-        }
+        if (opts.resetYZoom) this._clearYZoom(this.displayMode);
         if (oldFreqYScale !== this.freqYScale) this._clearYZoom('frequency');
         for (const mode of ['time', 'frequency']) {
-            if (oldBounds[mode].min !== this.yBounds[mode].min ||
+            if (oldScales[mode] !== this.yScaleModes[mode] ||
+                oldBounds[mode].min !== this.yBounds[mode].min ||
                 oldBounds[mode].max !== this.yBounds[mode].max)
                 this._clearYZoom(mode);
         }

@@ -149,6 +149,27 @@ test('right click restores the Y scale that existed before rectangle zoom', () =
     assert.equal(plotter._drawState.max, 100);
 });
 
+test('frequency manual bounds apply in both scales and editing clears a temporary zoom', () => {
+    const { plotter, fire } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency', yScaleMode: 'manual', yMinFreq: 0.01, yMaxFreq: 2 });
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0.01);
+    assert.equal(plotter._drawState.max, 2);
+    plotter.setDisplayOptions({ freqYScale: 'log' });
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0.01);
+    assert.equal(plotter._drawState.max, 2);
+    const { plotW, plotH } = plotter._drawState;
+    fire('pointerdown', plotW / 4, plotH / 4);
+    fire('pointerup', plotW * 3 / 4, plotH * 3 / 4);
+    plotter.draw();
+    assert.notEqual(plotter._drawState.min, 0.01);
+    plotter.setDisplayOptions({ yScaleMode: 'manual', yMinFreq: 0.01, yMaxFreq: 2, resetYZoom: true });
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0.01);
+    assert.equal(plotter._drawState.max, 2);
+});
+
 test('frequency rectangle zoom keeps the time viewport separate', () => {
     const { plotter, fire } = createPlotter();
     plotter.setDisplayOptions({ displayMode: 'frequency' });

@@ -1,3 +1,4 @@
+const configYUtils = typeof module !== 'undefined' ? require('./configValidation') : globalThis.SerialPlotter;
 const CONFIG_VALUE_FIELDS = [
     'serialBaud', 'serialData', 'serialStop', 'serialParity',
     'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
@@ -15,6 +16,8 @@ function collectConfigFromView(elements, bounds, channelMeta) {
     Object.assign(config, {
         plotYMinTime: bounds.time.min, plotYMaxTime: bounds.time.max,
         plotYMinFreq: bounds.frequency.min, plotYMaxFreq: bounds.frequency.max,
+        plotYScaleModeTime: bounds.time.scaleMode ?? elements.plotYScaleMode.value,
+        plotYScaleModeFreq: bounds.frequency.scaleMode ?? elements.plotYScaleMode.value,
         channels: channelMeta.map(({ name, color, visible,
             gainEnabled, gain, offsetEnabled, offset }) => ({
             name, color, visible, gainEnabled, gain, offsetEnabled, offset
@@ -58,10 +61,16 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
     }
     if (config.plotFftWindow === undefined) elements.plotFftWindow.value = 'hann';
     const mode = elements.plotViewMode.value === 'frequency' ? 'frequency' : 'time';
-    bounds.time.min = config.plotYMinTime ?? config.plotYMin ?? '-1';
-    bounds.time.max = config.plotYMaxTime ?? config.plotYMax ?? '1';
-    bounds.frequency.min = config.plotYMinFreq ?? '-1';
-    bounds.frequency.max = config.plotYMaxFreq ?? '1';
+    const yConfig = configYUtils.normalizeYConfig(config, {
+        plotViewMode: mode, plotFreqYScale: elements.plotFreqYScale.value
+    });
+    bounds.time.min = yConfig.plotYMinTime;
+    bounds.time.max = yConfig.plotYMaxTime;
+    bounds.frequency.min = yConfig.plotYMinFreq;
+    bounds.frequency.max = yConfig.plotYMaxFreq;
+    bounds.time.scaleMode = yConfig.plotYScaleModeTime;
+    bounds.frequency.scaleMode = yConfig.plotYScaleModeFreq;
+    elements.plotYScaleMode.value = bounds[mode].scaleMode;
     elements.plotYMin.value = bounds[mode].min;
     elements.plotYMax.value = bounds[mode].max;
     updateFrameFormat();

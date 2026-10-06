@@ -20,6 +20,37 @@ function validHex(value) {
     catch (_) { return false; }
 }
 
+function yRangeError(min, max, logarithmic = false) {
+    if (String(min).trim() === '' || String(max).trim() === '' ||
+        !Number.isFinite(Number(min)) || !Number.isFinite(Number(max)))
+        return 'Y 轴范围必须为有限数值';
+    if (logarithmic && (!(Number(min) > 0) || !(Number(max) > 0)))
+        return '对数纵轴的自定义范围必须为正数';
+    if (!(Number(max) > Number(min))) return 'Y 轴最大值必须大于最小值';
+    return '';
+}
+
+function normalizeYConfig(config, context = config) {
+    const normalized = {
+        plotYMinTime: config.plotYMinTime ?? config.plotYMin ?? '-1',
+        plotYMaxTime: config.plotYMaxTime ?? config.plotYMax ?? '1',
+        plotYMinFreq: config.plotYMinFreq ?? '0.001',
+        plotYMaxFreq: config.plotYMaxFreq ?? '1',
+        plotYScaleModeTime: config.plotYScaleModeTime ?? config.plotYScaleMode ?? 'auto',
+        plotYScaleModeFreq: config.plotYScaleModeFreq ?? config.plotYScaleMode ?? 'auto'
+    };
+    // Older versions shared one strategy and allowed invalid bounds in the hidden plot.
+    if (config.plotYScaleModeTime === undefined && config.plotYScaleModeFreq === undefined) {
+        const hiddenTime = context.plotViewMode === 'frequency';
+        const suffix = hiddenTime ? 'Time' : 'Freq';
+        const error = yRangeError(normalized[`plotYMin${suffix}`], normalized[`plotYMax${suffix}`],
+            !hiddenTime && context.plotFreqYScale === 'log');
+        if (error && normalized[`plotYScaleMode${suffix}`] === 'manual')
+            normalized[`plotYScaleMode${suffix}`] = 'auto';
+    }
+    return normalized;
+}
+
 function validateConfig(config) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('配置必须是 JSON 对象');
     const options = {
@@ -28,6 +59,8 @@ function validateConfig(config) {
         endianness: [['little', 'big'], '字节序'],
         plotViewMode: [['time', 'frequency'], '绘图模式'],
         plotYScaleMode: [['auto', 'manual'], 'Y 轴策略'],
+        plotYScaleModeTime: [['auto', 'manual'], '时域 Y 轴策略'],
+        plotYScaleModeFreq: [['auto', 'manual'], '频域 Y 轴策略'],
         plotTimeXUnit: [['samples', 's'], '时域横轴单位'],
         plotFreqXUnit: [['bins', 'hz'], '频域横轴单位'],
         plotFreqXScale: [['linear', 'log'], '频域横轴形式'],
@@ -73,14 +106,20 @@ function validateConfig(config) {
         if (config[key] !== undefined && config[key] !== '' && !Number.isFinite(Number(config[key])))
             throw new Error(`${key} 必须是有效数值`);
     }
-    if (config.plotViewMode === 'frequency' && config.plotFreqYScale === 'log' &&
-        config.plotYScaleMode === 'manual' &&
-        (!(Number(config.plotYMinFreq) > 0) ||
-            !(Number(config.plotYMaxFreq) > Number(config.plotYMinFreq))))
-        throw new Error('对数纵轴的自定义范围必须为正，且最大值大于最小值');
+    const yConfig = normalizeYConfig(config);
+    for (const [mode, strategy, min, max] of [
+        ['时域', yConfig.plotYScaleModeTime, yConfig.plotYMinTime, yConfig.plotYMaxTime],
+        ['频域', yConfig.plotYScaleModeFreq, yConfig.plotYMinFreq, yConfig.plotYMaxFreq]
+    ]) {
+        if (strategy !== 'manual') continue;
+        const error = yRangeError(min, max, mode === '频域' && config.plotFreqYScale === 'log');
+        if (error) throw new Error(`${mode}：${error}`);
+    }
     return config;
 }
 
-if (typeof module !== 'undefined') module.exports = { parseIntInRange, parsePort, validateConfig };
+if (typeof module !== 'undefined') module.exports = {
+    parseIntInRange, parsePort, validateConfig, yRangeError, normalizeYConfig
+};
 globalThis.SerialPlotter ??= {};
-Object.assign(globalThis.SerialPlotter, { parseIntInRange, parsePort, validateConfig });
+Object.assign(globalThis.SerialPlotter, { parseIntInRange, parsePort, validateConfig, yRangeError, normalizeYConfig });

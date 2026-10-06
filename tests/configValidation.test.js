@@ -44,6 +44,20 @@ test('validates FFT window and finite optional channel calibration', () => {
     ]) assert.throws(() => validateConfig({ channels: [channel] }), /通道配置/);
 });
 
+test('validates independent manual Y ranges even when the other plot is displayed', () => {
+    assert.equal(validateConfig({ plotViewMode: 'time', plotYScaleModeTime: 'auto',
+        plotYScaleModeFreq: 'manual', plotFreqYScale: 'log',
+        plotYMinFreq: '0.01', plotYMaxFreq: '2' }).plotYScaleModeFreq, 'manual');
+    assert.throws(() => validateConfig({ plotYScaleModeTime: 'other' }), /时域 Y/);
+    assert.throws(() => validateConfig({ plotYScaleModeFreq: 'other' }), /频域 Y/);
+    assert.throws(() => validateConfig({ plotViewMode: 'time', plotYScaleModeFreq: 'manual',
+        plotFreqYScale: 'log', plotYMinFreq: '0', plotYMaxFreq: '2' }), /正数/);
+    assert.throws(() => validateConfig({ plotYScaleModeTime: 'manual',
+        plotYMinTime: '3', plotYMaxTime: '2' }), /大于/);
+    assert.throws(() => validateConfig({ plotYScaleModeFreq: 'manual',
+        plotYMinFreq: '', plotYMaxFreq: '2' }), /有限数值/);
+});
+
 test('plot window points are bounded by the canvas limit and retained capacity', () => {
     assert.equal(validateConfig({ maxPoints: '100000', plotWindowPoints: '65536' }).plotWindowPoints,
         '65536');

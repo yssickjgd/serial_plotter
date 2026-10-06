@@ -25,7 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser,
         MonitorView, MonitorSearch, SendController, ConfigStore, exportFrameCsv, writeFrameCsv,
         collectConfigFromView, applyConfigToView, updatePlotOptionVisibility,
-        parseIntInRange, parsePort, validateConfig } = globalThis.SerialPlotter;
+        parseIntInRange, parsePort, validateConfig, yRangeError, normalizeYConfig } = globalThis.SerialPlotter;
 
     /* ─────────────────────────────────────────────────────────
      *  1. 工具函数（纯函数，无副作用）
@@ -113,6 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const wrapPlotYBounds = document.getElementById('wrap-plot-y-bounds');
     const plotYMin = document.getElementById('plot-y-min');
     const plotYMax = document.getElementById('plot-y-max');
+    const plotYRangeStatus = document.getElementById('plot-y-range-status');
     const plotChannelStats = document.getElementById('plot-channel-stats');
     const plotInfoRow = document.getElementById('plot-info-row');
     const plotFpsLabel = document.getElementById('stat-plot-fps');
@@ -135,8 +136,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 时域/频域独立的 Y 轴范围（字符串值，与 UI 输入框同步）
     let plotYBounds = {
-        time:      { min: '-1', max: '1' },
-        frequency: { min: '-1', max: '1' }
+        time:      { min: '-1', max: '1', scaleMode: 'auto' },
+        frequency: { min: '0.001', max: '1', scaleMode: 'auto' }
     };
 
     // —— 工具栏 ——
@@ -919,10 +920,21 @@ document.addEventListener('DOMContentLoaded', () => {
      * ───────────────────────────────────────────────────────── */
 
     /** 将绘图显示选项同步给 plotter（时域/频域、Y 轴策略、Y 轴范围等） */
-    const syncPlotDisplaySettings = () => {
+    const syncPlotDisplaySettings = ({ resetYZoom = false } = {}) => {
+        const errors = {};
+        for (const mode of ['time', 'frequency']) {
+            const bounds = plotYBounds[mode];
+            errors[mode] = bounds.scaleMode === 'manual'
+                ? yRangeError(bounds.min, bounds.max, mode === 'frequency' && plotFreqYScale.value === 'log') : '';
+        }
+        const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+        plotYRangeStatus.textContent = errors[mode] ? `${errors[mode]}，当前范围未应用，暂用自动范围。` : '';
+        plotYRangeStatus.hidden = !errors[mode];
         plotter.setDisplayOptions({
             displayMode: plotViewMode.value,
-            yScaleMode: plotYScaleMode.value,
+            yScaleModeTime: errors.time ? 'auto' : plotYBounds.time.scaleMode,
+            yScaleModeFreq: errors.frequency ? 'auto' : plotYBounds.frequency.scaleMode,
+            resetYZoom,
             timeXUnit: plotTimeXUnit.value,
             freqXUnit: plotFreqXUnit.value,
             freqXScale: plotFreqXScale.value,
@@ -1080,6 +1092,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
         plotYMin.value = plotYBounds[mode].min;
         plotYMax.value = plotYBounds[mode].max;
+        plotYScaleMode.value = plotYBounds[mode].scaleMode;
         syncPlotDisplaySettings(); saveConfig();
         updatePlotOptionVisibility(configElements);
         syncPlotChoices();
@@ -1090,7 +1103,11 @@ document.addEventListener('DOMContentLoaded', () => {
         plotFreqXUnit, plotFreqXScale, plotFreqYScale, plotFftWindow]
         .filter(Boolean)
         .forEach(el => el.addEventListener('change', () => {
-            syncPlotDisplaySettings();
+            if (el === plotYScaleMode) {
+                const mode = plotViewMode.value === 'frequency' ? 'frequency' : 'time';
+                plotYBounds[mode].scaleMode = plotYScaleMode.value;
+            }
+            syncPlotDisplaySettings({ resetYZoom: el === plotYScaleMode });
             updatePlotOptionVisibility(configElements);
             syncPlotChoices();
             saveConfig();
@@ -1099,7 +1116,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Y 轴范围变化时更新当前模式的 bounds 再同步
     [plotYMin, plotYMax]
         .filter(Boolean)
-        .forEach(el => el.addEventListener('change', () => { updateYBounds(); syncPlotDisplaySettings(); saveConfig(); }));
+        .forEach(el => el.addEventListener('change', () => {
+            updateYBounds(); syncPlotDisplaySettings({ resetYZoom: true }); saveConfig();
+        }));
 
     // 全部打开 / 全部关闭
     channelsAllOnBtn.addEventListener('click', () => {
@@ -1153,7 +1172,9 @@ document.addEventListener('DOMContentLoaded', () => {
     /** 将配置对象应用到 UI，并同步到 parser / plotter */
     const applyConfig = (cfg) => {
         if (!cfg) return;
-        validateConfig({ ...getConfig(), ...cfg });
+        const candidate = { ...getConfig(), ...cfg };
+        Object.assign(candidate, normalizeYConfig(cfg, candidate));
+        validateConfig(candidate);
         applyConfigToView(cfg, {
             elements: configElements, bounds: plotYBounds, updateConnectionModeUI,
             updateFrameFormat: () => {

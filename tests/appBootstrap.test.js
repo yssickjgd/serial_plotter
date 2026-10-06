@@ -75,6 +75,7 @@ function bootWithConfig(original, fixedDate) {
     let now = 0;
     const intervals = [];
     const timeouts = [];
+    const alerts = [];
     const resizeObservers = [];
     class ResizeObserverForTest {
         constructor(callback) { this.callback = callback; this.elements = []; resizeObservers.push(this); }
@@ -93,7 +94,11 @@ function bootWithConfig(original, fixedDate) {
         setInterval(callback) { intervals.push(callback); }, clearInterval() {},
         setTimeout(callback) { timeouts.push(callback); }, clearTimeout() {},
         requestAnimationFrame() {}, ResizeObserver: ResizeObserverForTest,
-        console: { ...console, warn() {} }
+        console: { ...console, warn() {} },
+        alert(message) { alerts.push(message); },
+        FileReader: class {
+            readAsText(file) { this.onload({ target: { result: file.text } }); }
+        }
     });
     for (const file of scripts) {
         vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
@@ -129,7 +134,7 @@ function bootWithConfig(original, fixedDate) {
                 if (observer.elements.includes(element)) observer.callback();
             }
         },
-        fireCanvas, plotter, parser, monitor };
+        fireCanvas, plotter, parser, monitor, alerts };
 }
 
 test('page bootstrap restores saved config without overwriting it', () => {
@@ -209,6 +214,105 @@ test('axis controls switch with view mode and persist their selected scales', ()
     assert.equal(saved.plotFreqXUnit, 'bins');
     assert.equal(saved.plotFreqXScale, 'log');
     assert.equal(saved.plotFreqYScale, 'log');
+});
+
+test('time and frequency Y strategies and bounds remain independent across mode switches', () => {
+    const { getElement, getStored, plotter } = bootWithConfig(null);
+    const strategy = getElement('plot-y-scale-mode');
+    strategy.value = 'manual';
+    strategy.listeners.change();
+    getElement('plot-y-min').value = '-5';
+    getElement('plot-y-max').value = '5';
+    getElement('plot-y-max').listeners.change();
+    const view = getElement('plot-view-mode');
+    view.value = 'frequency';
+    view.listeners.change();
+    assert.equal(strategy.value, 'auto');
+    assert.equal(plotter.yScaleMode, 'auto');
+    strategy.value = 'manual';
+    strategy.listeners.change();
+    getElement('plot-y-min').value = '0.01';
+    getElement('plot-y-max').value = '2';
+    getElement('plot-y-max').listeners.change();
+    view.value = 'time';
+    view.listeners.change();
+    assert.equal(strategy.value, 'manual');
+    assert.equal(getElement('plot-y-min').value, '-5');
+    assert.equal(getElement('plot-y-max').value, '5');
+    strategy.value = 'auto';
+    strategy.listeners.change();
+    view.value = 'frequency';
+    view.listeners.change();
+    assert.equal(strategy.value, 'manual');
+    assert.equal(getElement('plot-y-min').value, '0.01');
+    assert.equal(getElement('plot-y-max').value, '2');
+    const saved = JSON.parse(getStored());
+    assert.equal(saved.plotYScaleModeTime, 'auto');
+    assert.equal(saved.plotYScaleModeFreq, 'manual');
+});
+
+test('invalid logarithmic Y bounds show an actionable message and valid bounds apply', () => {
+    const { getElement, parser, plotter } = bootWithConfig(null);
+    plotter.setChannelVisible(0, true);
+    for (let i = 0; i < 32; i++) parser.onFrameParsed([Math.sin(i)], `t${i}`, Uint8Array.of(i), i);
+    getElement('btn-pause').listeners.click();
+    getElement('plot-view-mode').value = 'frequency';
+    getElement('plot-view-mode').listeners.change();
+    getElement('plot-freq-y-scale').value = 'log';
+    getElement('plot-freq-y-scale').listeners.change();
+    getElement('plot-y-scale-mode').value = 'manual';
+    getElement('plot-y-scale-mode').listeners.change();
+    getElement('plot-y-min').value = '0';
+    getElement('plot-y-min').listeners.change();
+    assert.match(getElement('plot-y-range-status').textContent, /正/);
+    getElement('plot-y-min').value = '0.001';
+    getElement('plot-y-max').value = '3';
+    getElement('plot-y-max').listeners.change();
+    assert.equal(getElement('plot-y-range-status').textContent, '');
+    assert.equal(plotter._drawState.min, 0.001);
+    assert.equal(plotter._drawState.max, 3);
+});
+
+test('restoring a configuration preserves distinct Y strategies and the legacy fallback', () => {
+    const { getElement, plotter } = bootWithConfig(JSON.stringify({ plotViewMode: 'frequency',
+        plotYScaleMode: 'manual', plotYScaleModeTime: 'auto', plotYScaleModeFreq: 'manual',
+        plotYMinTime: '-5', plotYMaxTime: '5', plotYMinFreq: '0.01', plotYMaxFreq: '2' }));
+    assert.equal(plotter.yScaleMode, 'manual');
+    getElement('plot-view-mode').value = 'time';
+    getElement('plot-view-mode').listeners.change();
+    assert.equal(plotter.yScaleMode, 'auto');
+    const legacy = bootWithConfig(JSON.stringify({ plotYScaleMode: 'manual',
+        plotYMinTime: '-2', plotYMaxTime: '2', plotYMinFreq: '0', plotYMaxFreq: '10' }));
+    legacy.getElement('plot-view-mode').value = 'frequency';
+    legacy.getElement('plot-view-mode').listeners.change();
+    assert.equal(legacy.plotter.yScaleMode, 'manual');
+});
+
+test('legacy shared manual Y settings do not discard a valid hidden-log configuration', () => {
+    const { getElement, plotter } = bootWithConfig(JSON.stringify({ connType: 'udp', channelsCount: '3',
+        plotViewMode: 'time', plotYScaleMode: 'manual', plotFreqYScale: 'log',
+        plotYMinTime: '-2', plotYMaxTime: '2', plotYMinFreq: '-1', plotYMaxFreq: '1' }));
+    assert.equal(getElement('conn-type').value, 'udp');
+    assert.equal(getElement('channels-count').value, '3');
+    assert.equal(plotter.yScaleMode, 'manual');
+    getElement('plot-view-mode').value = 'frequency';
+    getElement('plot-view-mode').listeners.change();
+    assert.equal(plotter.yScaleMode, 'auto');
+});
+
+test('imported legacy Y bounds override invalid unsaved range fields', () => {
+    const { getElement, plotter, alerts } = bootWithConfig(null);
+    getElement('plot-y-scale-mode').value = 'manual';
+    getElement('plot-y-scale-mode').listeners.change();
+    getElement('plot-y-min').value = '3';
+    getElement('plot-y-max').value = '2';
+    getElement('plot-y-max').listeners.change();
+    const target = { files: [{ text: JSON.stringify({ plotYScaleMode: 'manual',
+        plotYMin: '-5', plotYMax: '5' }) }], value: 'legacy.json' };
+    getElement('cfg-file-input').listeners.change({ target });
+    assert.deepEqual(alerts, []);
+    assert.equal(getElement('plot-y-min').value, '-5');
+    assert.equal(plotter.yBounds.time.max, 5);
 });
 
 test('radio choices persist and dependent controls follow their parent selection', () => {

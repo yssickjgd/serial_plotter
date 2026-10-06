@@ -30,7 +30,7 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     });
     assert.equal(elements.connType.value, 'udp');
     assert.equal(elements.channelsCount.value, '23');
-    assert.deepEqual(bounds.time, { min: '-5', max: '5' });
+    assert.deepEqual(bounds.time, { min: '-5', max: '5', scaleMode: 'auto' });
     assert.deepEqual(calls, ['mode', 'format', 'channels', 'plot']);
     assert.equal(elements.wrapPlotTimeAxis.style.display, '');
     assert.equal(elements.wrapPlotFreqAxis.style.display, 'none');
