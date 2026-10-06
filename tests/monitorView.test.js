@@ -42,6 +42,7 @@ test('virtual monitor follows the newest row while mounting only visible rows', 
         container.scrollTop = 0;
         listeners.scroll();
         assert.match(view.spacer.children[0].children[0].textContent, /t0/);
+        assert.equal(view.currentFrameIndex(), 5, 'center of the visible 10 rows');
     } finally {
         global.document = oldDocument;
     }
@@ -77,6 +78,9 @@ test('large live monitor fills the log above the newest row', () => {
         view.jumpToFrame(0);
         assert.ok(Math.abs(parseInt(view.spacer.children[0].style.top, 10) -
             container.scrollTop - container.clientHeight / 2) <= view.rowHeight);
+        assert.equal(view.currentFrameIndex(), 0);
+        view.jumpToFrame(1500);
+        assert.equal(view.currentFrameIndex(), 1500);
     } finally { global.document = oldDocument; }
 });
 
@@ -143,9 +147,39 @@ test('long Hex records wrap into variable-height rows aligned after the timestam
         assert.equal(first.style.height, '80px');
         assert.equal(second.style.top, '80px');
         assert.equal(view.spacer.style.height, '100px');
+        assert.equal(view.currentFrameIndex(), 1, 'follow mode uses latest even with a long row');
+        view.followTail = false;
+        assert.equal(view.currentFrameIndex(), 0, 'viewport midpoint is inside the wrapped first row');
     } finally {
         global.document = oldDocument;
     }
+});
+
+test('log midpoint inside a TX or error record chooses the closest sample row', () => {
+    const oldDocument = global.document;
+    global.document = {
+        createElement: () => ({ style: {}, children: [],
+            append(...children) { this.children.push(...children); },
+            replaceChildren(...children) { this.children = children.flatMap(child => child.children || [child]); } }),
+        createDocumentFragment: () => ({ children: [], appendChild(child) { this.children.push(child); } })
+    };
+    try {
+        const frames = new FrameBuffer(1, 10);
+        frames.append([1], Uint8Array.of(1), 't', 1);
+        frames.append([2], Uint8Array.of(2), 'u', 3);
+        const container = { clientWidth: 120, clientHeight: 80, scrollTop: 0, children: [],
+            replaceChildren(child) { this.children = [child]; }, addEventListener() {},
+            get scrollHeight() { return Math.max(80, parseInt(this.children[0]?.style.height || '0', 10)); } };
+        const view = new MonitorView(container, frames);
+        view.followTail = false;
+        view.appendExtra({ order: 2, kind: 'tx', bytes: Uint8Array.of(5, 6, 7, 8), time: 'x' });
+        clearTimeout(view.pending);
+        assert.equal(view.currentFrameIndex(), 0);
+        container.scrollTop = 20;
+        assert.equal(view.currentFrameIndex(), 1);
+        frames.clear();
+        assert.equal(view.currentFrameIndex(), -1);
+    } finally { global.document = oldDocument; }
 });
 
 test('scrolling slightly upward from the bottom disables tail following until returning to bottom', () => {

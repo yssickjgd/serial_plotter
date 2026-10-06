@@ -74,6 +74,7 @@ function bootWithConfig(original, fixedDate) {
     let writes = 0;
     let now = 0;
     const intervals = [];
+    const timeouts = [];
     const resizeObservers = [];
     class ResizeObserverForTest {
         constructor(callback) { this.callback = callback; this.elements = []; resizeObservers.push(this); }
@@ -90,7 +91,7 @@ function bootWithConfig(original, fixedDate) {
         document, window: { addEventListener() {} }, localStorage, navigator: {},
         performance: { now: () => now }, TextEncoder, TextDecoder, Event, Date: DateForTest,
         setInterval(callback) { intervals.push(callback); }, clearInterval() {},
-        setTimeout() {}, clearTimeout() {},
+        setTimeout(callback) { timeouts.push(callback); }, clearTimeout() {},
         requestAnimationFrame() {}, ResizeObserver: ResizeObserverForTest,
         console: { ...console, warn() {} }
     });
@@ -117,6 +118,10 @@ function bootWithConfig(original, fixedDate) {
     });
     return { getElement, getStored: () => stored, getWrites: () => writes,
         getChoiceGroup: id => choiceGroups.get(id),
+        flushTimeouts() {
+            for (let count = 0; timeouts.length && count < 1000; count++) timeouts.shift()();
+            assert.equal(timeouts.length, 0);
+        },
         tick(ms = 1000) { now += ms; intervals.forEach(callback => callback()); },
         notifyResize(id) {
             const element = getElement(id);
@@ -400,7 +405,7 @@ test('time jumps, waveform visibility, and decoded-value search are wired to the
     getElement('monitor-display-mode-number').listeners.change();
     getElement('monitor-search-query').value = '2';
     getElement('monitor-search-tolerance').value = '0';
-    getElement('monitor-search-nearest-byte').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 1);
     assert.equal(monitor.mode, 'number');
     assert.equal(monitor.anchor.order, 3);
@@ -445,8 +450,8 @@ test('time tools default to local milliseconds and are available only while paus
     assert.equal(getElement('nav-jump-button').disabled, true);
     assert.equal(getElement('monitor-search-prev').disabled, true);
     assert.equal(getElement('monitor-search-next').disabled, true);
-    assert.equal(getElement('monitor-search-nearest-wave').disabled, true);
-    assert.equal(getElement('monitor-search-nearest-byte').disabled, true);
+    assert.equal(getElement('monitor-search-origin-wave').disabled, true);
+    assert.equal(getElement('monitor-search-nearest').disabled, true);
     getElement('nav-jump-relative').value = '0';
     getElement('nav-jump-mode').value = 'relative';
     getElement('nav-jump-button').listeners.click();
@@ -461,14 +466,14 @@ test('time tools default to local milliseconds and are available only while paus
     assert.equal(new Date(value).getMilliseconds(), timestamp % 1000);
     assert.equal(getElement('monitor-search-prev').disabled, false);
     assert.equal(getElement('monitor-search-next').disabled, false);
-    assert.equal(getElement('monitor-search-nearest-wave').disabled, false);
-    assert.equal(getElement('monitor-search-nearest-byte').disabled, false);
+    assert.equal(getElement('monitor-search-origin-wave').disabled, false);
+    assert.equal(getElement('monitor-search-nearest').disabled, false);
     getElement('btn-pause').listeners.click();
     assert.equal(getElement('nav-jump-button').disabled, true);
     assert.equal(getElement('monitor-search-prev').disabled, true);
     assert.equal(getElement('monitor-search-next').disabled, true);
-    assert.equal(getElement('monitor-search-nearest-wave').disabled, true);
-    assert.equal(getElement('monitor-search-nearest-byte').disabled, true);
+    assert.equal(getElement('monitor-search-origin-wave').disabled, true);
+    assert.equal(getElement('monitor-search-nearest').disabled, true);
 });
 
 test('pausing defaults the shared time locator to the latest retained frame timestamp', () => {
@@ -531,7 +536,7 @@ test('numeric search supports selecting multiple channels without searching the 
     third.checked = true;
     third.listeners.change();
     getElement('monitor-search-query').value = '1';
-    getElement('monitor-search-nearest-byte').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.deepEqual(Array.from(monitor.matches, match => [match.startFrame, match.channel]),
         [[0, 0], [0, 2], [1, 2]]);
     assert.equal(getElement('monitor-search-channel-toggle').textContent, 'CH1、CH3');
@@ -539,7 +544,7 @@ test('numeric search supports selecting multiple channels without searching the 
     const second = picker.children[2].children[0];
     second.checked = true;
     second.listeners.change();
-    getElement('monitor-search-nearest-byte').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.deepEqual(Array.from(monitor.matches, match => [match.startFrame, match.channel]),
         [[0, 0], [0, 1], [0, 2], [1, 1], [1, 2]],
         'changing the checkbox selection must rescan rather than reuse cached matches');
@@ -556,7 +561,7 @@ test('switching receive display format clears prior matches and changes search p
     numeric.checked = true;
     numeric.listeners.change();
     getElement('monitor-search-query').value = '2';
-    getElement('monitor-search-nearest-byte').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 1);
 
     const ascii = getElement('monitor-display-mode-ascii');
@@ -565,12 +570,12 @@ test('switching receive display format clears prior matches and changes search p
     assert.equal(monitor.matches.length, 0);
     assert.equal(getElement('monitor-search-status').textContent, '');
     getElement('monitor-search-query').value = 'A';
-    getElement('monitor-search-nearest-byte').listeners.click();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 1);
     assert.equal(monitor.mode, 'ascii');
 });
 
-test('wave and byte nearest buttons use their own current positions', () => {
+test('nearest origin selects the wave center or byte center and reuses the matches', () => {
     const { getElement, parser, plotter, monitor } = bootWithConfig(null);
     for (let index = 0; index < 10; index++)
         parser.onFrameParsed([index === 1 || index === 7 ? 42 : index], `t${index}`,
@@ -582,66 +587,215 @@ test('wave and byte nearest buttons use their own current positions', () => {
     getElement('monitor-search-query').value = '42';
     plotter.vp.time.displayCount = 4;
     plotter.vp.time.scrollOffset = 3; // visible frame indexes 3..6, centered near order 6
+    plotter.vp.time.autoFollow = false;
     monitor.cursorOrder = 2;
-
-    getElement('monitor-search-nearest-wave').listeners.click();
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startOrder, 8);
     assert.equal(plotter._timeCenterOrder, 8);
     const cachedMatches = monitor.matches;
 
-    monitor.cursorOrder = 2;
-    getElement('monitor-search-nearest-byte').listeners.click();
+    monitor.jumpToFrame(1);
+    const byteOrigin = getElement('monitor-search-origin-byte');
+    byteOrigin.checked = true;
+    byteOrigin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches, cachedMatches);
     assert.equal(monitor.matches[monitor.currentMatch].startOrder, 2);
     assert.equal(plotter._timeCenterOrder, 2);
 });
 
-test('direction buttons search from the latest frame and cycle through cached results', () => {
+test('first previous skips the nearest result then uses the normal direction and cache', () => {
     const { getElement, parser, monitor, plotter } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
         parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     getElement('monitor-search-query').value = '41';
     getElement('monitor-search-prev').listeners.click();
-    assert.equal(monitor.anchor.order, 3);
-    assert.equal(plotter._timeCenterOrder, 3);
-    assert.equal(monitor.currentMatch, 1);
+    assert.equal(monitor.anchor.order, 1);
+    assert.equal(plotter._timeCenterOrder, 1);
+    assert.equal(monitor.currentMatch, 0);
     const cachedMatches = monitor.matches;
     getElement('monitor-search-next').listeners.click();
-    assert.equal(monitor.anchor.order, 1);
-    assert.equal(monitor.currentMatch, 0);
+    assert.equal(monitor.anchor.order, 3);
+    assert.equal(monitor.currentMatch, 1);
     assert.equal(monitor.matches, cachedMatches);
     getElement('monitor-search-prev').listeners.click();
-    assert.equal(monitor.anchor.order, 3);
+    assert.equal(monitor.anchor.order, 1);
     getElement('monitor-search-query').value = '42';
     getElement('monitor-search-next').listeners.click();
-    assert.equal(monitor.anchor.order, 2);
-    assert.equal(monitor.currentMatch, 0);
+    assert.equal(monitor.anchor.order, 4);
+    assert.equal(monitor.currentMatch, 1);
 });
 
-test('first directional search uses the selected byte-row cursor', () => {
+test('first next uses the window center rather than a clicked byte-row cursor', () => {
     const { getElement, parser, monitor } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
         parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     monitor.cursorOrder = 2;
+    monitor.jumpToFrame(0);
     getElement('monitor-search-query').value = '41';
     getElement('monitor-search-next').listeners.click();
     assert.equal(monitor.anchor.order, 3);
     assert.equal(monitor.currentMatch, 1);
 });
 
-test('clicking another byte row redirects the next search action from that cursor', () => {
+test('moving the window or clicking a row preserves the selected search result', () => {
     const { getElement, parser, monitor } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42, 0x41].entries())
         parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     getElement('monitor-search-query').value = '41';
     getElement('monitor-search-next').listeners.click();
-    assert.equal(monitor.anchor.order, 1);
-    monitor.cursorOrder = 4;
-    getElement('monitor-search-prev').listeners.click();
     assert.equal(monitor.anchor.order, 3);
+    monitor.cursorOrder = 4;
+    monitor.jumpToFrame(3);
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.anchor.order, 1);
+});
+
+function numericSearchFixture(matchingFrames, count = 310, config = null) {
+    const fixture = bootWithConfig(config);
+    const { parser, getElement } = fixture;
+    for (let index = 0; index < count; index++)
+        parser.onFrameParsed([matchingFrames.includes(index + 1) ? 42 : 0], `t${index}`,
+            Uint8Array.of(index & 255), 1000 + index);
+    getElement('btn-pause').listeners.click();
+    const numeric = getElement('monitor-display-mode-number');
+    numeric.checked = true;
+    numeric.listeners.change();
+    getElement('monitor-search-query').value = '42';
+    return fixture;
+}
+
+test('first direction is reversed only before a result is selected', () => {
+    for (const [action, firstFrame, secondFrame] of [['prev', 300, 200], ['next', 100, 200],
+        ['nearest', 200, 200]]) {
+        const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
+        plotter.jumpToFrame(209);
+        const origin = getElement('monitor-search-origin-wave');
+        origin.checked = true;
+        origin.listeners.change();
+        getElement(`monitor-search-${action}`).listeners.click();
+        assert.equal(monitor.matches[monitor.currentMatch].startFrame + 1, firstFrame);
+        getElement(`monitor-search-${action}`).listeners.click();
+        assert.equal(monitor.matches[monitor.currentMatch].startFrame + 1, secondFrame);
+    }
+});
+
+test('nearest uses the latest frame by default and the time viewport in frequency mode', () => {
+    const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
+    assert.equal(getElement('monitor-search-origin-byte').checked, true);
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 299);
+    plotter.jumpToFrame(109);
+    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 99);
+});
+
+test('nearest resolves an equal distance toward the earlier frame', () => {
+    const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
+    plotter.jumpToFrame(249);
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 199);
+});
+
+test('an even-sized time window chooses the earlier result at its midpoint', () => {
+    const { getElement, plotter, monitor } = numericSearchFixture([4, 7], 10);
+    plotter.vp.time.displayCount = 4;
+    plotter.vp.time.scrollOffset = 3;
+    plotter.vp.time.autoFollow = false;
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 3);
+});
+
+test('selected results cycle normally across both ends and survive changing the origin', () => {
+    const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
+    getElement('monitor-search-nearest').listeners.click();
+    const matches = monitor.matches;
+    plotter.jumpToFrame(99);
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 99);
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 299);
+    assert.equal(monitor.matches, matches);
+});
+
+test('single-result and empty searches handle all three operations', () => {
+    for (const action of ['nearest', 'prev', 'next']) {
+        const single = numericSearchFixture([100]);
+        single.getElement(`monitor-search-${action}`).listeners.click();
+        assert.equal(single.monitor.currentMatch, 0);
+        single.getElement(`monitor-search-${action}`).listeners.click();
+        assert.equal(single.monitor.currentMatch, 0);
+        const empty = numericSearchFixture([]);
+        empty.getElement(`monitor-search-${action}`).listeners.click();
+        assert.equal(empty.monitor.currentMatch, -1);
+        assert.equal(empty.getElement('monitor-search-status').textContent, '无匹配结果');
+    }
+});
+
+test('nearest preserves same-frame result order and selects its first channel', () => {
+    const { getElement, parser, plotter, monitor } = bootWithConfig(JSON.stringify({ channelsCount: '2' }));
+    for (let index = 0; index < 3; index++)
+        parser.onFrameParsed([index === 1 ? 42 : 0, index === 1 ? 42 : 0], `t${index}`,
+            Uint8Array.of(index), 1000 + index);
+    getElement('btn-pause').listeners.click();
+    getElement('monitor-display-mode-number').checked = true;
+    getElement('monitor-display-mode-number').listeners.change();
+    getElement('monitor-search-query').value = '42';
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.currentMatch, 0);
+    assert.equal(monitor.matches[0].channel, 0);
+    getElement('monitor-search-next').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].channel, 1);
+    getElement('nav-jump-relative').value = '0';
+    getElement('nav-jump-mode').value = 'relative';
+    getElement('nav-jump-button').listeners.click();
+    getElement('monitor-search-prev').listeners.click();
+    assert.equal(monitor.matches[monitor.currentMatch].channel, 0);
+    assert.equal(plotter.navigationMarkers.currentMatch, 0);
+});
+
+test('search input changes clear the selected result immediately', () => {
+    const { getElement, monitor, plotter } = numericSearchFixture([100, 200, 300]);
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.currentMatch, 2);
+    getElement('monitor-search-query').value = '0';
+    getElement('monitor-search-query').listeners.input();
+    assert.equal(monitor.currentMatch, -1);
+    assert.equal(monitor.matches.length, 0);
+    assert.equal(plotter.navigationMarkers.currentMatch, -1);
+});
+
+test('asynchronous search uses the position captured when the button was clicked', () => {
+    const { getElement, plotter, monitor, flushTimeouts } = numericSearchFixture([100, 4900],
+        5000, JSON.stringify({ maxPoints: '6000', plotWindowPoints: '100' }));
+    plotter.jumpToFrame(109);
+    const origin = getElement('monitor-search-origin-wave');
+    origin.checked = true;
+    origin.listeners.change();
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 0);
+    plotter.jumpToFrame(4899);
+    flushTimeouts();
+    assert.equal(monitor.matches[monitor.currentMatch].startFrame, 99);
 });
 
 test('numeric tolerance shows a hint while its default remains empty', () => {

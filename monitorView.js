@@ -88,6 +88,7 @@ class MonitorView {
         this.anchor = null;
         this.lastRows = [];
         this.lastOffsets = [0];
+        this.rowPositions = [];
         this.mode = 'hex';
         this.matches = [];
         this.currentMatch = -1;
@@ -142,6 +143,25 @@ class MonitorView {
     }
 
     appendFrame() { this.schedule(); }
+
+    /** Search from the latest frame or the sample nearest the visible log midpoint. */
+    currentFrameIndex() {
+        if (!this.frames.length) return -1;
+        if (this.followTail) return this.frames.length - 1;
+        this.render();
+        const css = typeof getComputedStyle === 'function' ? getComputedStyle(this.container) : null;
+        const padding = css ? (parseFloat(css.paddingTop) || 0) +
+            (parseFloat(css.paddingBottom) || 0) : 0;
+        const center = this.container.scrollTop + (this.container.clientHeight - padding) / 2;
+        let nearest = -1, distance = Infinity;
+        for (const row of this.rowPositions) {
+            if (row.frameIndex === undefined) continue;
+            if (center >= row.top && center < row.top + row.height) return row.frameIndex;
+            const difference = Math.max(row.top - center, center - row.top - row.height, 0);
+            if (difference < distance) { nearest = row.frameIndex; distance = difference; }
+        }
+        return nearest;
+    }
 
     _setScrollTop(value) {
         this._settingScroll = true;
@@ -253,6 +273,8 @@ class MonitorView {
         }
         this.lastRows = rows;
         this.lastOffsets = offsets;
+        this.rowPositions = rows.map((row, index) => ({ frameIndex: row.frameIndex,
+            top: offsets[index], height: layouts[index].lineCount * this.rowHeight }));
         const first = rows.length ? Math.max(0, firstRowAt(offsets, this.container.scrollTop) - 3) : 0;
         const bottom = this.container.scrollTop + this.container.clientHeight;
         const fragment = document.createDocumentFragment();
@@ -385,8 +407,10 @@ class MonitorView {
         if (!this.followTail && !this.anchor?.center && first === 0)
             top = Math.min(top, container.scrollTop);
         const fragment = document.createDocumentFragment();
+        this.rowPositions = [];
         for (let i = 0; i < rows.length; i++) {
             const height = layouts[i].lineCount * this.rowHeight;
+            this.rowPositions.push({ frameIndex: rows[i].frameIndex, top, height });
             if (top < container.scrollTop + contentHeight && top + height > container.scrollTop)
                 fragment.appendChild(this._makeRow(rows[i], layouts[i], top));
             top += height;

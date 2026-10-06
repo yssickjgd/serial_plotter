@@ -41,7 +41,7 @@ function createPlotter(canvasScale = 1) {
     const plotter = new Plotter('waveform-canvas', new FrameBuffer(1, 1000));
     plotter.setChannelCount(1);
     plotter.setChannelVisible(0, true);
-    for (let i = 0; i <= 100; i++) plotter.addFrame([i]);
+    for (let i = 0; i <= 100; i++) plotter.addFrame([i], Uint8Array.of(i), `t${i}`, i, i);
     plotter.draw();
     const fire = (name, x, y, extra = {}) => events.get(name)({
         button: 0, pointerId: 1,
@@ -53,6 +53,20 @@ function createPlotter(canvasScale = 1) {
     };
     return { plotter, fire, fireDocument, nodes, events, overlays };
 }
+
+test('wave search position follows latest data or the time window center even in frequency mode', () => {
+    const { plotter, fire } = createPlotter();
+    assert.equal(plotter.currentFrameIndex(), 100);
+    plotter.jumpToFrame(30);
+    assert.equal(plotter.currentFrameIndex(), 30);
+    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    assert.equal(plotter.currentFrameIndex(), 30);
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    fire('contextmenu', 100, 100);
+    assert.equal(plotter.currentFrameIndex(), 100);
+    plotter.frames.clear();
+    assert.equal(plotter.currentFrameIndex(), -1);
+});
 
 test('left-button rectangle zoom selects both sample and Y ranges', () => {
     const { plotter, fire, overlays } = createPlotter();

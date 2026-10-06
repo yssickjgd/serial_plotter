@@ -426,15 +426,18 @@ class Plotter {
         return true;
     }
 
-    /** Return the retained frame at the center of the current time viewport. */
+    /** Search reference index; an even-sized viewport can be centered between samples. */
+    currentFrameIndex() { return this.currentTimeFrameIndex(); }
+
     currentTimeFrameIndex() {
         if (!this.frames.length) return -1;
+        if (this.vp.time.autoFollow && this._timeCenterOrder === null) return this.frames.length - 1;
         if (this._timeCenterOrder !== null) {
             const centered = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
             if (this.frames.orderAt(centered) === this._timeCenterOrder) return centered;
         }
         const view = this.vp.time;
-        const center = Math.round(view.scrollOffset + (view.displayCount - 1) / 2);
+        const center = view.scrollOffset + (view.displayCount - 1) / 2;
         return Math.max(0, Math.min(this.frames.length - 1, center));
     }
 

@@ -162,6 +162,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const monitorSearchChannelToggle = document.getElementById('monitor-search-channel-toggle');
     const monitorSearchChannelOptions = document.getElementById('monitor-search-channel-options');
     const monitorSearchStatus = document.getElementById('monitor-search-status');
+    let searchOrigin = 'byte';
+    for (const origin of ['wave', 'byte']) {
+        const choice = document.getElementById(`monitor-search-origin-${origin}`);
+        choice.checked = origin === searchOrigin;
+        choice.addEventListener('change', () => {
+            if (!choice.checked) return;
+            searchOrigin = origin;
+            for (const value of ['wave', 'byte'])
+                document.getElementById(`monitor-search-origin-${value}`).checked = value === origin;
+        });
+    }
 
     const bindVisibleChoice = (fieldId, values) => {
         const field = document.getElementById(fieldId);
@@ -543,8 +554,8 @@ document.addEventListener('DOMContentLoaded', () => {
         'nav-jump-mode-absolute', 'nav-jump-mode-relative',
         'nav-jump-absolute', 'nav-jump-relative', 'nav-jump-button',
         'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel-toggle',
-        'monitor-search-prev', 'monitor-search-next',
-        'monitor-search-nearest-wave', 'monitor-search-nearest-byte'
+        'monitor-search-nearest', 'monitor-search-prev', 'monitor-search-next',
+        'monitor-search-origin-wave', 'monitor-search-origin-byte'
     ];
     const syncTimeTools = () => {
         for (const tools of toolPanels)
@@ -600,6 +611,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!selectedSearchChannels.size) selectedSearchChannels = null;
                 }
                 syncSearchChannelSelection();
+                invalidateSearch();
             });
             channelCheckboxes.push({ input, channel });
             monitorSearchChannelOptions.appendChild(label);
@@ -628,7 +640,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchKey = null;
     let searchReady = false;
     let pendingSearchAction = null;
-    let cursorOrderAtSelection = null;
     const syncSearchFields = () => {
         const numeric = monitorDisplayMode.value === 'number';
         monitorSearchTolerance.hidden = !numeric;
@@ -642,8 +653,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (numeric) populateSearchChannels();
         applyVerticalHeights();
     };
-    monitorDisplayMode.addEventListener('change', () => {
-        monitor.setMode(monitorDisplayMode.value);
+    const invalidateSearch = () => {
         searchGeneration++;
         searchSession = null;
         searchMatches = [];
@@ -651,11 +661,16 @@ document.addEventListener('DOMContentLoaded', () => {
         searchKey = null;
         searchReady = false;
         pendingSearchAction = null;
-        cursorOrderAtSelection = null;
         monitor.setSearchResults([]);
         plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
             matches: [], currentMatch: -1 });
         monitorSearchStatus.textContent = '';
+    };
+    for (const input of [monitorSearchQuery, monitorSearchTolerance])
+        input.addEventListener('input', invalidateSearch);
+    monitorDisplayMode.addEventListener('change', () => {
+        monitor.setMode(monitorDisplayMode.value);
+        invalidateSearch();
         syncSearchFields();
     });
     syncSearchFields();
@@ -673,49 +688,41 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         monitor.selectSearchMatch(selectedMatch);
-        cursorOrderAtSelection = monitor.cursorOrder;
         plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
             matches: searchMatches, currentMatch: selectedMatch }, false);
         focusFrameInBothMonitors(frame);
         monitorSearchStatus.textContent = `${selectedMatch + 1} / ${searchMatches.length}`;
     };
-    const searchInsertionIndex = (order, afterEqual = false) => {
+    const searchInsertionIndex = frame => {
         let low = 0, high = searchMatches.length;
         while (low < high) {
             const mid = Math.floor((low + high) / 2);
-            if (searchMatches[mid].startOrder < order ||
-                (afterEqual && searchMatches[mid].startOrder === order)) low = mid + 1;
+            if (searchMatches[mid].startFrame < frame) low = mid + 1;
             else high = mid;
         }
         return low;
     };
-    const navigateSearch = action => {
+    const nearestSearchIndex = frame => {
+        const next = searchInsertionIndex(frame);
+        let candidate = next;
+        if (next >= searchMatches.length) candidate = searchMatches.length - 1;
+        else if (next > 0 && frame - searchMatches[next - 1].startFrame <=
+            searchMatches[next].startFrame - frame) candidate = next - 1;
+        // Select the first result in a frame, including multiple channels or byte matches.
+        return searchInsertionIndex(searchMatches[candidate].startFrame);
+    };
+    const navigateSearch = ({ action, frame }) => {
         if (!searchMatches.length) {
             monitorSearchStatus.textContent = '无匹配结果';
             return;
         }
-        if (action === 'nearest-wave' || action === 'nearest-byte') {
-            const waveFrame = plotter.currentTimeFrameIndex();
-            const order = action === 'nearest-wave' && waveFrame >= 0
-                ? frames.orderAt(waveFrame)
-                : monitor.cursorOrder ?? monitor.anchor?.order ??
-                    frames.orderAt(frames.length - 1);
-            const next = searchInsertionIndex(order);
-            const index = next === 0 ? 0 : next >= searchMatches.length ? searchMatches.length - 1
-                : order - searchMatches[next - 1].startOrder <=
-                    searchMatches[next].startOrder - order ? next - 1 : next;
-            showSearchMatch(index);
-            return;
-        }
-        const useSelection = selectedMatch >= 0 && monitor.cursorOrder === cursorOrderAtSelection;
-        if (useSelection) {
+        if (action !== 'nearest' && selectedMatch >= 0) {
             showSearchMatch(selectedMatch + (action === 'next' ? 1 : -1));
             return;
         }
-        const order = monitor.cursorOrder ?? frames.orderAt(frames.length - 1);
-        const index = action === 'next' ? searchInsertionIndex(order, true)
-            : searchInsertionIndex(order) - 1;
-        showSearchMatch((index + searchMatches.length) % searchMatches.length);
+        const nearest = nearestSearchIndex(frame);
+        const offset = action === 'prev' ? 1 : action === 'next' ? -1 : 0;
+        showSearchMatch(nearest + offset);
     };
     const requestSearch = action => {
         if (!capturePaused) return;
@@ -724,20 +731,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 monitorSearchQuery.value, monitorSearchTolerance.value,
                 selectedChannelFilter());
             const key = JSON.stringify([monitorDisplayMode.value, monitorSearchQuery.value,
-                monitorSearchTolerance.value, selectedChannelFilter()]);
+                monitorSearchTolerance.value, selectedChannelFilter(), frames.version]);
+            const request = { action, frame: searchOrigin === 'wave'
+                ? plotter.currentFrameIndex() : monitor.currentFrameIndex() };
             if (key === searchKey) {
-                if (searchReady) navigateSearch(action);
-                else if (searchSession) pendingSearchAction = action;
+                if (searchReady) navigateSearch(request);
+                else if (searchSession) pendingSearchAction = request;
                 return;
             }
             const session = new MonitorSearch.MonitorSearchSession(frames, options);
             searchKey = key;
             searchReady = false;
-            pendingSearchAction = action;
+            pendingSearchAction = request;
             searchSession = session;
             searchMatches = [];
             selectedMatch = -1;
-            cursorOrderAtSelection = null;
             monitor.setSearchResults([]);
             plotter.setNavigationMarkers({ timeOrder: plotter.navigationMarkers.timeOrder,
                 matches: [], currentMatch: -1 });
@@ -769,7 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scan();
         } catch (error) { monitorSearchStatus.textContent = error.message; }
     };
-    for (const action of ['prev', 'next', 'nearest-wave', 'nearest-byte'])
+    for (const action of ['nearest', 'prev', 'next'])
         document.getElementById(`monitor-search-${action}`).addEventListener('click', () =>
             requestSearch(action));
 
@@ -1388,7 +1396,6 @@ document.addEventListener('DOMContentLoaded', () => {
             searchKey = null;
             searchReady = false;
             pendingSearchAction = null;
-            cursorOrderAtSelection = null;
             monitor.setSearchResults([]);
             monitor.cursorOrder = null;
             plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
@@ -1409,7 +1416,6 @@ document.addEventListener('DOMContentLoaded', () => {
         searchKey = null;
         searchReady = false;
         pendingSearchAction = null;
-        cursorOrderAtSelection = null;
         monitorSearchStatus.textContent = '';
         plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
         plotter.clear();

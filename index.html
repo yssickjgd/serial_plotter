@@ -381,12 +381,16 @@
                                 </div>
                             </div>
                             <div class="search-actions">
+                                <button id="monitor-search-nearest" type="button">就近搜索</button>
                                 <button id="monitor-search-prev" type="button">上一个</button>
                                 <button id="monitor-search-next" type="button">下一个</button>
                             </div>
-                            <div class="search-actions">
-                                <button id="monitor-search-nearest-wave" type="button">波形当前位置就近</button>
-                                <button id="monitor-search-nearest-byte" type="button">字节流当前位置就近</button>
+                            <div class="search-origin-group">
+                                <span>就近依据</span>
+                                <div class="choice-group search-origin-choices" role="radiogroup" aria-label="就近依据">
+                                    <label><input id="monitor-search-origin-wave" type="radio" name="monitor-search-origin" value="wave" />波形当前位置就近</label>
+                                    <label><input id="monitor-search-origin-byte" type="radio" name="monitor-search-origin" value="byte" checked />字节流当前位置就近</label>
+                                </div>
                             </div>
                             <span id="monitor-search-status" role="status"></span>
                         </div>

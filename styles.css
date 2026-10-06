@@ -660,6 +660,9 @@ canvas {
 .monitor-search-toolbar { align-items: center; }
 .search-fields { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
 .search-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; white-space: nowrap; }
+.search-origin-group { display: flex; align-items: center; flex: 0 0 auto; gap: 6px; max-width: 100%; color: #ddd; }
+.search-origin-choices { padding: 0; gap: 4px 8px; }
+.search-origin-choices label { color: #ddd; white-space: nowrap; }
 #monitor-search-query { flex: 0 1 180px; width: 180px; min-width: 100px; }
 #monitor-search-tolerance { flex: 0 0 75px; width: 75px; }
 #monitor-search-channel { position: relative; flex: 0 0 105px; width: 105px; }
