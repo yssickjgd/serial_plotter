@@ -447,6 +447,65 @@ test('wave statistic labels keep their cells while numeric values change length'
     assert.equal(cells[1].children[1].textContent.trim(), '-1234567.125000');
 });
 
+test('dominant frequency and period statistics follow their respective axis units in both views', () => {
+    const { getElement, plotter, tick } = bootWithConfig(null);
+    plotter.setChannelVisible(0, true);
+    plotter.setDisplayOptions({ fftWindow: 'rectangular' });
+    plotter.setSampleRateHz(128);
+    for (let i = 0; i < 64; i++) plotter.addFrame([Math.sin(2 * Math.PI * 4 * i / 64)]);
+    const select = (id, value) => {
+        const control = getElement(id);
+        control.value = value;
+        control.dispatchEvent(new Event('change'));
+    };
+    const cases = [
+        ['hz', 'samples', '8.000000 Hz', '16 Sample'],
+        ['bins', 'samples', '4 Bin', '16 Sample'],
+        ['bins', 's', '4 Bin', '0.125000 s'],
+        ['hz', 's', '8.000000 Hz', '0.125000 s']
+    ];
+    for (const mode of ['time', 'frequency']) {
+        select('plot-view-mode', mode);
+        for (const [freqUnit, timeUnit, frequency, period] of cases) {
+            select('plot-freq-x-unit', freqUnit);
+            select('plot-time-x-unit', timeUnit);
+            plotter.draw();
+            const cells = getElement('plot-channel-stats').children;
+            assert.equal(cells[6].children[1].textContent, frequency);
+            assert.equal(cells[7].children[1].textContent, period);
+        }
+    }
+    getElement('btn-pause').listeners.click();
+    tick();
+    plotter.draw();
+    assert.equal(getElement('plot-channel-stats').children[7].children[1].textContent, '0.125000 s');
+    select('plot-view-mode', 'time');
+    plotter.vp.time.scrollOffset = 0;
+    plotter.vp.time.displayCount = 32;
+    select('plot-freq-x-unit', 'bins');
+    plotter.draw();
+    assert.equal(getElement('plot-channel-stats').children[6].children[1].textContent, '2 Bin',
+        'a shorter paused FFT window changes the bin while preserving the frequency');
+    select('plot-freq-x-unit', 'hz');
+    plotter.draw();
+    assert.equal(getElement('plot-channel-stats').children[6].children[1].textContent, '8.000000 Hz');
+});
+
+test('Bin and Sample statistics remain available without a measured sample rate', () => {
+    const { getElement, plotter } = bootWithConfig(null);
+    plotter.setChannelVisible(0, true);
+    plotter.setDisplayOptions({ fftWindow: 'rectangular', freqXUnit: 'bins', timeXUnit: 'samples' });
+    for (let i = 0; i < 64; i++) plotter.addFrame([Math.sin(2 * Math.PI * 4 * i / 64)]);
+    plotter.draw();
+    const cells = getElement('plot-channel-stats').children;
+    assert.equal(cells[6].children[1].textContent, '4 Bin');
+    assert.equal(cells[7].children[1].textContent, '16 Sample');
+    plotter.setDisplayOptions({ freqXUnit: 'hz', timeXUnit: 's' });
+    plotter.draw();
+    assert.equal(cells[6].children[1].textContent, '-- Hz');
+    assert.equal(cells[7].children[1].textContent, '-- s');
+});
+
 test('byte statistic updates the value without rebuilding its label', () => {
     const { getElement, parser, tick } = bootWithConfig(null);
     const fpsValue = getElement('stat-fps-value');

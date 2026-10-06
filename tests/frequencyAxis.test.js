@@ -133,6 +133,50 @@ test('small nonzero sample intervals remain visible in seconds', () => {
     assert.equal(plotter._formatTimeIndex(1), '0.0002 s');
 });
 
+test('time hover shows seconds and sample position regardless of the axis unit', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setSampleRateHz(1000);
+    for (const timeXUnit of ['samples', 's']) {
+        plotter.setDisplayOptions({ displayMode: 'time', timeXUnit });
+        plotter.vp.time.autoFollow = false;
+        plotter.vp.time.scrollOffset = 200;
+        plotter.vp.time.displayCount = 101;
+        plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
+        labels.length = 0;
+        plotter.draw();
+        assert.ok(labels.includes('Time: 0.25 s (Sample 250)'));
+        assert.ok(labels.some(label => label.startsWith('Value: ')));
+    }
+});
+
+test('frequency hover retains hertz alongside the bin when the axis displays bins', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setSampleRateHz(2048);
+    plotter.setDisplayOptions({ freqXUnit: 'bins' });
+    plotter.vp.frequency.scrollOffset = 100;
+    plotter.vp.frequency.displayCount = 101;
+    plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Freq: 300 Hz (Bin 150)'));
+    assert.ok(labels.some(label => label.startsWith('Mag: ')));
+});
+
+test('hover preserves sample or bin positions when the sample rate is unknown', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.mousePos = { x: 0, y: 100 };
+    plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 'samples' });
+    plotter.vp.time.autoFollow = false;
+    plotter.vp.time.scrollOffset = 200;
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Time: -- s (Sample 200)'));
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins' });
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Freq: -- Hz (Bin 0)'));
+});
+
 test('log amplitude renders a silent spectrum with finite coordinates', () => {
     const { plotter } = createPlotter();
     plotter.clear();

@@ -357,8 +357,8 @@ class Plotter {
         }
     }
 
-    _formatFrequencyBin(bin, fftSize) {
-        if (this.freqXUnit === 'bins') return String(Math.round(bin));
+    _formatFrequencyBin(bin, fftSize, unit = this.freqXUnit) {
+        if (unit === 'bins') return String(Math.round(bin));
         if (!(this.sampleRateHz > 0) || !(fftSize > 0)) return '-- Hz';
         return `${this._formatAxisNumber(bin * this.sampleRateHz / fftSize)} Hz`;
     }
@@ -367,8 +367,8 @@ class Plotter {
         return Number(value > 0 && value < 0.001 ? value.toPrecision(4) : value.toFixed(3));
     }
 
-    _formatTimeIndex(index) {
-        if (this.timeXUnit !== 's') return String(index);
+    _formatTimeIndex(index, unit = this.timeXUnit) {
+        if (unit !== 's') return String(index);
         if (!(this.sampleRateHz > 0)) return '-- s';
         return `${this._formatAxisNumber(index / this.sampleRateHz)} s`;
     }
@@ -492,6 +492,7 @@ class Plotter {
             mean,
             stdDev,
             freq,
+            dominantBin: freqSeries.fftSize ? freqSeries.dominantBin : null,
             period: period || null
         };
     }
@@ -1259,13 +1260,14 @@ class Plotter {
         const xIdx = Math.max(0, Math.min(visibleCnt - 1, Math.round(fIdx)));
         const yVal = globalThis.SerialPlotter.axisValueAtFraction(1 - my / plotH, min, max, yScale);
 
-        // Main tooltip (cursor position label)
+        // Hover always pairs physical units with the discrete position, independently of axis units.
+        const sampleIndex = startIdx + xIdx;
+        const validSample = sampleIndex >= 0 && sampleIndex < total;
         const tipLines = this.displayMode === 'frequency'
-            ? [`Freq: ${this._formatFrequencyBin(startIdx + xIdx, series[0].fftSize)} (Bin ${startIdx + xIdx})`,
+            ? [`Freq: ${this._formatFrequencyBin(sampleIndex, series[0].fftSize, 'hz')} (Bin ${sampleIndex})`,
                 `Mag: ${yScale === 'log' ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}`]
-            : [`X: ${startIdx + xIdx >= 0 && startIdx + xIdx < total
-                ? this._formatTimeIndex(startIdx + xIdx) : '--'}`,
-                `Y: ${yVal.toFixed(6)}`];
+            : [`Time: ${validSample ? this._formatTimeIndex(sampleIndex, 's') : '-- s'} (Sample ${validSample ? sampleIndex : '--'})`,
+                `Value: ${yVal.toFixed(6)}`];
         ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;
         const tw = Math.max(120, ...tipLines.map(l => ctx.measureText(l).width + tipPad*2));

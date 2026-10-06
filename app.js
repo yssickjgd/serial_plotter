@@ -294,13 +294,19 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!plotInfoRow.hidden) plotInfoRow.hidden = true;
             return;
         }
-        // 主频 = dominantBin / fftSize * 帧率（Hz）
-        const freqHz = statsData.freq === null || plotter.sampleRateHz <= 0
-            ? '--'
-            : fmtFixed(statsData.freq * plotter.sampleRateHz, 6, 15);
-        const periodText = statsData.period === null
-            ? '--'
-            : fmtFixed(statsData.period, 0, 15);
+        // 主频跟随频域单位；主周期跟随时域单位，两者都使用同一 FFT 结果。
+        const frequencyUnit = plotter.freqXUnit === 'bins' ? 'Bin' : 'Hz';
+        const periodUnit = plotter.timeXUnit === 's' ? 's' : 'Sample';
+        const frequencyValue = frequencyUnit === 'Bin' ? statsData.dominantBin
+            : statsData.freq != null && plotter.sampleRateHz > 0
+                ? statsData.freq * plotter.sampleRateHz : null;
+        const periodValue = periodUnit === 'Sample' ? statsData.period
+            : statsData.period != null && plotter.sampleRateHz > 0
+                ? statsData.period / plotter.sampleRateHz : null;
+        const frequencyText = frequencyValue == null ? '--'
+            : fmtFixed(frequencyValue, frequencyUnit === 'Bin' ? 0 : 6, 15);
+        const periodText = periodValue == null ? '--'
+            : fmtFixed(periodValue, periodUnit === 'Sample' ? 0 : 6, 15);
 
         const segments = [
             ['通道:', statsData.channelLabel],
@@ -309,8 +315,8 @@ document.addEventListener('DOMContentLoaded', () => {
             ['峰峰值:', fmtFixed(statsData.pp, 6, 15)],
             ['均值:', fmtFixed(statsData.mean, 6, 15)],
             ['标准差:', fmtFixed(statsData.stdDev, 6, 15)],
-            ['主频:', `${freqHz} Hz`],
-            ['主周期:', `${periodText} sample`]
+            ['主频:', `${frequencyText} ${frequencyUnit}`],
+            ['主周期:', `${periodText} ${periodUnit}`]
         ];
         if (!plotChannelStats.children.length) {
             const cells = segments.map(([label]) => {
