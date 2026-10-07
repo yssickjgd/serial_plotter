@@ -186,3 +186,37 @@ test('log amplitude renders a silent spectrum with finite coordinates', () => {
     plotter.draw();
     assert.ok(plotter._drawState.min > 0);
 });
+
+test('manual log amplitude includes zero and keeps FFT and hover values in original units', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqYScale: 'log',
+        yScaleModeFreq: 'manual', yMinFreq: 0, yMaxFreq: 2 });
+    plotter.mousePos = { x: 100, y: plotter.canvas.height - plotter.pY };
+    labels.length = 0;
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0);
+    assert.equal(plotter._drawState.max, 2);
+    assert.ok(plotter._drawState.yScale.linearThreshold > 0);
+    assert.ok(labels.includes('0'));
+    assert.ok(labels.includes('Mag: 0'));
+    const threshold = plotter._drawState.yScale.linearThreshold;
+    plotter.setChannelTransform(0, { gainEnabled: true, gain: 0.1, offsetEnabled: false, offset: 0 });
+    plotter.draw();
+    assert.ok(Math.abs(plotter._drawState.yScale.linearThreshold / threshold - 0.1) < 1e-12);
+    plotter.setDisplayOptions({ yMinFreq: 0.001 });
+    plotter.draw();
+    assert.equal(plotter._drawState.yScale, 'log');
+    assert.equal(plotter._drawState.min, 0.001);
+});
+
+test('zero-inclusive logarithmic silent spectra use a finite linear range', () => {
+    const { plotter } = createPlotter();
+    plotter.clear();
+    for (let i = 0; i < 64; i++) plotter.addFrame([0]);
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqYScale: 'log',
+        yScaleModeFreq: 'manual', yMinFreq: 0, yMaxFreq: 0.5 });
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0);
+    assert.equal(plotter._drawState.max, 0.5);
+    assert.equal(plotter._drawState.yScale.linearThreshold, 0.5);
+});

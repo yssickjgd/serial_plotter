@@ -671,9 +671,9 @@ class Plotter {
         if (!state || !(state.max > state.min)) return;
         const mode = this.displayMode;
         const scale = state.yScale;
-        const toDomain = value => scale === 'log' ? Math.log(value) : value;
-        const fromDomain = value => scale === 'log' ? Math.exp(value) : value;
-        const base = this._zoomBaseY[mode] || { min: state.min, max: state.max };
+        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
+        const fromDomain = value => globalThis.SerialPlotter.axisFromDomain(value, scale);
+        const base = this._zoomBaseY[mode] || { min: state.min, max: state.max, yScale: scale };
         const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
         const currentMin = toDomain(state.min), currentMax = toDomain(state.max);
         const baseSpan = baseMax - baseMin;
@@ -768,7 +768,7 @@ class Plotter {
             this._clampScroll();
             this._vp.autoFollow = false;
             if (!this._zoomBaseY[this.displayMode])
-                this._zoomBaseY[this.displayMode] = { min: state.min, max: state.max };
+                this._zoomBaseY[this.displayMode] = { min: state.min, max: state.max, yScale: state.yScale };
             this._boxZoomY[this.displayMode] = { min: zoom.yMin, max: zoom.yMax };
         } else if (selection.mode === this.displayMode) {
             this._vp.autoFollow = selection.autoFollow;
@@ -874,16 +874,17 @@ class Plotter {
         const base = this._zoomBaseY[this.displayMode];
         const zoom = this._boxZoomY[this.displayMode];
         if (!base || !zoom) return;
-        const log = this.displayMode === 'frequency' && this.freqYScale === 'log';
-        const toDomain = value => log ? Math.log(value) : value;
-        const fromDomain = value => log ? Math.exp(value) : value;
+        const scale = base.yScale ?? this._drawState?.yScale ?? 'linear';
+        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
+        const fromDomain = value => globalThis.SerialPlotter.axisFromDomain(value, scale);
         const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
         const span = toDomain(zoom.max) - toDomain(zoom.min);
         const travel = baseMax - baseMin - span;
         if (!(travel > 0)) return;
-        const nextMax = baseMax - Math.max(0, Math.min(1, fraction)) * travel;
+        const nextMin = Math.max(baseMin,
+            baseMax - Math.max(0, Math.min(1, fraction)) * travel - span);
         this._boxZoomY[this.displayMode] = {
-            min: fromDomain(nextMax - span), max: fromDomain(nextMax)
+            min: fromDomain(nextMin), max: fromDomain(nextMin + span)
         };
         this._markViewDirty();
         this._updateYScrollbar();
@@ -910,8 +911,8 @@ class Plotter {
         const zoom = this._boxZoomY[this.displayMode];
         const state = this._drawState;
         if (!base || !zoom || !state) { this.yScrollbarWrap.hidden = true; return; }
-        const log = state.yScale === 'log';
-        const toDomain = value => log ? Math.log(value) : value;
+        const scale = base.yScale ?? state.yScale;
+        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
         const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
         const zoomMin = toDomain(zoom.min), zoomMax = toDomain(zoom.max);
         const baseSpan = baseMax - baseMin, zoomSpan = zoomMax - zoomMin;
@@ -1045,7 +1046,7 @@ class Plotter {
             max = zoomY.max;
         } else if (this.yScaleMode === 'manual' && Number.isFinite(this._yBounds.min) &&
             Number.isFinite(this._yBounds.max) && this._yBounds.max !== this._yBounds.min &&
-            (!logY || (this._yBounds.min > 0 && this._yBounds.max > 0))) {
+            (!logY || (this._yBounds.min >= 0 && this._yBounds.max > this._yBounds.min))) {
             min = Math.min(this._yBounds.min, this._yBounds.max);
             max = Math.max(this._yBounds.min, this._yBounds.max);
         } else if (logY) {
@@ -1076,7 +1077,15 @@ class Plotter {
         }
         bounded = max - min;
         const xScale = this.displayMode === 'frequency' ? this.freqXScale : 'linear';
-        const yScale = logY ? 'log' : 'linear';
+        let yScale = logY ? 'log' : 'linear';
+        if (zoomY && this._zoomBaseY[this.displayMode]?.yScale) {
+            yScale = this._zoomBaseY[this.displayMode].yScale;
+        } else if (logY && min === 0) {
+            let peak = 0;
+            for (const item of series) for (const value of item.mags)
+                if (Number.isFinite(value) && value > peak) peak = value;
+            yScale = globalThis.SerialPlotter.adaptiveLogScale(peak, max);
+        }
         this._drawState = { plotW, plotH, startIdx, visibleCnt, min, max, xScale, yScale };
 
         // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
@@ -1271,7 +1280,8 @@ class Plotter {
 
         // Data coordinates
         const xScale = this.displayMode === 'frequency' ? this.freqXScale : 'linear';
-        const yScale = this.displayMode === 'frequency' ? this.freqYScale : 'linear';
+        const yScale = this._drawState.yScale;
+        const logY = this.displayMode === 'frequency' && this.freqYScale === 'log';
         const fIdx = visibleCnt > 1
             ? globalThis.SerialPlotter.axisValueAtFraction(mx / Math.max(1, plotW),
                 startIdx, startIdx + visibleCnt - 1, xScale) - startIdx : 0;
@@ -1283,7 +1293,7 @@ class Plotter {
         const validSample = sampleIndex >= 0 && sampleIndex < total;
         const tipLines = this.displayMode === 'frequency'
             ? [`Freq: ${this._formatFrequencyBin(sampleIndex, series[0].fftSize, 'hz')} (Bin ${sampleIndex})`,
-                `Mag: ${yScale === 'log' ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}`]
+                `Mag: ${logY ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}`]
             : [`Time: ${validSample ? this._formatTimeIndex(sampleIndex, 's') : '-- s'} (Sample ${validSample ? sampleIndex : '--'})`,
                 `Value: ${yVal.toFixed(6)}`];
         ctx.font = `12px ${this.fontFamily}`;
@@ -1324,7 +1334,7 @@ class Plotter {
             }
             if (!Number.isFinite(val)) continue;
             const ratio = globalThis.SerialPlotter.axisFraction(
-                yScale === 'log' ? Math.max(val, min) : val, min, max, yScale);
+                logY ? Math.max(val, min) : val, min, max, yScale);
             const origY = plotH - ratio * plotH;
             labels.push({ ch, val, origY, labelY: origY });
         }
@@ -1361,7 +1371,7 @@ class Plotter {
             ctx.beginPath(); ctx.arc(mx, item.origY, 4, 0, Math.PI*2); ctx.stroke();
 
             // Value label box
-            const lbl = `${item.ch.name}: ${yScale === 'log'
+            const lbl = `${item.ch.name}: ${logY
                 ? Number(item.val.toPrecision(4)) : item.val.toFixed(6)}`;
             ctx.font   = `11px ${this.fontFamily}`;
             const lw   = ctx.measureText(lbl).width + 10;

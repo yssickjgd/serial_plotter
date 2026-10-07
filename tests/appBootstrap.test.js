@@ -400,8 +400,8 @@ test('time and frequency Y strategies and bounds remain independent across mode 
     assert.equal(saved.plotYScaleModeFreq, 'manual');
 });
 
-test('invalid logarithmic Y bounds show an actionable message and valid bounds apply', () => {
-    const { getElement, parser, plotter } = bootWithConfig(null);
+test('logarithmic Y bounds accept zero, persist it and continue to reject negative limits', () => {
+    const { getElement, getStored, parser, plotter } = bootWithConfig(null);
     plotter.setChannelVisible(0, true);
     for (let i = 0; i < 32; i++) parser.onFrameParsed([Math.sin(i)], `t${i}`, Uint8Array.of(i), i);
     getElement('btn-pause').listeners.click();
@@ -411,9 +411,22 @@ test('invalid logarithmic Y bounds show an actionable message and valid bounds a
     getElement('plot-freq-y-scale').listeners.change();
     getElement('plot-y-scale-mode').value = 'manual';
     getElement('plot-y-scale-mode').listeners.change();
-    getElement('plot-y-min').value = '0';
+    getElement('plot-y-min').value = '-0.001';
     getElement('plot-y-min').listeners.change();
-    assert.match(getElement('plot-y-range-status').textContent, /正/);
+    assert.match(getElement('plot-y-range-status').textContent, /最小值/);
+    getElement('plot-y-min').value = '0';
+    getElement('plot-y-max').value = '3';
+    getElement('plot-y-max').listeners.change();
+    assert.equal(getElement('plot-y-range-status').textContent, '');
+    assert.equal(plotter.yScaleMode, 'manual');
+    assert.equal(plotter._drawState.min, 0);
+    assert.equal(plotter._drawState.max, 3);
+    assert.ok(plotter._drawState.yScale.linearThreshold > 0);
+    const saved = getStored();
+    assert.equal(JSON.parse(saved).plotYMinFreq, '0');
+    const restored = bootWithConfig(saved);
+    assert.equal(restored.getElement('plot-y-min').value, '0');
+    assert.equal(restored.plotter.yScaleMode, 'manual');
     getElement('plot-y-min').value = '0.001';
     getElement('plot-y-max').value = '3';
     getElement('plot-y-max').listeners.change();

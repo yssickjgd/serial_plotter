@@ -28,6 +28,42 @@ test('log axes map decades evenly and rectangle zoom uses the same transform', (
     assert.ok(Math.abs(zoom.yMax - 10) < 1e-12);
 });
 
+test('zero-inclusive log axes are linear near zero and preserve amplitude round trips', () => {
+    const { adaptiveLogScale, axisToDomain, axisFromDomain } = require('../plotMath');
+    const scale = adaptiveLogScale(0.2, 1);
+    assert.equal(scale.linearThreshold, 0.002);
+    assert.equal(axisToDomain(0, scale), 0);
+    assert.equal(axisToDomain(0.001, scale), 0.5);
+    assert.equal(axisToDomain(0.002, scale), 1);
+    assert.ok(Math.abs(axisToDomain(0.02, scale) - (1 + Math.log(10))) < 1e-12);
+    assert.equal(axisFromDomain(0, scale), 0);
+    assert.equal(axisFraction(0, 0, 1, scale), 0);
+    assert.equal(axisValueAtFraction(1, 0, 1, scale), 1);
+    for (const amplitude of [0, 0.0001, 0.001, 0.002, 0.01, 0.1, 1]) {
+        const position = axisFraction(amplitude, 0, 1, scale);
+        assert.ok(Number.isFinite(position));
+        assert.ok(Math.abs(axisValueAtFraction(position, 0, 1, scale) - amplitude) < 1e-12);
+    }
+    assert.ok(Math.abs(axisFraction(0.002, 0, 1, scale) -
+        2 * axisFraction(0.001, 0, 1, scale)) < 1e-12);
+});
+
+test('zero-inclusive log threshold adapts to data, bounded ranges and silent spectra', () => {
+    const { adaptiveLogScale } = require('../plotMath');
+    assert.equal(adaptiveLogScale(2, 10).linearThreshold, 0.02);
+    assert.equal(adaptiveLogScale(200, 1).linearThreshold, 0.01);
+    const silent = adaptiveLogScale(0, 2);
+    assert.equal(silent.linearThreshold, 2);
+    assert.equal(axisFraction(1, 0, 2, silent), 0.5);
+    for (const max of [Number.MIN_VALUE, 1e-280, 1e200]) {
+        const scale = adaptiveLogScale(max, max);
+        assert.ok(scale.linearThreshold > 0);
+        assert.ok(Number.isFinite(axisFraction(max, 0, max, scale)));
+        assert.equal(axisValueAtFraction(0, 0, max, scale), 0);
+        assert.equal(axisValueAtFraction(1, 0, max, scale), max);
+    }
+});
+
 test('pixel buckets retain both narrow positive and negative spikes', () => {
     const points = bucketExtrema([0, 0, 9, 0, -7, 0, 0, 0], 2);
     assert.deepEqual(points, [

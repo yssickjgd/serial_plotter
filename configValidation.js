@@ -26,8 +26,10 @@ function yRangeError(min, max, logarithmic = false) {
     if (String(min).trim() === '' || String(max).trim() === '' ||
         !Number.isFinite(Number(min)) || !Number.isFinite(Number(max)))
         return 'Y 轴范围必须为有限数值';
-    if (logarithmic && (!(Number(min) > 0) || !(Number(max) > 0)))
-        return '对数纵轴的自定义范围必须为正数';
+    if (logarithmic && Number(min) < 0)
+        return '对数纵轴的自定义最小值不能小于 0';
+    if (logarithmic && !(Number(max) > 0))
+        return '对数纵轴的自定义最大值必须为正数';
     if (!(Number(max) > Number(min))) return 'Y 轴最大值必须大于最小值';
     return '';
 }

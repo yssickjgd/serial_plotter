@@ -62,8 +62,12 @@ test('validates independent manual Y ranges even when the other plot is displaye
         plotYMinFreq: '0.01', plotYMaxFreq: '2' }).plotYScaleModeFreq, 'manual');
     assert.throws(() => validateConfig({ plotYScaleModeTime: 'other' }), /时域 Y/);
     assert.throws(() => validateConfig({ plotYScaleModeFreq: 'other' }), /频域 Y/);
-    assert.throws(() => validateConfig({ plotViewMode: 'time', plotYScaleModeFreq: 'manual',
-        plotFreqYScale: 'log', plotYMinFreq: '0', plotYMaxFreq: '2' }), /正数/);
+    assert.equal(validateConfig({ plotViewMode: 'time', plotYScaleModeFreq: 'manual',
+        plotFreqYScale: 'log', plotYMinFreq: '0', plotYMaxFreq: '2' }).plotYMinFreq, '0');
+    assert.throws(() => validateConfig({ plotYScaleModeFreq: 'manual',
+        plotFreqYScale: 'log', plotYMinFreq: '-0.001', plotYMaxFreq: '2' }), /最小值/);
+    assert.throws(() => validateConfig({ plotYScaleModeFreq: 'manual',
+        plotFreqYScale: 'log', plotYMinFreq: '0', plotYMaxFreq: '0' }), /最大值/);
     assert.throws(() => validateConfig({ plotYScaleModeTime: 'manual',
         plotYMinTime: '3', plotYMaxTime: '2' }), /大于/);
     assert.throws(() => validateConfig({ plotYScaleModeFreq: 'manual',

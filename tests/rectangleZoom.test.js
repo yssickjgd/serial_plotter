@@ -170,6 +170,40 @@ test('frequency manual bounds apply in both scales and editing clears a temporar
     assert.equal(plotter._drawState.max, 2);
 });
 
+test('zero-inclusive frequency Y zoom and scrollbar share a stable adaptive transform', () => {
+    const { plotter, fire, nodes } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqYScale: 'log',
+        yScaleModeFreq: 'manual', yMinFreq: 0, yMaxFreq: 100 });
+    plotter.draw();
+    const { plotW, plotH, yScale } = plotter._drawState;
+    assert.equal(plotter._drawState.min, 0);
+    fire('pointerdown', plotW / 4, plotH / 4);
+    fire('pointerup', plotW * 3 / 4, plotH * 3 / 4);
+    assert.ok(plotter._drawState.min > 0);
+    assert.ok(plotter._drawState.max < 100);
+    assert.equal(plotter._drawState.yScale, yScale);
+    assert.equal(nodes.get('plot-y-scrollbar-wrap').hidden, false);
+    plotter._panYToFraction(1);
+    plotter.draw();
+    assert.ok(Math.abs(plotter._drawState.min) < 1e-12);
+    assert.ok(Number.isFinite(plotter._drawState.max));
+    const oldMax = plotter._drawState.max;
+    fire('wheel', plotW + 20, plotH, { deltaY: -1 });
+    plotter.draw();
+    assert.ok(Math.abs(plotter._drawState.min) < 1e-12);
+    assert.ok(plotter._drawState.max < oldMax);
+    plotter.addFrame([10000]);
+    plotter._fftVersion = -1;
+    plotter.draw();
+    assert.equal(plotter._drawState.yScale, yScale, 'new data does not shift a zoomed transform');
+    fire('contextmenu', 0, 0);
+    plotter.draw();
+    assert.equal(plotter._drawState.min, 0);
+    assert.equal(plotter._drawState.max, 100);
+    assert.equal(nodes.get('plot-y-scrollbar-wrap').hidden, true);
+    assert.ok(Number.isFinite(plotter._drawState.yScale.linearThreshold));
+});
+
 test('frequency rectangle zoom keeps the time viewport separate', () => {
     const { plotter, fire } = createPlotter();
     plotter.setDisplayOptions({ displayMode: 'frequency' });

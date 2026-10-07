@@ -70,21 +70,53 @@ function csvField(value) {
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-/** Map a data value to its relative position on a linear or positive log axis. */
+/** A zero-inclusive log scale with an exactly linear region below 1% of the visible peak. */
+function adaptiveLogScale(peak, max) {
+    const extent = Number.isFinite(peak) && peak > 0 ? Math.min(peak, max) : max;
+    return { type: 'log-linear',
+        linearThreshold: peak > 0 ? Math.max(Number.MIN_VALUE, extent * 0.01) : max };
+}
+
+function axisToDomain(value, scale = 'linear') {
+    if (scale === 'log') return value > 0 ? Math.log(value) : NaN;
+    if (scale?.type === 'log-linear') {
+        const threshold = scale.linearThreshold;
+        const magnitude = Math.abs(value);
+        return Math.sign(value) * (magnitude <= threshold ? magnitude / threshold
+            : 1 + Math.log(magnitude) - Math.log(threshold));
+    }
+    return value;
+}
+
+function axisFromDomain(value, scale = 'linear') {
+    if (scale === 'log') return Math.exp(value);
+    if (scale?.type === 'log-linear') {
+        const magnitude = Math.abs(value);
+        return Math.sign(value) * (magnitude <= 1 ? magnitude * scale.linearThreshold
+            : Math.exp(Math.log(scale.linearThreshold) + magnitude - 1));
+    }
+    return value;
+}
+
+/** Map original values to axis positions; tick labels retain the original amplitude. */
 function axisFraction(value, min, max, scale = 'linear') {
     if (!(max > min)) return NaN;
-    if (scale === 'log') {
-        if (!(value > 0) || !(min > 0)) return NaN;
-        return Math.log(value / min) / Math.log(max / min);
+    if (scale !== 'linear') {
+        const start = axisToDomain(min, scale);
+        return (axisToDomain(value, scale) - start) / (axisToDomain(max, scale) - start);
     }
     return (value - min) / (max - min);
 }
 
 function axisValueAtFraction(fraction, min, max, scale = 'linear') {
     if (!(max > min)) return NaN;
-    if (scale === 'log') {
-        if (!(min > 0)) return NaN;
-        return min * Math.pow(max / min, fraction);
+    if (scale !== 'linear') {
+        const start = axisToDomain(min, scale);
+        const end = axisToDomain(max, scale);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return NaN;
+        if (fraction === 0) return min;
+        if (fraction === 1) return max;
+        return axisFromDomain(start + (end - start) * fraction, scale);
     }
     return min + (max - min) * fraction;
 }
@@ -111,9 +143,11 @@ function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
 }
 
 if (typeof module !== 'undefined') module.exports = {
-    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
+    adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
+    bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
-    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
+    adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
+    bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
 });
