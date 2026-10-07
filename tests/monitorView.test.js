@@ -225,7 +225,7 @@ test('Hex display groups bytes with offsets and ASCII while preserving both sear
         view.setDisplayOptions({ hexBytesPerLine: 8, hexGroupBytes: 2, hexOffset: 'frame', hexAscii: true });
         const body = view.spacer.children[0].children[1];
         assert.ok(body.textContent.includes('00000000: 41 42  00 FF  43 44  45 46  |AB..CDEF|'));
-        assert.ok(body.textContent.includes('00000008: 47  |G|'));
+        assert.ok(body.textContent.includes('00000008: 47' + ' '.repeat(26) + '|G|'));
         view.setSearchResults([{ startOrder: 1, endOrder: 1, startByte: 1, endByte: 2 }], 0);
         const highlights = view.spacer.children[0].children[1].children
             .filter(span => span.className === 'monitor-search-current').map(span => span.textContent);

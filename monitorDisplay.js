@@ -82,10 +82,16 @@
         return value;
     }
 
-    function blockColumns(byteCount, options, offsetDigits) {
+    function hexByteColumns(byteCount, groupBytes) {
         if (!byteCount) return 0;
-        const groups = options.hexGroupBytes > 1 ? Math.floor((byteCount - 1) / options.hexGroupBytes) : 0;
-        return byteCount * 3 - 1 + groups + (options.hexOffset === 'none' ? 0 : offsetDigits + 2) +
+        const groups = groupBytes > 1 ? Math.floor((byteCount - 1) / groupBytes) : 0;
+        return byteCount * 3 - 1 + groups;
+    }
+
+    function blockColumns(byteCount, options, offsetDigits, bytesPerLine = byteCount) {
+        if (!byteCount) return 0;
+        const hexCount = options.hexAscii ? bytesPerLine : byteCount;
+        return hexByteColumns(hexCount, options.hexGroupBytes) + (options.hexOffset === 'none' ? 0 : offsetDigits + 2) +
             (options.hexAscii ? byteCount + 4 : 0);
     }
 
@@ -114,7 +120,8 @@
         const linesPerBlock = Math.max(1, Math.ceil(blockColumns(bytesPerLine, options, offsetDigits) / columns));
         const fullBlockCount = Math.floor(byteLength / bytesPerLine);
         const tailByteLength = byteLength % bytesPerLine;
-        const tailLines = tailByteLength ? Math.ceil(blockColumns(tailByteLength, options, offsetDigits) / columns) : 0;
+        const tailLines = tailByteLength
+            ? Math.ceil(blockColumns(tailByteLength, options, offsetDigits, bytesPerLine) / columns) : 0;
         return {
             byteMode: 'hex', hex: true, byteLength, bytesPerLine, columns,
             hexGroupBytes: options.hexGroupBytes, hexOffset: options.hexOffset, hexAscii: options.hexAscii,
@@ -139,6 +146,10 @@
             parts.push({ text: value.toString(16).toUpperCase().padStart(2, '0'), byteIndex: start + index });
         }
         if (layout.hexAscii) {
+            // Reserve missing byte cells and group gaps so every ASCII column starts at the same position.
+            const padding = hexByteColumns(layout.bytesPerLine, layout.hexGroupBytes) -
+                hexByteColumns(count, layout.hexGroupBytes);
+            if (padding) parts.push({ text: ' '.repeat(padding), byteIndex: null });
             parts.push({ text: '  |', byteIndex: null });
             for (let index = 0; index < count; index++) {
                 const value = values[index];

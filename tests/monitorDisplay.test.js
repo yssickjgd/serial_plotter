@@ -174,11 +174,33 @@ test('Hex grouping, offset and ASCII output share the original byte indexes', ()
         { hexBytesPerLine: 8, hexGroupBytes: 2, hexOffset: 'stream', hexAscii: true }, 4096);
     const parts = hexVisibleParts(bytes, layout);
     assert.equal(parts.map(part => part.text).join(''),
-        '00001000: 41 42  00 FF  43 44  45 46  |AB..CDEF|\n00001008: 47  |G|');
+        '00001000: 41 42  00 FF  43 44  45 46  |AB..CDEF|\n00001008: 47' + ' '.repeat(26) + '|G|');
     for (const [index, hex, ascii] of [[0, '41', 'A'], [2, '00', '.'], [8, '47', 'G']]) {
         assert.deepEqual(parts.filter(part => part.byteIndex === index).map(part => part.text), [hex, ascii]);
     }
     assert.ok(parts.filter(part => part.text.includes('000010')).every(part => part.byteIndex === null));
+});
+
+test('short Hex tails keep ASCII at the full-row column across byte groups and offsets', () => {
+    const { hexRowLayout, hexVisibleParts } = displayModule();
+    const bytes = Uint8Array.from({ length: 9 }, (_, index) => 65 + index);
+    for (const [hexGroupBytes, asciiColumn] of [[1, 25], [2, 28], [4, 26], [8, 25]]) {
+        for (const hexOffset of ['none', 'frame', 'stream']) {
+            const options = { hexBytesPerLine: 8, hexGroupBytes, hexOffset, hexAscii: true };
+            const layout = hexRowLayout(bytes.length, 80, options, 4096);
+            const parts = hexVisibleParts(bytes, layout);
+            const lines = parts.map(part => part.text).join('').split('\n');
+            const column = asciiColumn + (hexOffset === 'none' ? 0 : 10);
+            assert.deepEqual(lines.map(line => line.indexOf('|')), [column, column]);
+            assert.ok(lines[1].endsWith('|I|'));
+            assert.deepEqual(parts.filter(part => part.byteIndex === 8).map(part => part.text), ['49', 'I']);
+            assert.equal(parts.filter(part => part.byteIndex !== null).length, 18,
+                'padding must not invent bytes or highlight targets');
+            const short = hexVisibleParts(Uint8Array.of(65), hexRowLayout(1, 80, options, 4096))
+                .map(part => part.text).join('');
+            assert.equal(short.indexOf('|'), column, 'one-byte frames use the same ASCII column');
+        }
+    }
 });
 
 test('auto Hex layout fits all selected decorations before choosing bytes per line', () => {
@@ -190,7 +212,7 @@ test('auto Hex layout fits all selected decorations before choosing bytes per li
     assert.equal(layout.linesPerBlock, 1);
     assert.equal(layout.lineCount, 2);
     assert.equal(hexVisibleParts(bytes, layout).map(part => part.text).join(''),
-        '00000000: 41 42  43  |ABC|\n00000003: 44 45  |DE|');
+        '00000000: 41 42  43  |ABC|\n00000003: 44 45      |DE|');
 });
 
 test('manual Hex byte counts wrap complete blocks without truncating narrow rows', () => {
@@ -214,12 +236,15 @@ test('manual grouped blocks count each full block and shorter tail precisely', (
     const layout = hexRowLayout(bytes.length, 10,
         { hexBytesPerLine: 8, hexGroupBytes: 2, hexOffset: 'frame', hexAscii: true });
     assert.equal(layout.linesPerBlock, 5);
-    assert.equal(layout.lineCount, 7);
+    assert.equal(layout.lineCount, 10);
     const output = hexVisibleParts(bytes, layout).map(part => part.text).join('');
     assert.equal(output,
-        '00000000: \n41 42  43 \n44  45 46 \n 47 48  |A\nBCDEFGH|\n00000008: \n49  |I|');
+        '00000000: \n41 42  43 \n44  45 46 \n 47 48  |A\nBCDEFGH|\n00000008: \n49        \n          \n        |I\n|');
     assert.equal(hexVisibleParts(bytes, { ...layout, firstLine: 4, lastLine: 6 })
         .map(part => part.text).join(''), 'BCDEFGH|\n00000008: ');
+    assert.equal(hexVisibleParts(bytes, { ...layout, firstLine: 7, lastLine: 10 })
+        .map(part => part.text).join(''), '          \n        |I\n|');
+    assert.deepEqual(hexVisibleParts(bytes, { ...layout, firstLine: 10, lastLine: 11 }), []);
 });
 
 test('Hex offset grows beyond eight digits and stream offset changes only display labels', () => {
