@@ -4,9 +4,9 @@ const csvFieldForExport = typeof module !== 'undefined'
 const transformForExport = typeof module !== 'undefined'
     ? require('./channelTransform').transformChannelValue : globalThis.SerialPlotter.transformChannelValue;
 
-function* frameCsvChunks(frames, channels, rowsPerChunk = 1024) {
+function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, { timestamps = false } = {}) {
     if (!channels.length || !frames.length) return;
-    yield ['Index', ...channels.map(ch => csvFieldForExport(ch.name))].join(',') + '\r\n';
+    yield ['Index', ...(timestamps ? ['Timestamp'] : []), ...channels.map(ch => csvFieldForExport(ch.name))].join(',') + '\r\n';
     const count = frames.length;
     const firstOrder = frames.orderAt(0);
     for (let start = 0; start < count; start += rowsPerChunk) {
@@ -15,6 +15,10 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024) {
         const lines = [];
         for (let row = start; row < Math.min(count, start + rowsPerChunk); row++) {
             const fields = [row];
+            if (timestamps) {
+                const time = frames.timestampAt(row);
+                fields.push(Number.isFinite(time) ? new Date(time).toISOString() : '');
+            }
             for (let channel = 0; channel < channels.length; channel++) {
                 const value = transformForExport(frames.getValue(channel, row), channels[channel]);
                 fields.push(Number.isFinite(value) ? value : '');
@@ -25,17 +29,17 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024) {
     }
 }
 
-function exportFrameCsv(frames, channels) {
+function exportFrameCsv(frames, channels, options = {}) {
     if (!channels.length || !frames.length) return null;
-    return [...frameCsvChunks(frames, channels)].join('');
+    return [...frameCsvChunks(frames, channels, 1024, options)].join('');
 }
 
-async function writeFrameCsv(frames, channels, writable, onProgress = () => {}) {
+async function writeFrameCsv(frames, channels, writable, onProgress = () => {}, options = {}) {
     if (!channels.length || !frames.length) return false;
     const encoder = new TextEncoder();
     await writable.write(encoder.encode('\uFEFF'));
     let chunk = 0;
-    for (const text of frameCsvChunks(frames, channels)) {
+    for (const text of frameCsvChunks(frames, channels, 1024, options)) {
         await writable.write(encoder.encode(text));
         if (++chunk % 16 === 0) {
             onProgress(Math.min(frames.length, (chunk - 1) * 1024), frames.length);

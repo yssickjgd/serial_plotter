@@ -2,6 +2,8 @@ const validationLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 const validationByteUtils = typeof module !== 'undefined'
     ? require('./byteUtils').ByteUtils : globalThis.SerialPlotter.ByteUtils;
+const validationMonitorDisplay = typeof module !== 'undefined'
+    ? require('./monitorDisplay') : globalThis.SerialPlotter.MonitorDisplay;
 
 function parseIntInRange(value, min, max, label) {
     const text = String(value).trim();
@@ -53,8 +55,17 @@ function normalizeYConfig(config, context = config) {
 
 function validateConfig(config) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('配置必须是 JSON 对象');
+    if (config.monitorDisplay !== undefined)
+        validationMonitorDisplay.normalizeDisplayOptions(config.monitorDisplay);
     const options = {
         connType: [['serial', 'tcp-client', 'tcp-server', 'udp'], '连接模式'],
+        captureMode: [['number', 'hex', 'text'], '采集格式'],
+        textEncoding: [['utf-8', 'ascii', 'gbk', 'gb18030', 'big5', 'utf-16le',
+            'utf-16be', 'shift_jis', 'windows-1252'], '文本字符集'],
+        textBoundary: [['idle', 'cr', 'lf', 'crlf', 'lfcr'], '文本断帧'],
+        serialData: [['7', '8'], '数据位'],
+        serialStop: [['1', '2'], '停止位'],
+        serialParity: [['none', 'even', 'odd'], '奇偶校验'],
         dataType: [['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'float32', 'float64'], '数据类型'],
         endianness: [['little', 'big'], '字节序'],
         plotViewMode: [['time', 'frequency'], '绘图模式'],
@@ -82,14 +93,20 @@ function validateConfig(config) {
     }
     if (config.serialBaud !== undefined)
         parseIntInRange(config.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率');
-    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc']) {
+    if (config.idleGapSeconds !== undefined &&
+        (String(config.idleGapSeconds).trim() === '' || !Number.isFinite(Number(config.idleGapSeconds)) ||
+            Number(config.idleGapSeconds) < 0.001 || Number(config.idleGapSeconds) * 1000 > 2147483647))
+        throw new RangeError('空闲断帧间隔需为至少 0.001 s 的有限数值，且不超过计时器范围');
+    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc', 'rebuildHistory']) {
         if (config[key] !== undefined && typeof config[key] !== 'boolean')
             throw new Error(`${key} 必须是布尔值`);
     }
     if (config.netPort !== undefined && config.netPort !== '') parsePort(config.netPort);
     if (config.netLocalPort !== undefined && config.netLocalPort !== '') parsePort(config.netLocalPort);
-    if (config.enableHeader === true && !validHex(config.headerHex)) throw new Error('帧头 Hex 无效');
-    if (config.enableFooter === true && !validHex(config.footerHex)) throw new Error('帧尾 Hex 无效');
+    if (!config.captureMode || config.captureMode === 'number') {
+        if (config.enableHeader === true && !validHex(config.headerHex)) throw new Error('帧头 Hex 无效');
+        if (config.enableFooter === true && !validHex(config.footerHex)) throw new Error('帧尾 Hex 无效');
+    }
     const validCalibration = value => value === undefined ||
         ((typeof value === 'number' || typeof value === 'string') &&
             String(value).trim() !== '' && Number.isFinite(Number(value)));

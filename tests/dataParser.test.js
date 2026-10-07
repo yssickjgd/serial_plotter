@@ -2,6 +2,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DataParser } = require('../dataParser');
 
+test('source metadata follows first bytes across split frames, resync and compaction', () => {
+    const parser = new DataParser();
+    parser.setFormat({ enableHeader: true, headerHex: 'AA', enableFooter: false,
+        dataType: 'uint16', channelsCount: 1 });
+    const frames = [];
+    parser.onFrameParsed = (values, time, bytes, timestamp, metadata) => frames.push({ values, timestamp, ...metadata });
+    parser.appendData(Uint8Array.of(0, 0xAA, 1), { timestamp: 1000, byteOffset: 30, order: 7 });
+    parser.appendData(Uint8Array.of(0, 0xAA, 2, 0), { timestamp: 900, byteOffset: 33, order: 8 });
+    assert.deepEqual(frames.map(frame => [frame.values[0], frame.timestamp, frame.byteOffset, frame.endByte, frame.order]),
+        [[1, 1000, 31, 34, 7 + 1 / 3], [2, 900, 34, 37, 8 + 1 / 4]]);
+});
+
 test('reports consumer callback failures through a dedicated error hook', () => {
     const parser = new DataParser();
     parser.setFormat({ enableHeader: false, enableFooter: false,

@@ -1,4 +1,6 @@
 const configYUtils = typeof module !== 'undefined' ? require('./configValidation') : globalThis.SerialPlotter;
+const configMonitorViewUtils = typeof module !== 'undefined'
+    ? require('./monitorDisplayView') : globalThis.SerialPlotter;
 const CONFIG_VALUE_FIELDS = [
     'serialBaud', 'serialData', 'serialStop', 'serialParity',
     'netHost', 'netPort', 'netLocalPort', 'headerHex', 'footerHex',
@@ -7,13 +9,17 @@ const CONFIG_VALUE_FIELDS = [
     'plotTimeXUnit', 'plotFreqXUnit', 'plotFreqXScale', 'plotFreqYScale',
     'plotFftWindow'
 ];
-const CONFIG_CHECK_FIELDS = ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc'];
+const CONFIG_CHECK_FIELDS = ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc', 'rebuildHistory'];
+const CAPTURE_DEFAULTS = { captureMode: 'number', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001' };
 
 function collectConfigFromView(elements, bounds, channelMeta) {
     const config = { connType: elements.connType.value };
     for (const key of CONFIG_VALUE_FIELDS) config[key] = elements[key].value;
-    for (const key of CONFIG_CHECK_FIELDS) config[key] = elements[key].checked;
+    for (const [key, defaultValue] of Object.entries(CAPTURE_DEFAULTS))
+        config[key] = elements[key]?.value ?? defaultValue;
+    for (const key of CONFIG_CHECK_FIELDS) config[key] = elements[key]?.checked ?? (key === 'rebuildHistory');
     Object.assign(config, {
+        monitorDisplay: configMonitorViewUtils.collectMonitorDisplayFromView(elements.monitorDisplay),
         plotYMinTime: bounds.time.min, plotYMaxTime: bounds.time.max,
         plotYMinFreq: bounds.frequency.min, plotYMaxFreq: bounds.frequency.max,
         plotYScaleModeTime: bounds.time.scaleMode ?? elements.plotYScaleMode.value,
@@ -35,12 +41,14 @@ function updatePlotOptionVisibility(elements) {
 }
 
 function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
-    updateFrameFormat, updateChannels, updatePlot, syncPlotChoices }) {
+    updateFrameFormat, updateChannels, updatePlot, syncPlotChoices, updateMonitorDisplay }) {
     elements.connType.value = config.connType || 'serial';
     updateConnectionModeUI();
     for (const key of CONFIG_VALUE_FIELDS) {
         if (config[key] !== undefined) elements[key].value = config[key];
     }
+    for (const [key, defaultValue] of Object.entries(CAPTURE_DEFAULTS))
+        if (elements[key]) elements[key].value = config[key] ?? defaultValue;
     if (elements.sendIntervalUnit.value === 'ms') {
         const milliseconds = Number(elements.sendInterval?.value);
         if (Number.isFinite(milliseconds) && elements.sendInterval)
@@ -57,7 +65,8 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
         if (!elements[key].value) elements[key].value = defaultValue;
     }
     for (const key of CONFIG_CHECK_FIELDS) {
-        if (config[key] !== undefined) elements[key].checked = config[key];
+        if (elements[key] && (config[key] !== undefined || key === 'rebuildHistory'))
+            elements[key].checked = config[key] ?? true;
     }
     if (config.plotFftWindow === undefined) elements.plotFftWindow.value = 'hann';
     const mode = elements.plotViewMode.value === 'frequency' ? 'frequency' : 'time';
@@ -73,6 +82,8 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
     elements.plotYScaleMode.value = bounds[mode].scaleMode;
     elements.plotYMin.value = bounds[mode].min;
     elements.plotYMax.value = bounds[mode].max;
+    configMonitorViewUtils.applyMonitorDisplayToView(config.monitorDisplay, elements.monitorDisplay);
+    if (updateMonitorDisplay) updateMonitorDisplay();
     updateFrameFormat();
     updateChannels(config.channels);
     updatePlot();
@@ -82,7 +93,7 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
 
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
-    collectConfigFromView, applyConfigToView, updatePlotOptionVisibility
+    collectConfigFromView, applyConfigToView, updatePlotOptionVisibility, CaptureDefaults: CAPTURE_DEFAULTS
 });
 if (typeof module !== 'undefined') module.exports = {
     collectConfigFromView, applyConfigToView, updatePlotOptionVisibility

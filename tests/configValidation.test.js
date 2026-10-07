@@ -2,6 +2,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseIntInRange, parsePort, validateConfig } = require('../configValidation');
 
+test('capture configuration validates modes, encodings, boundaries and finite idle intervals', () => {
+    assert.throws(() => validateConfig({ captureMode: 'custom' }), /采集/);
+    assert.throws(() => validateConfig({ textEncoding: 'invalid' }), /字符集/);
+    assert.throws(() => validateConfig({ textBoundary: 'invalid' }), /断帧/);
+    for (const idleGapSeconds of ['', 'NaN', '0', '-1', '0.0001', 'Infinity'])
+        assert.throws(() => validateConfig({ idleGapSeconds }), /间隔/);
+    assert.equal(validateConfig({ captureMode: 'hex', idleGapSeconds: '0.01',
+        enableHeader: true, headerHex: 'not used' }).captureMode, 'hex');
+    assert.throws(() => validateConfig({ serialData: '6' }), /数据位/);
+    assert.throws(() => validateConfig({ serialParity: 'invalid' }), /奇偶校验/);
+});
+
 test('rejects invalid channel, point and network port values instead of coercing', () => {
     assert.throws(() => parseIntInRange('0', 1, 24, '通道数'), /通道数/);
     assert.throws(() => parseIntInRange('25', 1, 24, '通道数'), /通道数/);
@@ -72,4 +84,24 @@ test('one hour at 1000 Hz supports 50 channels while rejecting larger limits', (
         plotWindowPoints: '65536' }).channelsCount, '50');
     assert.throws(() => validateConfig({ channelsCount: '51' }), /通道数/);
     assert.throws(() => validateConfig({ maxPoints: '3600001' }), /采样点数/);
+});
+
+test('validates nested monitor display settings without modifying imported configuration', () => {
+    const config = { captureMode: 'hex', dataType: 'uint8', monitorDisplay: {
+        hexBytesPerLine: '16', hexGroupBytes: '4', showRx: false,
+        textInvalid: 'escape', textNewline: 'line-break', textTab: 'spaces-4',
+        timestamp: 'relative', keyword: 'alarm\nWARNING', keywordColor: '#abcdef',
+        keywordCaseSensitive: true, foldLong: true, foldLines: 4, refreshRate: '20'
+    } };
+    const before = JSON.stringify(config);
+    assert.equal(validateConfig(config), config);
+    assert.equal(JSON.stringify(config), before);
+    for (const monitorDisplay of [null, [], 'bad', { hexBytesPerLine: 12 },
+        { showRx: 'false' }, { textInvalid: 'ignore' }, { textTab: 'spaces-3' },
+        { foldLines: 0 }, { foldLines: 65 }, { refreshRate: 60 },
+        { keyword: 'a'.repeat(257) }, { keyword: new Array(33).fill('alarm').join('\n') },
+        { keywordColor: 'red' }]) {
+        assert.throws(() => validateConfig({ monitorDisplay }));
+    }
+    assert.equal(validateConfig({ captureMode: 'text' }).monitorDisplay, undefined);
 });

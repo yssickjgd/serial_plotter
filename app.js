@@ -22,10 +22,12 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 document.addEventListener('DOMContentLoaded', () => {
-    const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser,
-        MonitorView, MonitorSearch, SendController, ConfigStore, exportFrameCsv, writeFrameCsv,
-        collectConfigFromView, applyConfigToView, updatePlotOptionVisibility,
-        parseIntInRange, parsePort, validateConfig, yRangeError, normalizeYConfig } = globalThis.SerialPlotter;
+    const { Limits, FrameBuffer, Plotter, SerialEngine, NetEngine, DataParser, RawFrameParser, bindAllSelectWheels,
+        MonitorView, MonitorDisplay, MonitorDisplayView, MonitorSearch, SendController, ConfigStore, exportFrameCsv, writeFrameCsv,
+        captureExportChunks, writeCaptureExport, CaptureHistory, replayCaptureHistory, TextCharacterCounter,
+        HistoryWorkerPool, countCaptureText,
+        collectConfigFromView, applyConfigToView, updatePlotOptionVisibility, CaptureDefaults,
+        parseIntInRange, parsePort, validateConfig, yRangeError, normalizeYConfig, formatChannelId } = globalThis.SerialPlotter;
 
     /* ─────────────────────────────────────────────────────────
      *  1. 工具函数（纯函数，无副作用）
@@ -58,8 +60,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const serialAdapter = new SerialEngine();   // 串口通信适配器
     const netAdapter = new NetEngine();      // 网络通信适配器（通过 bridge.js）
-    const parser = new DataParser();     // 二进制帧解析器
+    let parser = new DataParser();     // 二进制帧解析器
+    let rawParser = new RawFrameParser();
+    const captureHistory = new CaptureHistory();
+    let rebuildingHistory = false;
+    let drainingCapture = false;
+    let historyGeneration = 0;
+    let historyWorkerPool = null;
+    let textCounter = new TextCharacterCounter();
+    let pendingChannelSettings = null;
+    let appliedFormat = null;
+    let committedFormat = null;
+    const captureMode = () => appliedFormat?.captureMode ?? 'number';
+    const activeParser = () => captureMode() === 'number' ? parser : rawParser;
     const frames = new FrameBuffer(1, 1000);
+    const txFrames = new FrameBuffer(1, 1000);
+    txFrames.setRawMode(true);
     const plotter = new Plotter('waveform-canvas', frames);  // 波形绘图引擎
 
     let activeEngine = null;    // 当前激活的通信引擎（serialAdapter 或 netAdapter）
@@ -93,7 +109,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const channelsInput = document.getElementById('channels-count');
     const maxPointsInput = document.getElementById('max-points');
     const plotWindowPointsInput = document.getElementById('plot-window-points');
-    const applyBtn = document.getElementById('btn-apply-format');
+    const captureModeSelect = document.getElementById('capture-mode');
+    const rebuildHistoryChk = document.getElementById('rebuild-history');
+    const textEncoding = document.getElementById('text-encoding');
+    const textBoundary = document.getElementById('text-boundary');
+    const idleGapSeconds = document.getElementById('idle-gap-seconds');
+    const formatApplyStatus = document.getElementById('format-apply-status');
 
     // —— 通道 Tab ——
     const channelListDiv = document.getElementById('channel-config-list');
@@ -118,21 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotInfoRow = document.getElementById('plot-info-row');
     const plotFpsLabel = document.getElementById('stat-plot-fps');
 
-    const plotChoiceGroups = [...document.querySelectorAll('[data-plot-choice]')];
-    const syncPlotChoices = () => {
-        for (const group of plotChoiceGroups) {
-            const value = document.getElementById(group.dataset.plotChoice).value;
-            group.querySelectorAll('input[type="radio"]').forEach(radio => {
-                radio.checked = radio.value === value;
-            });
-        }
-    };
-    for (const group of plotChoiceGroups) group.addEventListener('change', event => {
-        if (!event.target.checked) return;
-        const control = document.getElementById(group.dataset.plotChoice);
-        control.value = event.target.value;
-        control.dispatchEvent(new Event('change'));
-    });
+    bindAllSelectWheels(document);
 
     // 时域/频域独立的 Y 轴范围（字符串值，与 UI 输入框同步）
     let plotYBounds = {
@@ -144,6 +151,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const pauseBtn = document.getElementById('btn-pause');
     const clearBtn = document.getElementById('btn-clear');
     const exportBtn = document.getElementById('btn-export');
+    const exportFormat = document.getElementById('export-format');
+    const exportDirection = document.getElementById('export-direction');
+    const exportTimestamps = document.getElementById('export-timestamps');
+    const exportMarkers = document.getElementById('export-markers');
+    const exportFormats = { number: 'csv', hex: 'hex-text', text: 'text' };
+    let exporting = false;
 
     // —— 配置导入导出 ——
     const exportCfgBtn = document.getElementById('btn-export-cfg');
@@ -154,45 +167,24 @@ document.addEventListener('DOMContentLoaded', () => {
     // —— 字节流监视台 ——
     const logContent = document.getElementById('data-log');
     const monitor = new MonitorView(logContent, frames);
+    const syncMonitorDisplay = options => {
+        monitor.setDisplayOptions(options);
+        plotter.setNavigationColors({ match: options.searchMatchColor, current: options.searchCurrentColor });
+    };
+    const monitorDisplayView = new MonitorDisplayView(document, {
+        onChange: options => { syncMonitorDisplay(options); saveConfig(); }
+    });
     let monitorOrder = 0;
-    const waveformToggle = document.getElementById('show-waveform');
-    const monitorDisplayMode = document.getElementById('monitor-display-mode');
     const monitorSearchQuery = document.getElementById('monitor-search-query');
     const monitorSearchTolerance = document.getElementById('monitor-search-tolerance');
     const monitorSearchChannel = document.getElementById('monitor-search-channel');
     const monitorSearchChannelToggle = document.getElementById('monitor-search-channel-toggle');
     const monitorSearchChannelOptions = document.getElementById('monitor-search-channel-options');
     const monitorSearchStatus = document.getElementById('monitor-search-status');
-    let searchOrigin = 'byte';
-    for (const origin of ['wave', 'byte']) {
-        const choice = document.getElementById(`monitor-search-origin-${origin}`);
-        choice.checked = origin === searchOrigin;
-        choice.addEventListener('change', () => {
-            if (!choice.checked) return;
-            searchOrigin = origin;
-            for (const value of ['wave', 'byte'])
-                document.getElementById(`monitor-search-origin-${value}`).checked = value === origin;
-        });
-    }
-
-    const bindVisibleChoice = (fieldId, values) => {
-        const field = document.getElementById(fieldId);
-        const choices = values.map(value => document.getElementById(`${fieldId}-${value}`));
-        const sync = () => choices.forEach((choice, index) => {
-            choice.checked = field.value === values[index];
-        });
-        choices.forEach((choice, index) => choice.addEventListener('change', () => {
-            if (!choice.checked) return;
-            field.value = values[index];
-            field.dispatchEvent(new Event('change'));
-        }));
-        field.addEventListener('change', sync);
-        sync();
-        return sync;
-    };
-    bindVisibleChoice('monitor-display-mode', ['hex', 'ascii', 'number']);
-    bindVisibleChoice('send-mode', ['hex', 'text']);
-    const syncSendIntervalUnit = bindVisibleChoice('send-interval-unit', ['s', 'hz']);
+    const monitorSearchCase = document.getElementById('monitor-search-case-sensitive');
+    monitorSearchCase.checked = true;
+    const searchOriginSelect = document.getElementById('monitor-search-origin');
+    let numericSearchOrigin = searchOriginSelect.value;
 
     // —— 发送面板 ——
     const sendModeSelect = document.getElementById('send-mode');
@@ -240,6 +232,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const txValue = document.getElementById('stat-tx-value');
     const frameRateValue = document.getElementById('stat-fps-value');
     const failureValue = document.getElementById('stat-fail-value');
+    const failureLabel = document.getElementById('stat-fail-label');
+    const renderTextStatistics = () => {
+        if (captureMode() !== 'text') {
+            failureLabel.textContent = '校验失败:';
+            return;
+        }
+        failureLabel.textContent = '失败字符 / 总字符:';
+        const ratio = textCounter.total ? textCounter.failed / textCounter.total * 100 : 0;
+        failureValue.textContent = `${textCounter.failed} / ${textCounter.total} (${ratio.toFixed(1)}%)`;
+    };
     const plotFrameCount = () => plotter.displayMode === 'frequency'
         ? plotter.completedSpectrumDraws : plotter.completedDraws;
     let plotFpsLastMode = plotter.displayMode;
@@ -259,31 +261,33 @@ document.addEventListener('DOMContentLoaded', () => {
         plotFpsLastDraws = currentDraws;
         plotFpsLastMode = mode;
         plotFpsLastAt = now;
-        if (capturePaused) {
+        renderTextStatistics();
+        if (capturePaused || rebuildingHistory) {
             // 暂停期间只同步基准值，避免恢复后出现瞬时峰值
             stats._rxLast = stats.rxBytes;
             stats._txLast = stats.txBytes;
-            stats._framesLast = parser.frameCount;
-            stats._failsLast = parser.failCount;
+            stats._framesLast = activeParser().frameCount;
+            stats._failsLast = activeParser().failCount;
             return;
         }
 
         const rxBps = stats.rxBytes - stats._rxLast;
         const txBps = stats.txBytes - stats._txLast;
-        const frames = (parser.frameCount - stats._framesLast) / (stats._period / 1000);
-        const fails = parser.failCount - stats._failsLast;
+        const receivingParser = activeParser();
+        const frames = (receivingParser.frameCount - stats._framesLast) / (stats._period / 1000);
+        const fails = receivingParser.failCount - stats._failsLast;
         const total = frames + fails;
         const failPct = total > 0 ? ((fails / total) * 100).toFixed(1) : '0.0';
 
         rxValue.textContent = `${formatBytes(rxBps)}/s`;
         txValue.textContent = `${formatBytes(txBps)}/s`;
         frameRateValue.textContent = `${frames} f/s`;
-        failureValue.textContent = `${failPct}%`;
+        if (captureMode() !== 'text') failureValue.textContent = `${failPct}%`;
 
         stats._rxLast = stats.rxBytes;
         stats._txLast = stats.txBytes;
-        stats._framesLast = parser.frameCount;
-        stats._failsLast = parser.failCount;
+        stats._framesLast = receivingParser.frameCount;
+        stats._failsLast = receivingParser.failCount;
         stats.framesPerSec = frames;
         plotter.setSampleRateHz(frames);
     }, stats._period);
@@ -341,17 +345,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     plotter.onStatsUpdate = renderPlotStats;
     /* ─────────────────────────────────────────────────────────
-     *  5. Tab 切换（通讯 / 帧格式 / 通道）
+     *  5. 左右侧栏独立切换栏目
      * ───────────────────────────────────────────────────────── */
 
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
+    document.querySelectorAll('.tab-group').forEach(group => {
+        group.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                group.querySelectorAll('.tab-btn').forEach(button => button.classList.remove('active'));
+                group.querySelectorAll('.tab-content').forEach(panel => panel.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+            });
         });
     });
+
+    const syncSidebarTabs = () => {
+        monitorDisplayView.setMode(captureMode());
+        for (const id of ['tab-monitor-config', 'tab-monitor-config-button', 'tab-export', 'tab-export-button'])
+            document.getElementById(id).hidden = false;
+        const wave = document.getElementById('tab-waveform-config');
+        const waveButton = document.getElementById('tab-waveform-config-button');
+        wave.hidden = waveButton.hidden = captureMode() !== 'number';
+        if (wave.hidden && wave.classList.contains('active')) {
+            wave.classList.remove('active');
+            waveButton.classList.remove('active');
+            document.getElementById('tab-monitor-config').classList.add('active');
+            document.getElementById('tab-monitor-config-button').classList.add('active');
+        }
+    };
 
 
     /* ─────────────────────────────────────────────────────────
@@ -388,7 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /* 窗口缩小时约束侧栏宽度不超出可用空间 */
     window.addEventListener('resize', () => {
-        applyRightWidth(channelSidebar.offsetWidth);
+        if (!channelSidebar.hidden) applyRightWidth(channelSidebar.offsetWidth);
         applySidebarWidth(sidebar.offsetWidth);
     });
 
@@ -443,13 +464,15 @@ document.addEventListener('DOMContentLoaded', () => {
     let manualVerticalSplit = false;
     let waveformVisible = true;
     const minLogHeight = 92; // 四条 20px 记录行和上下各 6px 内边距
+    const navigationPanelGap = 6; // 对应 .navigation-panel 的上边距
     const mainDisplayVerticalPadding = 16; // 对应 .main-display 的上下各 8px
 
     const minimumMonitorHeight = () => monitorHeader.offsetHeight + monitorStats.offsetHeight +
-        sendPanel.offsetHeight + navigationPanel.offsetHeight + minLogHeight + 8;
+        sendPanel.offsetHeight + minLogHeight + 8;
     const minimumCanvasHeight = () => Math.max(60, plotHeader.offsetHeight + 24);
     const verticalUsableHeight = () => Math.max(140, mainDisplay.clientHeight -
-        mainDisplayVerticalPadding - vResizer.offsetHeight);
+        mainDisplayVerticalPadding - navigationPanel.offsetHeight - navigationPanelGap - vResizer.offsetHeight -
+        (rebuildingHistory ? document.getElementById('history-rebuild-progress').offsetHeight : 0));
 
     /** 根据 canvasH 重新分配波形区和监视台的高度，与 applySidebarWidth 对应 */
     const applyVerticalHeights = () => {
@@ -483,19 +506,12 @@ document.addEventListener('DOMContentLoaded', () => {
             sendPanel]) toolsResizeObserver.observe(section);
     }
 
-    waveformToggle.addEventListener('change', () => {
-        waveformVisible = waveformToggle.checked;
-        plotter.isVisible = waveformVisible;
-        applyVerticalHeights();
-        if (waveformVisible) plotter.resize();
-    });
-
     const focusFrameInBothMonitors = index => {
-        if (plotViewMode.value !== 'time') {
+        if (captureMode() === 'number' && plotViewMode.value !== 'time') {
             plotViewMode.value = 'time';
             plotViewMode.dispatchEvent(new Event('change'));
         }
-        plotter.jumpToFrame(index);
+        if (captureMode() === 'number') plotter.jumpToFrame(index);
         monitor.jumpToFrame(index);
     };
 
@@ -505,17 +521,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const relative = document.getElementById('nav-jump-relative');
         const relativeUnit = document.getElementById('nav-jump-relative-unit');
         const status = document.getElementById('nav-jump-status');
-        for (const value of ['absolute', 'relative']) {
-            const choice = document.getElementById(`nav-jump-mode-${value}`);
-            choice.addEventListener('change', () => {
-                if (!choice.checked) return;
-                mode.value = value;
-                mode.dispatchEvent(new Event('change'));
-            });
-        }
         mode.addEventListener('change', () => {
-            for (const value of ['absolute', 'relative'])
-                document.getElementById(`nav-jump-mode-${value}`).checked = mode.value === value;
             absolute.hidden = mode.value !== 'absolute';
             relative.hidden = mode.value !== 'relative';
             relativeUnit.hidden = mode.value !== 'relative';
@@ -558,18 +564,22 @@ document.addEventListener('DOMContentLoaded', () => {
     let channelCheckboxes = [];
     const toolPanels = [navTimeTools, navSearchTools];
     const toolControlIds = [
-        'nav-jump-mode-absolute', 'nav-jump-mode-relative',
+        'nav-jump-mode',
         'nav-jump-absolute', 'nav-jump-relative', 'nav-jump-button',
         'monitor-search-query', 'monitor-search-tolerance', 'monitor-search-channel-toggle',
         'monitor-search-nearest', 'monitor-search-prev', 'monitor-search-next',
-        'monitor-search-origin-wave', 'monitor-search-origin-byte'
+        'monitor-search-origin', 'monitor-search-case-sensitive'
     ];
     const syncTimeTools = () => {
+        const busy = rebuildingHistory || drainingCapture;
+        const enabled = capturePaused && !busy;
+        maxPointsInput.disabled = plotWindowPointsInput.disabled = busy;
         for (const tools of toolPanels)
-            tools.classList[capturePaused ? 'remove' : 'add']('tools-disabled');
+            tools.classList[enabled ? 'remove' : 'add']('tools-disabled');
         for (const id of toolControlIds)
-            document.getElementById(id).disabled = !capturePaused;
-        for (const { input } of channelCheckboxes) input.disabled = !capturePaused;
+            document.getElementById(id).disabled = !enabled;
+        for (const { input } of channelCheckboxes) input.disabled = !enabled;
+        searchOriginSelect.disabled = !enabled || captureMode() !== 'number';
         if (!capturePaused) {
             monitorSearchChannelOptions.hidden = true;
             monitorSearchChannelToggle.ariaExpanded = 'false';
@@ -584,12 +594,20 @@ document.addEventListener('DOMContentLoaded', () => {
     let selectedSearchChannels = null; // null means all channels
     const selectedChannelFilter = () => selectedSearchChannels === null
         ? -1 : [...selectedSearchChannels].sort((left, right) => left - right);
+    const searchChannelLabel = channel => {
+        const number = formatChannelId(channel);
+        const name = plotter.channels[channel]?.name;
+        return name && name !== number ? `${number} · ${name}` : number;
+    };
     const syncSearchChannelSelection = () => {
         const all = selectedSearchChannels === null;
-        for (const { input, channel } of channelCheckboxes)
+        for (const { input, channel, label, text } of channelCheckboxes) {
             input.checked = channel < 0 ? all : !all && selectedSearchChannels.has(channel);
+            text.textContent = channel < 0 ? '全部通道' : searchChannelLabel(channel);
+            label.title = text.textContent;
+        }
         const names = all ? [] : [...selectedSearchChannels]
-            .sort((left, right) => left - right).map(channel => `CH${channel + 1}`);
+            .sort((left, right) => left - right).map(searchChannelLabel);
         monitorSearchChannelToggle.textContent = all ? '全部通道' :
             names.length <= 2 ? names.join('、') : `已选 ${names.length} 通道`;
         monitorSearchChannelToggle.title = all ? '搜索全部通道' : names.join('、');
@@ -608,7 +626,9 @@ document.addEventListener('DOMContentLoaded', () => {
             input.type = 'checkbox';
             input.value = String(channel);
             input.disabled = !capturePaused;
-            label.append(input, channel < 0 ? '全部通道' : `CH${channel + 1}`);
+            const text = document.createElement('span');
+            text.className = 'search-channel-name';
+            label.append(input, text);
             input.addEventListener('change', () => {
                 if (channel < 0) selectedSearchChannels = null;
                 else {
@@ -620,7 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 syncSearchChannelSelection();
                 invalidateSearch();
             });
-            channelCheckboxes.push({ input, channel });
+            channelCheckboxes.push({ input, channel, label, text });
             monitorSearchChannelOptions.appendChild(label);
         }
         syncSearchChannelSelection();
@@ -648,7 +668,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchReady = false;
     let pendingSearchAction = null;
     const syncSearchFields = () => {
-        const numeric = monitorDisplayMode.value === 'number';
+        const numeric = captureMode() === 'number';
+        document.getElementById('monitor-search-case-wrap').hidden = captureMode() !== 'text';
         monitorSearchTolerance.hidden = !numeric;
         monitorSearchChannel.hidden = !numeric;
         if (!numeric) {
@@ -656,7 +677,7 @@ document.addEventListener('DOMContentLoaded', () => {
             monitorSearchChannelToggle.ariaExpanded = 'false';
         }
         monitorSearchQuery.placeholder = numeric ? '目标数值' :
-            monitorDisplayMode.value === 'ascii' ? 'ASCII 文本' : '十六进制字节';
+            captureMode() === 'text' ? '文本搜索' : '十六进制字节';
         if (numeric) populateSearchChannels();
         applyVerticalHeights();
     };
@@ -675,11 +696,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     for (const input of [monitorSearchQuery, monitorSearchTolerance])
         input.addEventListener('input', invalidateSearch);
-    monitorDisplayMode.addEventListener('change', () => {
-        monitor.setMode(monitorDisplayMode.value);
-        invalidateSearch();
-        syncSearchFields();
-    });
+    monitorSearchCase.addEventListener('change', invalidateSearch);
     syncSearchFields();
     const showSearchMatch = index => {
         if (!capturePaused) return;
@@ -734,12 +751,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const requestSearch = action => {
         if (!capturePaused) return;
         try {
-            const options = MonitorSearch.parseMonitorSearch(monitorDisplayMode.value,
+            const options = MonitorSearch.parseMonitorSearch(captureMode(),
                 monitorSearchQuery.value, monitorSearchTolerance.value,
-                selectedChannelFilter());
-            const key = JSON.stringify([monitorDisplayMode.value, monitorSearchQuery.value,
-                monitorSearchTolerance.value, selectedChannelFilter(), frames.version]);
-            const request = { action, frame: searchOrigin === 'wave'
+                selectedChannelFilter(), appliedFormat?.textEncoding ?? 'utf-8', monitorSearchCase.checked);
+            const key = JSON.stringify([captureMode(), appliedFormat?.textEncoding, monitorSearchQuery.value,
+                monitorSearchTolerance.value, selectedChannelFilter(),
+                captureMode() === 'text' ? monitorSearchCase.checked : null, frames.version]);
+            const request = { action, frame: captureMode() === 'number' && searchOriginSelect.value === 'wave'
                 ? plotter.currentFrameIndex() : monitor.currentFrameIndex() };
             if (key === searchKey) {
                 if (searchReady) navigateSearch(request);
@@ -842,48 +860,343 @@ document.addEventListener('DOMContentLoaded', () => {
      *  点击"应用"后将配置同步给 DataParser 和 Plotter。
      * ───────────────────────────────────────────────────────── */
 
-    /** 切换帧头/帧尾配置区的启用状态（禁用时半透明 + 不可交互） */
+    /** 未启用的帧头/帧尾输入不占用配置面板空间。 */
     const toggleConfigSection = (checkbox, container) => {
-        container.style.opacity = checkbox.checked ? '1' : '0.4';
-        container.style.pointerEvents = checkbox.checked ? '' : 'none';
+        container.hidden = !checkbox.checked;
     };
 
-    headerChk.addEventListener('change', () => { toggleConfigSection(headerChk, headerConfigDiv); saveConfig(); });
-    footerChk.addEventListener('change', () => { toggleConfigSection(footerChk, footerConfigDiv); saveConfig(); });
+    headerChk.addEventListener('change', () => { toggleConfigSection(headerChk, headerConfigDiv); });
+    footerChk.addEventListener('change', () => { toggleConfigSection(footerChk, footerConfigDiv); });
 
     // 初始化时根据 checkbox 状态设置样式
     toggleConfigSection(headerChk, headerConfigDiv);
     toggleConfigSection(footerChk, footerConfigDiv);
 
-    /** 将当前 UI 上的帧格式配置同步给 parser 和 plotter */
-    const updateParserSettings = () => {
-        const ch = parseIntInRange(channelsInput.value, Limits.minChannels, Limits.maxChannels, '通道数');
-        const maxPoints = parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数');
-        const plotWindowPoints = parseIntInRange(plotWindowPointsInput.value,
-            Limits.minPoints, Limits.maxPlotWindowPoints, '波形监视台内采样点数');
-        parser.setFormat({
-            enableHeader: headerChk.checked,
-            headerHex: headerInput.value,
-            enableFooter: footerChk.checked,
-            footerHex: footerInput.value,
-            dataType: dataTypeSelect.value,
-            isLittleEndian: endiannessSelect.value === 'little',
-            channelsCount: ch,
-            enableChecksum: checksumChk.checked
-        });
+    const readCaptureFormat = () => ({
+        captureMode: captureModeSelect.value, textEncoding: textEncoding.value,
+        textBoundary: textBoundary.value, idleGapSeconds: idleGapSeconds.value,
+        enableHeader: headerChk.checked, headerHex: headerInput.value,
+        enableFooter: footerChk.checked, footerHex: footerInput.value,
+        enableChecksum: checksumChk.checked, dataType: dataTypeSelect.value,
+        endianness: endiannessSelect.value, channelsCount: channelsInput.value
+    });
+    const syncCaptureFields = () => {
+        const mode = captureModeSelect.value;
+        const numeric = mode === 'number';
+        for (const id of ['frame-numeric-settings', 'frame-header-settings',
+            'frame-footer-settings', 'frame-checksum-settings'])
+            document.getElementById(id).hidden = !numeric;
+        document.getElementById('frame-raw-settings').hidden = numeric;
+        document.getElementById('frame-text-settings').hidden = mode !== 'text';
+        document.getElementById('frame-idle-settings').hidden = numeric ||
+            (mode === 'text' && textBoundary.value !== 'idle');
+        const applied = appliedFormat && JSON.stringify(readCaptureFormat()) === JSON.stringify(appliedFormat);
+        formatApplyStatus.textContent = '';
+        formatApplyStatus.hidden = true;
+        formatApplyStatus.dataset.state = applied ? 'applied' : 'editing';
+    };
+    const autoApplyFormat = () => {
+        syncCaptureFields();
+        try { updateParserSettings(); saveConfig(); }
+        catch (error) {
+            formatApplyStatus.textContent = `${error.message}；继续使用上一次有效配置。`;
+            formatApplyStatus.dataset.state = 'invalid';
+            formatApplyStatus.hidden = false;
+        }
+    };
+    for (const input of [captureModeSelect, textEncoding, textBoundary, idleGapSeconds,
+        headerChk, headerInput, footerChk, footerInput, checksumChk,
+        dataTypeSelect, endiannessSelect, channelsInput]) {
+        input.addEventListener('change', autoApplyFormat);
+        if (input.tagName !== 'SELECT' && input.type !== 'checkbox') {
+            input.addEventListener('input', syncCaptureFields);
+            input.addEventListener('keydown', event => {
+                if (event.key === 'Enter') autoApplyFormat();
+            });
+        }
+    }
+
+    const syncExportControls = () => {
+        const mode = captureMode();
+        const allowed = mode === 'number' ? ['csv'] : mode === 'hex' ? ['binary', 'hex-text'] : ['text'];
+        for (const option of exportFormat.options) option.disabled = option.hidden = !allowed.includes(option.value);
+        if (!allowed.includes(exportFormat.value)) exportFormat.value = exportFormats[mode];
+        document.getElementById('wrap-export-direction').hidden = mode === 'number';
+        document.getElementById('export-text-metadata').hidden = exportFormat.value === 'binary';
+        document.getElementById('wrap-export-markers').hidden = mode === 'number';
+        document.getElementById('export-binary-hint').hidden = exportFormat.value !== 'binary';
+        document.getElementById('export-retention-hint').hidden = mode === 'number';
+        exportBtn.disabled = exporting || rebuildingHistory || drainingCapture;
+    };
+    exportFormat.addEventListener('change', () => {
+        exportFormats[captureMode()] = exportFormat.value;
+        syncExportControls();
+    });
+
+    /** Feed archived arrivals into the installed parser without waiting for a silent stream. */
+    const drainCaptureHistory = async (result, generation, next, maxPoints) => {
+        drainingCapture = true;
+        syncTimeTools(); syncExportControls();
+        const progress = document.getElementById('history-rebuild-progress');
+        progress.textContent = '历史解析已完成，正在处理新到达的数据';
+        try {
+            do {
+                result = await replayCaptureHistory(captureHistory,
+                    { ...next, channelsCount: Number(next.channelsCount), isLittleEndian: next.endianness === 'little' },
+                    maxPoints, {
+                        previousResult: { ...result, frames }, preserveCallbacks: true,
+                        stopByte: captureHistory.endByte, maxSliceBytes: 4096,
+                        flushPending: () => capturePaused || !activeEngine,
+                        isCancelled: () => generation !== historyGeneration,
+                        onBoundary: () => { if (next.captureMode === 'text') textCounter.flush(); },
+                        onGap: ({ byteOffset }) => {
+                            textCounter.reset(next.textEncoding,
+                                { byteOffset: byteOffset - captureHistory.streamStartByte });
+                        }
+                    });
+                if (result.cancelled || generation !== historyGeneration) return;
+                monitor.schedule();
+                if (capturePaused) plotter.draw();
+            } while (result.endByte < captureHistory.endByte || result.revision !== captureHistory.revision);
+        } catch (error) {
+            if (generation !== historyGeneration) return;
+            statusText.textContent = `处理接收数据失败: ${error.message}`;
+            setCapturePaused(true);
+        } finally {
+            if (generation === historyGeneration) {
+                drainingCapture = false;
+                if (next.captureMode !== 'number') rawParser.resumeTimers();
+                renderTextStatistics(); monitor.render();
+                syncTimeTools(); syncExportControls();
+            }
+        }
+    };
+
+    const startHistoryRebuild = async (next, ch, maxPoints, plotWindowPoints) => {
+        const generation = ++historyGeneration;
+        historyWorkerPool?.dispose();
+        historyWorkerPool = null;
+        const previousFormat = committedFormat;
+        let installed = false;
+        // Seed captures made through the parser API as well as the normal transport entry.
+        if (!captureHistory.byteLength && frames.length) {
+            for (let i = 0; i < frames.length; i++) {
+                const frame = frames.frameAt(i);
+                captureHistory.append(frame.bytes, { timestamp: frame.timestamp,
+                    arrival: Number.isFinite(frame.timestamp) ? frame.timestamp : i,
+                    order: frame.order });
+            }
+        }
+        parser.reset(); rawParser.reset();
+        drainingCapture = false;
+        rebuildingHistory = true;
+        if (next.captureMode !== 'number' && previousFormat?.captureMode === 'number')
+            numericSearchOrigin = searchOriginSelect.value;
+        appliedFormat = next;
+        invalidateSearch();
+        syncTimeTools(); syncExportControls();
+        const progress = document.getElementById('history-rebuild-progress');
+        progress.hidden = false;
+        progress.textContent = '正在重新解析历史数据 0%';
+        applyVerticalHeights();
+        const snapshotStart = captureHistory.startByte, snapshotEnd = captureHistory.endByte;
+        const workerPool = snapshotEnd - snapshotStart >= 524288 && next.captureMode !== 'hex'
+            ? new HistoryWorkerPool() : null;
+        historyWorkerPool = workerPool;
+        const useWorkers = workerPool?.available === true;
+        const workerLabel = useWorkers ? `（最多 ${workerPool.maxWorkers} 个后台线程）` : '';
+        let counter = new TextCharacterCounter(next.textEncoding,
+            { byteOffset: captureHistory.startByte - captureHistory.streamStartByte });
+        try {
+            const replayFormat = { ...next, channelsCount: ch, isLittleEndian: next.endianness === 'little' };
+            const replayOptions = {
+                stopByte: snapshotEnd,
+                maxSliceBytes: useWorkers ? 65536 : 4096,
+                flushPending: () => capturePaused || !activeEngine,
+                isCancelled: () => generation !== historyGeneration,
+                onBytes: bytes => { if (next.captureMode === 'text' && !useWorkers) counter.write(bytes); },
+                onBoundary: () => { if (next.captureMode === 'text' && !useWorkers) counter.flush(); },
+                onGap: ({ byteOffset }) => counter.reset(next.textEncoding,
+                    { byteOffset: byteOffset - captureHistory.streamStartByte }),
+                onProgress: ({ processedBytes, totalBytes }) => {
+                    if (generation === historyGeneration)
+                        progress.textContent = `正在重新解析历史数据 ${totalBytes ? Math.floor(processedBytes / totalBytes * 100) : 100}%${workerLabel}`;
+                }
+            };
+            if (useWorkers && next.captureMode === 'number') {
+                const headerLength = next.enableHeader ? DataParser.hexToBytes(next.headerHex).length : 0;
+                replayOptions.maxPendingDecodes = workerPool.maxWorkers;
+                replayOptions.decodeBatch = records => {
+                    const frameLength = records[0].bytes.length;
+                    const bytes = new Uint8Array(frameLength * records.length);
+                    for (let i = 0; i < records.length; i++) bytes.set(records[i].bytes, frameLength * i);
+                    return workerPool.runTask({ kind: 'numeric', bytes, frameLength, headerLength,
+                        type: next.dataType, littleEndian: replayFormat.isLittleEndian, channels: ch });
+                };
+            }
+            const result = await replayCaptureHistory(captureHistory, replayFormat, maxPoints, replayOptions);
+            if (!result.cancelled && generation === historyGeneration && useWorkers && next.captureMode === 'text') {
+                counter = await countCaptureText(captureHistory, next, workerPool, {
+                    startByte: snapshotStart, endByte: result.endByte,
+                    isCancelled: () => generation !== historyGeneration,
+                    flushPending: () => (capturePaused || !activeEngine) && result.endByte >= captureHistory.endByte,
+                    onProgress: ({ processedBytes, totalBytes }) => {
+                        if (generation === historyGeneration)
+                            progress.textContent = `正在解码历史文本 ${totalBytes ? Math.floor(processedBytes / totalBytes * 100) : 100}%${workerLabel}`;
+                    }
+                });
+                if (!counter || generation !== historyGeneration) return;
+            }
+            let preparedText = null;
+            if (!result.cancelled && generation === historyGeneration && next.captureMode === 'text') {
+                preparedText = await monitor.prepareText(result.frames, next.textEncoding, {
+                    isCancelled: () => generation !== historyGeneration,
+                    prepareRecord: useWorkers ? task => workerPool.runTask(task) : null,
+                    onProgress: fraction => {
+                        if (generation === historyGeneration)
+                            progress.textContent = `正在准备文本显示 ${Math.floor(fraction * 100)}%${workerLabel}`;
+                    }
+                });
+            }
+            if (result.cancelled || generation !== historyGeneration) return;
+            const txEntries = monitor.extras.filter(entry => entry.kind === 'tx' || entry.kind === 'tx-error');
+            const previousSampleRate = plotter.sampleRateHz;
+            plotter.clear();
+            frames.replaceFrom(result.frames);
+            installed = true;
+            committedFormat = next;
+            if (next.captureMode === 'number') parser = result.parser;
+            else rawParser = result.parser;
+            bindParserCallbacks();
+            textCounter = counter;
+            monitor.clear({ deferRender: true });
+            for (const entry of txEntries) monitor.appendExtra(entry);
+            for (const entry of result.errors.slice(-120)) monitor.appendExtra({ ...entry,
+                reason: frameErrorLabels[entry.type] || '解析错误' });
+            rebuildingHistory = false;
+            if (next.captureMode === 'number' && previousFormat?.captureMode !== 'number')
+                searchOriginSelect.value = numericSearchOrigin;
+            applyCaptureView(next, ch, maxPoints, plotWindowPoints, false, true);
+            if (preparedText) monitor.installPreparedText(preparedText);
+            if (next.captureMode === 'number') {
+                const span = frames.length > 1 ? frames.timestampAt(frames.length - 1) - frames.timestampAt(0) : 0;
+                plotter.setSampleRateHz(span > 0 ? (frames.length - 1) * 1000 / span : previousSampleRate);
+            }
+            monitor.render();
+            plotter.draw();
+            if (result.endByte < captureHistory.endByte || result.revision !== captureHistory.revision)
+                await drainCaptureHistory(result, generation, next, maxPoints);
+            else if (next.captureMode !== 'number') rawParser.resumeTimers();
+        } catch (error) {
+            if (generation !== historyGeneration) return;
+            rebuildingHistory = false;
+            appliedFormat = installed ? next : previousFormat;
+            if (installed) {
+                // A presentation failure must not restore a parser format different from the installed data.
+                monitor.mode = next.captureMode;
+                monitor.encoding = next.textEncoding;
+                try { applyCaptureView(next, ch, maxPoints, plotWindowPoints, false); } catch (_) { }
+            }
+            formatApplyStatus.hidden = false;
+            formatApplyStatus.textContent = `历史重新解析失败：${error.message}；原始字节仍已保留。`;
+            setCapturePaused(true);
+            syncExportControls();
+        } finally {
+            workerPool?.dispose();
+            if (historyWorkerPool === workerPool) historyWorkerPool = null;
+            if (generation === historyGeneration) { progress.hidden = true; applyVerticalHeights(); }
+        }
+    };
+
+    const applyCaptureView = (next, ch, maxPoints, plotWindowPoints, configure, deferRender = false) => {
+        const capacityShrank = maxPoints < plotter.maxPoints;
+        if (next.captureMode !== 'number') {
+            if (appliedFormat?.captureMode === 'number') numericSearchOrigin = searchOriginSelect.value;
+            searchOriginSelect.value = 'byte';
+        } else if (appliedFormat && appliedFormat.captureMode !== 'number') {
+            searchOriginSelect.value = numericSearchOrigin;
+        }
+        appliedFormat = next;
+        if (next.captureMode === 'number') {
+            if (configure) parser.setFormat({ ...next, isLittleEndian: next.endianness === 'little', channelsCount: ch });
+        } else if (configure) {
+            rawParser.setFormat({ boundary: next.captureMode === 'hex' ? 'idle' : next.textBoundary,
+                idleGapSeconds: Number(next.idleGapSeconds),
+                encoding: next.captureMode === 'hex' ? 'utf-8' : next.textEncoding });
+            rawParser.resumeTimers();
+        }
         plotter.setChannelCount(ch);
+        frames.setRawMode(next.captureMode !== 'number');
+        if (pendingChannelSettings) {
+            plotter.setChannelSettings(pendingChannelSettings);
+            pendingChannelSettings = null;
+        }
         populateSearchChannels();
         plotter.setMaxPoints(maxPoints);
+        if (capacityShrank && frames.length) captureHistory.pruneBefore(frames.rawByteOffsetAt(0));
+        txFrames.resize(maxPoints);
         plotter.setPlotWindowPoints(Math.min(plotWindowPoints, maxPoints));
         plotWindowPointsInput.value = String(plotter.plotWindowPoints);
         plotWindowPointsInput.max = String(Math.min(maxPoints, Limits.maxPlotWindowPoints));
         rebuildChannelList();
+        monitor.setEncoding(next.textEncoding, { deferRender });
+        monitor.setMode(next.captureMode, { deferRender });
+        waveformVisible = next.captureMode === 'number';
+        plotter.isVisible = waveformVisible;
+        channelSidebar.hidden = rightResizer.hidden = false;
+        syncSidebarTabs();
+        document.getElementById('channels-display-panel').hidden = !waveformVisible;
+        document.getElementById('channels-list-panel').hidden = !waveformVisible;
+        document.getElementById('plot-window-control').hidden = !waveformVisible;
+        document.getElementById('max-points-label').textContent = waveformVisible ? '最大采样点数' : '最大帧数量';
+        exportFormat.value = exportFormats[captureMode()];
+        syncExportControls();
+        stats._framesLast = activeParser().frameCount;
+        stats._failsLast = activeParser().failCount;
+        syncCaptureFields(); syncSearchFields(); syncTimeTools(); applyVerticalHeights();
         syncPlotDisplaySettings();
+        renderTextStatistics();
+        if (next.captureMode !== 'text') failureValue.textContent = '0.0%';
+        committedFormat = next;
+    };
+
+    /** 输入完成且合法时自动应用，失败时继续使用原有解析器。 */
+    const updateParserSettings = () => {
+        const next = readCaptureFormat();
+        validateConfig(next);
+        const ch = parseIntInRange(channelsInput.value, Limits.minChannels, Limits.maxChannels, '通道数');
+        const maxPoints = parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数');
+        const plotWindowPoints = parseIntInRange(plotWindowPointsInput.value,
+            Limits.minPoints, Limits.maxPlotWindowPoints, '波形监视台内采样点数');
+        const signature = format => format.captureMode === 'number'
+            ? ['number', format.dataType, format.endianness, format.channelsCount,
+                format.enableHeader, format.headerHex, format.enableFooter, format.footerHex, format.enableChecksum]
+            : ['raw', format.captureMode === 'text' ? format.textEncoding : 'utf-8',
+                format.captureMode === 'text' ? format.textBoundary : 'idle',
+                Number(format.idleGapSeconds)];
+        const changed = !appliedFormat || next.captureMode !== appliedFormat.captureMode ||
+            JSON.stringify(signature(next)) !== JSON.stringify(signature(appliedFormat));
+        if (appliedFormat && next.captureMode !== appliedFormat.captureMode) invalidateSearch();
+        if ((changed || rebuildingHistory) && (captureHistory.byteLength || frames.length || txFrames.length) && !rebuildHistoryChk.checked) {
+            clearBtn.click();
+            textCounter.reset(next.textEncoding);
+            applyCaptureView(next, ch, maxPoints, plotWindowPoints, true);
+            return;
+        }
+        if ((changed || rebuildingHistory) && (captureHistory.byteLength || frames.length)) {
+            startHistoryRebuild(next, ch, maxPoints, plotWindowPoints);
+            return;
+        }
+        if (changed) { parser.reset(); rawParser.reset(); }
+        if (changed) textCounter.reset(next.textEncoding);
+        applyCaptureView(next, ch, maxPoints, plotWindowPoints, changed);
     };
 
     maxPointsInput.addEventListener('change', () => {
         try {
             plotter.setMaxPoints(parseIntInRange(maxPointsInput.value, Limits.minPoints, Limits.maxPoints, '采样点数'));
+            txFrames.resize(plotter.maxPoints);
+            if (frames.length) captureHistory.pruneBefore(frames.rawByteOffsetAt(0));
             plotWindowPointsInput.value = String(plotter.plotWindowPoints);
             plotWindowPointsInput.max = String(Math.min(plotter.maxPoints, Limits.maxPlotWindowPoints));
             monitor.render();
@@ -904,15 +1217,6 @@ document.addEventListener('DOMContentLoaded', () => {
             plotWindowPointsInput.value = String(plotter.plotWindowPoints);
             alert(error.message);
         }
-    });
-
-    applyBtn.addEventListener('click', () => {
-        try { updateParserSettings(); }
-        catch (error) { alert(error.message); return; }
-        saveConfig();
-        // 短暂反馈，让用户知道配置已生效
-        applyBtn.textContent = '✓ 已应用';
-        setTimeout(() => { applyBtn.textContent = '应用帧格式配置'; }, 1200);
     });
 
 
@@ -963,7 +1267,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (metas.length === 0) {
             const p = document.createElement('p');
             p.className = 'hint-text';
-            p.textContent = '请先在帧格式页设置通道数并点击应用。';
+            p.textContent = '请先在帧格式页设置通道数。';
             channelListDiv.appendChild(p);
             return;
         }
@@ -971,12 +1275,13 @@ document.addEventListener('DOMContentLoaded', () => {
         metas.forEach(meta => {
             const row = document.createElement('div');
             row.className = 'channel-row';
+            const channelId = formatChannelId(meta.index);
 
             // CH 按钮展开该通道的放大与偏移设置。
             const channelToggle = document.createElement('button');
             channelToggle.type = 'button';
             channelToggle.className = 'channel-row-label channel-expand-toggle';
-            channelToggle.textContent = `CH${meta.index + 1}`;
+            channelToggle.textContent = channelId;
             channelToggle.ariaExpanded = String(expandedChannelIndices.has(meta.index));
             channelToggle.style.opacity = meta.visible ? '1' : '0.4';
 
@@ -996,9 +1301,11 @@ document.addEventListener('DOMContentLoaded', () => {
             nameInput.type = 'text';
             nameInput.className = 'channel-name-input';
             nameInput.value = meta.name;
-            nameInput.placeholder = `CH${meta.index + 1}`;
+            nameInput.placeholder = channelId;
             nameInput.addEventListener('change', () => {
-                plotter.setChannelName(meta.index, nameInput.value || `CH${meta.index + 1}`);
+                plotter.setChannelName(meta.index, nameInput.value || channelId);
+                nameInput.value = plotter.getChannelMeta()[meta.index].name;
+                syncSearchChannelSelection();
                 saveConfig();
             });
 
@@ -1043,7 +1350,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 input.type = 'number';
                 input.step = 'any';
                 input.value = String(value);
-                input.ariaLabel = `CH${meta.index + 1} ${text}`;
+                input.ariaLabel = `${channelId} ${text}`;
                 input.style.display = enabled ? '' : 'none';
                 option.append(checkLabel, input);
                 const update = () => {
@@ -1101,7 +1408,6 @@ document.addEventListener('DOMContentLoaded', () => {
         plotYScaleMode.value = plotYBounds[mode].scaleMode;
         syncPlotDisplaySettings(); saveConfig();
         updatePlotOptionVisibility(configElements);
-        syncPlotChoices();
     });
 
     // 其他绘图选项变化时同步
@@ -1115,7 +1421,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             syncPlotDisplaySettings({ resetYZoom: el === plotYScaleMode });
             updatePlotOptionVisibility(configElements);
-            syncPlotChoices();
             saveConfig();
         }));
 
@@ -1151,6 +1456,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const CONFIG_KEY = 'serialplot_v3_config';
 
     const configElements = {
+        monitorDisplay: monitorDisplayView.elements,
+        captureMode: captureModeSelect, textEncoding, textBoundary, idleGapSeconds,
         connType: connTypeSelect,
         serialBaud: document.getElementById('serial-baud'),
         serialData: document.getElementById('serial-data'),
@@ -1161,7 +1468,7 @@ document.addEventListener('DOMContentLoaded', () => {
         netLocalPort: document.getElementById('net-local'),
         enableHeader: headerChk, headerHex: headerInput,
         enableFooter: footerChk, footerHex: footerInput,
-        enableChecksum: checksumChk, dataType: dataTypeSelect,
+        enableChecksum: checksumChk, dataType: dataTypeSelect, rebuildHistory: rebuildHistoryChk,
         endianness: endiannessSelect, channelsCount: channelsInput,
         maxPoints: maxPointsInput, plotWindowPoints: plotWindowPointsInput,
         sendInterval: sendIntervalInput, sendIntervalUnit,
@@ -1172,17 +1479,28 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     /** 从当前 UI 状态收集完整配置对象 */
-    const getConfig = () => collectConfigFromView(configElements,
-        plotYBounds, plotter.getChannelMeta());
+    const getConfig = () => ({ ...collectConfigFromView({ ...configElements, monitorDisplay: undefined },
+        plotYBounds, pendingChannelSettings || plotter.getChannelMeta()), ...appliedFormat,
+        monitorDisplay: { ...monitor.displayOptions } });
 
     /** 将配置对象应用到 UI，并同步到 parser / plotter */
     const applyConfig = (cfg) => {
         if (!cfg) return;
-        const candidate = { ...getConfig(), ...cfg };
+        if (typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('配置必须是 JSON 对象');
+        const candidate = { ...getConfig(), ...CaptureDefaults, ...cfg };
+        candidate.monitorDisplay = cfg.monitorDisplay === undefined ? MonitorDisplay.DEFAULTS : cfg.monitorDisplay;
+        candidate.connType = cfg.connType || 'serial';
+        candidate.plotFftWindow = cfg.plotFftWindow ?? 'hann';
+        if (cfg.plotWindowPoints === undefined)
+            candidate.plotWindowPoints = String(Math.min(1000, Number(candidate.maxPoints) || 1000));
         Object.assign(candidate, normalizeYConfig(cfg, candidate));
         validateConfig(candidate);
-        applyConfigToView(cfg, {
+        applyConfigToView(candidate, {
             elements: configElements, bounds: plotYBounds, updateConnectionModeUI,
+            updateMonitorDisplay: () => {
+                monitorDisplayView.apply(candidate.monitorDisplay);
+                syncMonitorDisplay(monitorDisplayView.read());
+            },
             updateFrameFormat: () => {
                 toggleConfigSection(headerChk, headerConfigDiv);
                 toggleConfigSection(footerChk, footerConfigDiv);
@@ -1190,12 +1508,13 @@ document.addEventListener('DOMContentLoaded', () => {
             },
             updateChannels: channels => {
                 if (!channels) return;
+                if (rebuildingHistory) { pendingChannelSettings = channels; return; }
                 plotter.setChannelSettings(channels);
+                syncSearchChannelSelection();
                 rebuildChannelList();
             },
-            updatePlot: syncPlotDisplaySettings, syncPlotChoices
+            updatePlot: syncPlotDisplaySettings
         });
-        syncSendIntervalUnit();
     };
 
     const configStore = new ConfigStore({
@@ -1256,10 +1575,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // 其余配置字段变化时自动保存；绘图控件已在上方同步并保存。
-    [checksumChk, dataTypeSelect, endiannessSelect, channelsInput,
-        headerInput, footerInput, sendIntervalUnit]
-        .filter(Boolean)
-        .forEach(el => el.addEventListener('change', saveConfig));
+    sendIntervalUnit.addEventListener('change', saveConfig);
+    rebuildHistoryChk.addEventListener('change', saveConfig);
 
 
     /* ─────────────────────────────────────────────────────────
@@ -1272,37 +1589,59 @@ document.addEventListener('DOMContentLoaded', () => {
     // 所有数据源统一送入 parser
     const globalDataHandler = data => {
         if (capturePaused) return;
-        try { parser.appendData(data); }
+        try {
+            const metadata = captureHistory.append(data, { timestamp: Date.now(),
+                arrival: performance.now(), order: ++monitorOrder });
+            if (rebuildingHistory || drainingCapture) { stats.rxBytes += data.length; return; }
+            activeParser().appendData(data, metadata);
+        }
         catch (error) { setCapturePaused(true); }
     };
     serialAdapter.onData(globalDataHandler);
     netAdapter.onData(globalDataHandler);
 
     // 原始数据到达 → 更新 RX 字节统计
-    parser.onRawData = (bytes) => {
-        stats.rxBytes += bytes.length;
-    };
-
-    // 成功解析一帧 → 更新波形 + 记录日志
-    parser.onFrameParsed = (valuesArr, timeStr, frameBytes, timestamp) => {
-        plotter.addFrame(valuesArr, frameBytes, timeStr, ++monitorOrder, timestamp);
-        monitor.appendFrame();
-    };
-
-    // 帧校验失败 → 记录错误日志
     const frameErrorLabels = {
         checksum: '校验失败', footer: '帧尾不匹配', incomplete: '帧未完整'
     };
-    parser.onFrameError = (type, timeStr, frameBytes) => {
-        const label = frameErrorLabels[type] || '解析错误';
-        monitor.appendExtra({ kind: 'error', time: timeStr, reason: label,
-            bytes: frameBytes, order: ++monitorOrder });
+    const bindParserCallbacks = () => {
+        parser.onRawData = bytes => {
+            if (!drainingCapture) stats.rxBytes += bytes.length;
+            if (captureMode() === 'text') textCounter.write(bytes);
+        };
+        rawParser.onRawData = parser.onRawData;
+        const pruneEvictedHistory = wasFull => {
+            if (wasFull && frames.length) captureHistory.pruneBefore(frames.rawByteOffsetAt(0));
+        };
+        parser.onFrameParsed = (valuesArr, timeStr, frameBytes, timestamp, metadata) => {
+            const wasFull = frames.length === frames.capacity;
+            plotter.addFrame(valuesArr, frameBytes, timeStr, metadata?.order || ++monitorOrder, timestamp,
+                drainingCapture ? { ...metadata, capturedBeforePause: true } : metadata);
+            pruneEvictedHistory(wasFull);
+            monitor.appendFrame();
+        };
+        rawParser.onFrameParsed = (frameBytes, timeStr, timestamp, metadata) => {
+            const wasFull = frames.length === frames.capacity;
+            frames.appendRaw(frameBytes, timeStr, metadata?.order || ++monitorOrder, timestamp, metadata);
+            pruneEvictedHistory(wasFull);
+            monitor.appendFrame();
+        };
+        parser.onFrameError = (type, timeStr, frameBytes, metadata) => {
+            const label = frameErrorLabels[type] || '解析错误';
+            monitor.appendExtra({ kind: 'error', time: timeStr, reason: label,
+                bytes: frameBytes, order: metadata?.order || ++monitorOrder });
+        };
+        parser.onCallbackError = error => {
+            console.error('采集数据处理失败:', error);
+            statusText.textContent = `采集已暂停: ${error.message}`;
+        };
+        rawParser.onCallbackError = error => {
+            parser.onCallbackError(error);
+            rawParser.reset();
+            setCapturePaused(true);
+        };
     };
-
-    parser.onCallbackError = error => {
-        console.error('采集数据处理失败:', error);
-        statusText.textContent = `采集已暂停: ${error.message}`;
-    };
+    bindParserCallbacks();
 
 
     /* ─────────────────────────────────────────────────────────
@@ -1320,7 +1659,12 @@ document.addEventListener('DOMContentLoaded', () => {
             statusIndicator.className = 'status-dot connected';
             connTypeSelect.disabled = true;
         } else {
-            parser.flushPending();
+            captureHistory.markBoundary();
+            if (!rebuildingHistory && !drainingCapture) {
+                activeParser().flushPending();
+                if (frames.rawMode) frames.markStreamEnded();
+                if (captureMode() === 'text') { textCounter.flush(); renderTextStatistics(); }
+            }
             sendController.stop();
             connectBtn.textContent = '请求建立连接';
             connectBtn.classList.replace('btn-danger', 'btn-primary');
@@ -1428,14 +1772,29 @@ document.addEventListener('DOMContentLoaded', () => {
             plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
             monitorSearchStatus.textContent = '';
         }
+        if (paused && !rebuildingHistory && !drainingCapture) {
+            captureHistory.markBoundary();
+            activeParser().flushPending();
+            if (frames.rawMode) frames.markStreamEnded();
+            if (captureMode() === 'text') { textCounter.flush(); renderTextStatistics(); }
+            monitor.render(); plotter.draw();
+        }
+        if (paused && (rebuildingHistory || drainingCapture)) captureHistory.markBoundary();
         syncTimeTools();
-        if (paused) { parser.flushPending(); monitor.render(); plotter.draw(); }
         pauseBtn.textContent = paused ? '恢复捕获队列' : '暂停捕捉';
         pauseBtn.className = paused ? 'btn btn-success' : 'btn btn-secondary';
     };
     pauseBtn.addEventListener('click', () => setCapturePaused(!capturePaused));
 
     clearBtn.addEventListener('click', () => {
+        historyGeneration++;
+        historyWorkerPool?.dispose();
+        historyWorkerPool = null;
+        rebuildingHistory = false;
+        drainingCapture = false;
+        captureHistory.clear();
+        textCounter.reset(appliedFormat.textEncoding);
+        document.getElementById('history-rebuild-progress').hidden = true;
         searchGeneration++;
         searchSession = null;
         searchMatches = [];
@@ -1446,10 +1805,14 @@ document.addEventListener('DOMContentLoaded', () => {
         monitorSearchStatus.textContent = '';
         plotter.setNavigationMarkers({ timeOrder: null, matches: [], currentMatch: -1 });
         plotter.clear();
+        txFrames.clear();
         monitor.clear();
         parser.reset();
+        rawParser.reset();
         parser.frameCount = 0;
         parser.failCount = 0;
+        rawParser.frameCount = 0;
+        rawParser.failCount = 0;
         stats.rxBytes = 0;
         stats.txBytes = 0;
         stats._rxLast = 0;
@@ -1457,44 +1820,71 @@ document.addEventListener('DOMContentLoaded', () => {
         stats._framesLast = 0;
         stats._failsLast = 0;
         stats.framesPerSec = 0;
+        applyCaptureView(appliedFormat, Number(appliedFormat.channelsCount), plotter.maxPoints,
+            plotter.plotWindowPoints, true);
+        renderTextStatistics();
+        syncTimeTools(); syncExportControls();
     });
 
     exportBtn.addEventListener('click', async () => {
-        if (!frames.length) { alert('目前无有效数据可导出。'); return; }
+        if (exporting || rebuildingHistory || drainingCapture) return;
+        const mode = captureMode();
+        const options = { format: exportFormat.value, direction: exportDirection.value,
+            encoding: appliedFormat.textEncoding, timestamps: exportTimestamps.checked, markers: exportMarkers.checked };
+        const sources = mode === 'number' ? [frames] : options.direction === 'rx' ? [frames]
+            : options.direction === 'tx' ? [txFrames] : [frames, txFrames];
+        const count = sources.reduce((total, buffer) => total + buffer.length, 0);
+        if (!count) { alert('当前导出范围内没有已保存的数据。'); return; }
+        const firstOrder = buffer => buffer.length ? buffer.orderAt(0) : null;
+        const firstOrders = sources.map(firstOrder);
         const channels = plotter.getChannelMeta();
-        const filename = `Scientific_Plot_Export_${Date.now()}.csv`;
-        if (frames.length > 50000) {
-            if (typeof window.showSaveFilePicker !== 'function') {
-                alert('大容量 CSV 导出需要支持文件系统保存的 Chrome 或 Edge。');
-                return;
+        const extension = mode === 'number' ? 'csv' : options.format === 'binary' ? 'bin' : 'txt';
+        const filename = `Scientific_Plot_Export_${Date.now()}.${extension}`;
+        let large = count > 50000;
+        if (!large && mode !== 'number') {
+            let bytes = 0;
+            for (const buffer of sources) {
+                for (let i = 0; i < buffer.length && bytes <= 32 * 1024 * 1024; i++) bytes += buffer.rawBytesAt(i).length;
+                if (bytes > 32 * 1024 * 1024) { large = true; break; }
             }
-            let writable;
-            try {
-                const handle = await window.showSaveFilePicker({ suggestedName: filename,
-                    types: [{ description: 'CSV 文件', accept: { 'text/csv': ['.csv'] } }] });
+        }
+        exporting = true;
+        syncExportControls();
+        let writable;
+        try {
+            if (large) {
+                if (typeof window.showSaveFilePicker !== 'function')
+                    throw new Error('大容量导出需要支持文件系统保存的 Chrome 或 Edge');
+                const handle = await window.showSaveFilePicker({ suggestedName: filename });
+                if (captureMode() !== mode || sources.some((buffer, i) => firstOrder(buffer) !== firstOrders[i]))
+                    throw new Error('选择文件期间采集格式或保留窗口已变化，请重新导出');
                 writable = await handle.createWritable();
-                exportBtn.disabled = true;
-                await writeFrameCsv(frames, channels, writable, (done, total) => {
-                    exportBtn.textContent = `正在导出 ${Math.round(done / total * 100)}%`;
-                });
+                const progress = done => { exportBtn.textContent = `正在导出 ${Math.min(100, Math.round(done / count * 100))}%`; };
+                if (mode === 'number') await writeFrameCsv(frames, channels, writable, progress, options);
+                else await writeCaptureExport(frames, txFrames, options, writable, progress);
                 await writable.close();
                 writable = null;
-            } catch (error) {
-                if (writable) await writable.abort();
-                if (error.name !== 'AbortError') alert(`导出失败: ${error.message}`);
-            } finally {
-                exportBtn.disabled = false;
-                exportBtn.textContent = '导出全部通道至 CSV';
+            } else {
+                const parts = mode === 'number' ? ['\uFEFF' + exportFrameCsv(frames, channels, options)]
+                    : [...captureExportChunks(frames, txFrames, options)];
+                const blob = new Blob(parts, { type: extension === 'bin' ? 'application/octet-stream'
+                    : extension === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' });
+                const anchor = document.createElement('a');
+                anchor.href = URL.createObjectURL(blob);
+                anchor.download = filename;
+                anchor.click();
+                URL.revokeObjectURL(anchor.href);
             }
-            return;
+        } catch (error) {
+            if (writable) {
+                try { await writable.abort(); } catch (_) { }
+            }
+            if (error.name !== 'AbortError') alert(`导出失败: ${error.message}`);
+        } finally {
+            exporting = false;
+            exportBtn.textContent = '导出数据';
+            syncExportControls();
         }
-        const csv = exportFrameCsv(frames, channels);
-        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(a.href);
     });
 
 
@@ -1509,8 +1899,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /** 追加一条带时间戳的监视台日志行 */
     const appendMonitorLine = (kind, timeStr, reason, bytes) => {
+        const order = ++monitorOrder;
+        const timestamp = Date.now();
+        if (kind === 'tx') txFrames.appendRaw(bytes, timeStr, order, timestamp);
         monitor.appendExtra({ kind,
-            time: timeStr, reason, bytes: Uint8Array.from(bytes), order: ++monitorOrder });
+            time: timeStr, reason, bytes: Uint8Array.from(bytes), order, timestamp });
     };
 
     const sendController = new SendController({

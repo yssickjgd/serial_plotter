@@ -1,0 +1,60 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '../styles.css'), 'utf8');
+
+function panel(id) {
+    const startTag = new RegExp(`<div[^>]*\\bid="${id}"[^>]*>`).exec(html);
+    assert.ok(startTag, `${id} exists`);
+    const tags = /<div\b[^>]*>|<\/div>/g;
+    tags.lastIndex = startTag.index;
+    let depth = 0, tag;
+    while ((tag = tags.exec(html))) {
+        depth += tag[0].startsWith('</') ? -1 : 1;
+        if (depth === 0) return html.slice(startTag.index, tags.lastIndex);
+    }
+    throw new Error(`Unclosed ${id}`);
+}
+
+test('right sidebar separates byte, waveform, and export settings with no waveform subtabs', () => {
+    assert.match(html, /id="tab-monitor-config-button"[^>]*data-tab="tab-monitor-config">字节流<\/button>/);
+    assert.match(html, /id="tab-waveform-config-button"[^>]*data-tab="tab-waveform-config">波形<\/button>/);
+    const bytes = panel('tab-monitor-config');
+    const wave = panel('tab-waveform-config');
+    const exportPanel = panel('tab-export');
+    assert.ok(bytes.includes('id="monitor-display-panel"'));
+    assert.ok(bytes.includes('id="monitor-config-panel"'));
+    assert.ok(bytes.includes('id="monitor-color-panel"'));
+    assert.ok(bytes.indexOf('id="monitor-config-panel"') < bytes.indexOf('id="monitor-color-panel"'));
+    assert.ok(!bytes.includes('id="channels-list-panel"'));
+    assert.ok(wave.indexOf('id="channels-display-panel"') < wave.indexOf('id="channels-list-panel"'));
+    assert.ok(!wave.includes('tab-bar'));
+    assert.ok(exportPanel.includes('id="export-panel"'));
+    assert.ok(!html.includes('id="tab-channel-config"'));
+});
+
+test('sidebar includes keyword type, record colors and a checked text-search case control', () => {
+    assert.match(html, /<select id="monitor-keyword-format">[\s\S]*?<option value="text"[^>]*>文本/);
+    assert.match(html, /id="monitor-keyword-case-wrap"/);
+    const colors = panel('monitor-color-panel');
+    assert.match(colors, /class="section-title">颜色配置<\/div>/);
+    for (const id of ['keyword', 'rx', 'tx', 'rx-error', 'tx-error', 'search-current', 'search-match']) {
+        const pattern = new RegExp(`type="color" id="monitor-${id}-color"`);
+        assert.match(colors, pattern);
+        assert.doesNotMatch(panel('monitor-config-panel'), pattern);
+    }
+    assert.match(html, /id="monitor-search-case-wrap"[^>]*>[\s\S]*?id="monitor-search-case-sensitive" checked/);
+    assert.match(css, /\.monitor-color-grid\s*\{[^}]*display:\s*grid/);
+});
+
+test('long-frame toggle stays at the first row right edge without a separate layout row', () => {
+    const toggle = /\.monitor-fold-toggle\s*\{([^}]*)\}/.exec(css)?.[1];
+    assert.ok(toggle);
+    assert.match(toggle, /position:\s*absolute/);
+    assert.match(toggle, /right:\s*0/);
+    assert.match(toggle, /top:\s*0/);
+    assert.match(toggle, /height:\s*20px/);
+    assert.match(toggle, /white-space:\s*nowrap/);
+});

@@ -1,8 +1,16 @@
 /** Incremental search over retained decoded samples or the continuous raw byte stream. */
 const searchByteUtils = typeof module !== 'undefined'
     ? require('./byteUtils').ByteUtils : globalThis.SerialPlotter.ByteUtils;
+const searchTextUtils = typeof module !== 'undefined'
+    ? require('./textCodec') : globalThis.SerialPlotter.TextCodec;
 
-function parseMonitorSearch(kind, query, tolerance = 0, channel = -1) {
+function parseMonitorSearch(kind, query, tolerance = 0, channel = -1, encoding = 'utf-8', caseSensitive = true) {
+    if (kind === 'text') {
+        const pattern = [...String(query)];
+        if (!pattern.length) throw new Error('请输入搜索内容');
+        return { kind, pattern, encoding: searchTextUtils.normalizeTextEncoding(encoding),
+            caseSensitive: Boolean(caseSensitive) };
+    }
     if (kind === 'number') {
         const value = Number(query);
         const error = String(tolerance).trim() === '' ? 0 : Number(tolerance);
@@ -47,17 +55,25 @@ class MonitorSearchSession {
         this.position = 0;
         this.matches = [];
         this.matched = 0;
-        if (options.bytes) {
-            const pattern = options.bytes;
+        if (options.kind === 'text') this.textDecoder = new searchTextUtils.MappedTextDecoder(options.encoding,
+            { byteOffset: (frames.rawByteOffsetAt?.(0) ?? 0) - (frames.streamStartByteAt?.(0) ?? 0) });
+        if (options.bytes || options.pattern) {
+            const pattern = options.bytes ?? options.pattern;
+            this.pattern = pattern;
+            // Unicode /iu uses simple case folding: one code point stays one code point.
+            // Unlike whole-string case conversion, it cannot expand ß to ss or İ to i + dot.
+            this.patternMatchers = options.kind === 'text' && options.caseSensitive === false
+                ? pattern.map(char => new RegExp(`^${char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'iu')) : null;
             this.prefix = new Uint32Array(pattern.length);
             for (let i = 1, j = 0; i < pattern.length; i++) {
-                while (j && pattern[i] !== pattern[j]) j = this.prefix[j - 1];
-                if (pattern[i] === pattern[j]) j++;
+                while (j && !this._matchesPattern(pattern[i], j)) j = this.prefix[j - 1];
+                if (this._matchesPattern(pattern[i], j)) j++;
                 this.prefix[i] = j;
             }
             this.recentFrames = new Uint32Array(pattern.length);
             this.recentBytes = new Uint32Array(pattern.length);
             this.bytePosition = 0;
+            this.recentTokens = options.pattern ? new Array(pattern.length) : null;
         }
     }
 
@@ -77,6 +93,15 @@ class MonitorSearchSession {
                 continue;
             }
             const bytes = frames.rawBytesAt(frame);
+            if (options.kind === 'text') {
+                this._consumeText(this.textDecoder.write(bytes, frame));
+                if (frames.streamEndedAt?.(frame)) {
+                    this._consumeText(this.textDecoder.flush());
+                    this.textDecoder = new searchTextUtils.MappedTextDecoder(options.encoding);
+                    this.matched = 0;
+                }
+                continue;
+            }
             for (let byte = 0; byte < bytes.length; byte++) {
                 const slot = this.bytePosition % options.bytes.length;
                 this.recentFrames[slot] = frame;
@@ -98,7 +123,40 @@ class MonitorSearchSession {
             }
         }
         this.position = end;
+        if (this.position >= this.length && this.textDecoder && !this.textFinished) {
+            this._consumeText(this.textDecoder.flush());
+            this.textFinished = true;
+        }
         return this.position >= this.length;
+    }
+
+    _matchesPattern(value, index) {
+        return this.patternMatchers ? this.patternMatchers[index].test(value) : value === this.pattern[index];
+    }
+
+    _consumeText(tokens) {
+        const pattern = this.options.pattern;
+        for (const token of tokens) {
+            if (token.invalid) {
+                this.matched = 0;
+                continue;
+            }
+            for (const char of token.text) {
+                this.recentTokens[this.bytePosition % pattern.length] = token;
+                this.bytePosition++;
+                while (this.matched && !this._matchesPattern(char, this.matched))
+                    this.matched = this.prefix[this.matched - 1];
+                if (this._matchesPattern(char, this.matched)) this.matched++;
+                if (this.matched === pattern.length) {
+                    const start = this.recentTokens[(this.bytePosition - pattern.length) % pattern.length];
+                    this.matches.push({ startFrame: start.startFrame, startByte: start.startByte,
+                        endFrame: token.endFrame, endByte: token.endByte,
+                        startOrder: this.frames.orderAt(start.startFrame),
+                        endOrder: this.frames.orderAt(token.endFrame) });
+                    this.matched = this.prefix[this.matched - 1];
+                }
+            }
+        }
     }
 }
 

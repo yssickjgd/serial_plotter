@@ -37,3 +37,25 @@ test('streamed CSV writes bounded chunks with a UTF-8 BOM', async () => {
     assert.ok(csv.startsWith('Index,value\r\n0,0\r\n'));
     assert.ok(csv.endsWith('1199,1199\r\n'));
 });
+
+
+test('optional CSV timestamps preserve millisecond precision and the retained row order', () => {
+    const { exportFrameCsv } = require('../csvExport');
+    const frames = new FrameBuffer(1, 2);
+    for (let i = 0; i < 3; i++) frames.append([i], Uint8Array.of(i), '', i, 1700000000001 + i);
+    assert.equal(exportFrameCsv(frames, [{ name: 'sensor' }], { timestamps: true }),
+        'Index,Timestamp,sensor\r\n0,2023-11-14T22:13:20.002Z,1\r\n1,2023-11-14T22:13:20.003Z,2\r\n');
+    assert.equal(exportFrameCsv(frames, [{ name: 'sensor' }]), 'Index,sensor\r\n0,1\r\n1,2\r\n');
+});
+
+test('streamed CSV uses the same optional timestamp column as downloaded CSV', async () => {
+    const { exportFrameCsv, writeFrameCsv } = require('../csvExport');
+    const frames = new FrameBuffer(1, 2);
+    frames.append([3], Uint8Array.of(3), '', 0, 1700000000123);
+    const chunks = [];
+    await writeFrameCsv(frames, [{ name: 'CH1' }], { async write(bytes) { chunks.push(bytes); } },
+        () => {}, { timestamps: true });
+    assert.match(new TextDecoder().decode(Buffer.concat(chunks)), /Index,Timestamp,CH1\r\n0,2023-11-14T22:13:20.123Z,3/);
+    assert.equal(new TextDecoder().decode(Buffer.concat(chunks)),
+        exportFrameCsv(frames, [{ name: 'CH1' }], { timestamps: true }));
+});

@@ -5,6 +5,8 @@ const parserByteUtils = typeof module !== 'undefined'
     ? require('./byteUtils').ByteUtils : globalThis.SerialPlotter.ByteUtils;
 const parserLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
+const parserNumericCodec = typeof module !== 'undefined'
+    ? require('./numericCodec') : globalThis.SerialPlotter.NumericCodec;
 
 class DataParser {
     constructor() {
@@ -19,12 +21,17 @@ class DataParser {
         this.littleEndian = true;
         this.channelsCount = 1;
         this.enableChecksum = false;
+        this.decodeValues = true;
         this.onFrameParsed = null;
         this.onRawData = null;
         this.onFrameError = null;
         this.onCallbackError = null;
         this.frameCount = 0;
         this.failCount = 0;
+        this.nextByte = 0;
+        this.bufferBaseByte = 0;
+        this.sourceSpans = [];
+        this.sourceSpanHead = 0;
     }
 
     static hexToBytes(value) {
@@ -54,25 +61,49 @@ class DataParser {
     }
 
     getTypeLength() { return DataParser.TYPE_LENGTH[this.dataType]; }
-    reset() { this.readOffset = 0; this.writeOffset = 0; }
+    reset() {
+        this.readOffset = 0; this.writeOffset = 0;
+        this.bufferBaseByte = this.nextByte;
+        this.sourceSpans = []; this.sourceSpanHead = 0;
+    }
 
     /** Finish a stopped stream without losing bytes that could not form a complete frame. */
     flushPending() {
         const pending = this.buffer.slice(this.readOffset, this.writeOffset);
+        const metadata = this._sourceMetadata(this.readOffset, pending.length);
         this.reset();
         if (pending.length && this.onFrameError)
-            this._notify(this.onFrameError, 'incomplete', _fmtTime(new Date()), pending);
+            this._notify(this.onFrameError, 'incomplete', _fmtTime(new Date(metadata.timestamp)), pending, metadata);
     }
 
-    appendData(data) {
+    appendData(data, metadata = {}) {
         if (!(data instanceof Uint8Array)) data = new Uint8Array(data);
         if (!data.length) return;
-        const time = _fmtTime(new Date());
-        if (this.onRawData) this._notify(this.onRawData, data, time);
+        const timestamp = Number.isFinite(metadata.timestamp) ? metadata.timestamp : Date.now();
+        const byteOffset = Number.isSafeInteger(metadata.byteOffset) ? metadata.byteOffset : this.nextByte;
+        const source = { ...metadata, timestamp, byteOffset, endByte: byteOffset + data.length,
+            sourceStartByte: metadata.sourceStartByte ?? byteOffset,
+            sourceEndByte: metadata.sourceEndByte ?? byteOffset + data.length };
+        if (this.readOffset === this.writeOffset) this.bufferBaseByte = byteOffset;
+        this.nextByte = source.endByte;
+        this.sourceSpans.push(source);
+        const time = _fmtTime(new Date(timestamp));
+        if (this.onRawData) this._notify(this.onRawData, data, time, source);
         this._reserve(data.length);
         this.buffer.set(data, this.writeOffset);
         this.writeOffset += data.length;
         this.processBuffer();
+    }
+
+    _sourceMetadata(start, length) {
+        const byteOffset = this.bufferBaseByte + start;
+        while (this.sourceSpanHead < this.sourceSpans.length - 1 &&
+            this.sourceSpans[this.sourceSpanHead].endByte <= byteOffset) this.sourceSpanHead++;
+        const source = this.sourceSpans[this.sourceSpanHead] || {};
+        const width = source.sourceEndByte - source.sourceStartByte;
+        return { byteOffset, endByte: byteOffset + length,
+            timestamp: source.timestamp ?? Date.now(), arrival: source.arrival,
+            order: (source.order || 0) + (width > 0 ? (byteOffset - source.sourceStartByte) / width : 0) };
     }
 
     _reserve(extra) {
@@ -85,6 +116,7 @@ class DataParser {
             next.set(this.buffer.subarray(this.readOffset, this.writeOffset));
             this.buffer = next;
         }
+        this.bufferBaseByte += this.readOffset;
         this.readOffset = 0;
         this.writeOffset = pending;
     }
@@ -108,9 +140,10 @@ class DataParser {
         const flushRejected = () => {
             if (rejectedStart < 0) return;
             const discarded = this.buffer.slice(rejectedStart, this.readOffset);
+            const metadata = this._sourceMetadata(rejectedStart, discarded.length);
             rejectedStart = -1;
             if (this.onFrameError) this._notify(this.onFrameError,
-                'footer', _fmtTime(new Date()), discarded);
+                'footer', _fmtTime(new Date(metadata.timestamp)), discarded, metadata);
         };
         while (this.writeOffset - this.readOffset >= frameLen) {
             const start = this.readOffset;
@@ -140,33 +173,23 @@ class DataParser {
                 for (let i = payloadStart; i < footerStart; i++) sum += this.buffer[i];
                 if ((sum & 255) !== this.buffer[footerStart + footerLen]) {
                     this.failCount++;
-                    if (this.onFrameError) this._notify(this.onFrameError, 'checksum', _fmtTime(new Date()), frame);
+                    if (this.onFrameError) {
+                        const metadata = this._sourceMetadata(start, frameLen);
+                        this._notify(this.onFrameError, 'checksum', _fmtTime(new Date(metadata.timestamp)), frame, metadata);
+                    }
                     this.readOffset += frameLen;
                     continue;
                 }
             }
             const view = new DataView(this.buffer.buffer, this.buffer.byteOffset + payloadStart, payloadLen);
-            const stride = this.getTypeLength();
-            const values = new Array(this.channelsCount);
-            for (let c = 0; c < values.length; c++) {
-                const off = c * stride;
-                switch (this.dataType) {
-                    case 'int8': values[c] = view.getInt8(off); break;
-                    case 'uint8': values[c] = view.getUint8(off); break;
-                    case 'int16': values[c] = view.getInt16(off, this.littleEndian); break;
-                    case 'uint16': values[c] = view.getUint16(off, this.littleEndian); break;
-                    case 'int32': values[c] = view.getInt32(off, this.littleEndian); break;
-                    case 'uint32': values[c] = view.getUint32(off, this.littleEndian); break;
-                    case 'float32': values[c] = view.getFloat32(off, this.littleEndian); break;
-                    case 'float64': values[c] = view.getFloat64(off, this.littleEndian); break;
-                    case 'int64': values[c] = Number(view.getBigInt64(off, this.littleEndian)); break;
-                    case 'uint64': values[c] = Number(view.getBigUint64(off, this.littleEndian)); break;
-                }
-            }
+            const values = this.decodeValues
+                ? parserNumericCodec.decodeNumericPayload(view, this.dataType, this.littleEndian, this.channelsCount)
+                : null;
             this.frameCount++;
             if (this.onFrameParsed) {
-                const receivedAt = new Date();
-                this._notify(this.onFrameParsed, values, _fmtTime(receivedAt), frame, receivedAt.getTime());
+                const metadata = this._sourceMetadata(start, frameLen);
+                this._notify(this.onFrameParsed, values, _fmtTime(new Date(metadata.timestamp)),
+                    frame, metadata.timestamp, metadata);
             }
             this.readOffset += frameLen;
         }
@@ -183,8 +206,18 @@ class DataParser {
             } else {
                 this.buffer.copyWithin(0, this.readOffset, this.writeOffset);
             }
+            this.bufferBaseByte += this.readOffset;
             this.readOffset = 0;
             this.writeOffset = pending;
+        }
+        if (this.sourceSpans.length) {
+            const pendingByte = this.bufferBaseByte + this.readOffset;
+            while (this.sourceSpanHead < this.sourceSpans.length - 1 &&
+                this.sourceSpans[this.sourceSpanHead].endByte <= pendingByte) this.sourceSpanHead++;
+            if (this.sourceSpanHead > 1024) {
+                this.sourceSpans = this.sourceSpans.slice(this.sourceSpanHead);
+                this.sourceSpanHead = 0;
+            }
         }
     }
 }

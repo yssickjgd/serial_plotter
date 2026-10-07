@@ -60,6 +60,11 @@ function bucketAxisExtrema(values, xPositions) {
     return result;
 }
 
+/** Format a zero-based channel index for labels, default names, and exports. */
+function formatChannelId(index) {
+    return `CH${String(index + 1).padStart(2, '0')}`;
+}
+
 function csvField(value) {
     const text = String(value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -106,9 +111,9 @@ function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
 }
 
 if (typeof module !== 'undefined') module.exports = {
-    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, zoomRectToBounds
+    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
-    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, zoomRectToBounds
+    axisFraction, axisValueAtFraction, bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
 });

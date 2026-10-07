@@ -41,7 +41,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
         { name: 'CH2', color: '#445566', visible: false }
     ]);
     assert.equal(batchDraws, 1);
-    assert.equal(plotter.getChannelMeta().map(ch => ch.name).join(','), 'first,CH2');
+    assert.equal(plotter.getChannelMeta().map(ch => ch.name).join(','), 'first,CH02');
     plotter.draw = drawBeforeBatch;
     plotter.setChannelVisible(0, true);
     plotter.setChannelVisible(1, true);
@@ -51,7 +51,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.draw();
     assert.equal(plotter.frames.length, 5000);
     assert.equal(plotter.frames.getValue(0, 0), 1000);
-    assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).startsWith('Index,"a,b",CH2\r\n0,1000,-1000\r\n'));
+    assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).startsWith('Index,"a,b",CH02\r\n0,1000,-1000\r\n'));
     assert.ok(lineToCount < 10000, `draw called lineTo ${lineToCount} times`);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     const start = performance.now();

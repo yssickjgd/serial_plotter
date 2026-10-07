@@ -9,6 +9,127 @@ function run(frames, options) {
     return search.matches;
 }
 
+test('text searches store a boolean case option and preserve the case-sensitive default', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], new TextEncoder().encode('aBc ABC abc'), '', 1);
+    const defaultOptions = parseMonitorSearch('text', 'ABC');
+    assert.equal(defaultOptions.caseSensitive, true);
+    const exact = [[0, 4, 0, 7]];
+    const positions = options => run(frames, options).map(match => [match.startFrame,
+        match.startByte, match.endFrame, match.endByte]);
+    assert.deepEqual(positions(defaultOptions), exact);
+    assert.deepEqual(positions(parseMonitorSearch('text', 'ABC', 0, -1, 'utf-8', true)), exact);
+    const insensitive = parseMonitorSearch('text', 'ABC', 0, -1, 'ascii', false);
+    assert.equal(insensitive.caseSensitive, false);
+    assert.deepEqual(positions(insensitive), [[0, 0, 0, 3], [0, 4, 0, 7], [0, 8, 0, 11]]);
+});
+
+test('case-insensitive mixed Chinese and ASCII text retains exact cross-frame byte spans', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], Uint8Array.of(0x78, 0xe4, 0xb8), '', 10);
+    frames.append([0], Uint8Array.of(0xad, 0x41), '', 11);
+    frames.append([0], Uint8Array.of(0x62, 0x79), '', 12);
+    assert.deepEqual(run(frames, parseMonitorSearch('text', '中ab', 0, -1, 'utf-8', false)),
+        [{ startFrame: 0, startByte: 1, endFrame: 2, endByte: 1, startOrder: 10, endOrder: 12 }]);
+});
+
+test('case-insensitive prefix matching finds every overlapping mixed-case occurrence', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], new TextEncoder().encode('aA'), '', 1);
+    frames.append([0], new TextEncoder().encode('aAa'), '', 2);
+    const matches = run(frames, parseMonitorSearch('text', 'AaA', 0, -1, 'utf-8', false));
+    assert.deepEqual(matches.map(match => [match.startFrame, match.startByte,
+        match.endFrame, match.endByte]), [[0, 0, 1, 1], [0, 1, 1, 2], [1, 0, 1, 3]]);
+});
+
+test('case-insensitive Unicode simple folding handles non-ASCII case equivalents', () => {
+    const samples = [['Σςσ', 'σ', [[0, 2], [2, 4], [4, 6]]],
+        ['ẞß', 'ß', [[0, 3], [3, 5]]], ['KkKſsS', 'Ks', [[4, 7]]]];
+    for (const [text, query, expected] of samples) {
+        const frames = new FrameBuffer(1, 5);
+        frames.append([0], new TextEncoder().encode(text), '', 1);
+        const matches = run(frames, parseMonitorSearch('text', query, 0, -1, 'utf-8', false));
+        assert.deepEqual(matches.map(match => [match.startByte, match.endByte]), expected, text);
+    }
+});
+
+test('Unicode simple folding never expands a source character or matches part of a case expansion', () => {
+    const samples = [['ßẞssSS', 'SS', [[5, 7], [6, 8], [7, 9]]],
+        ['İiIı', 'i', [[2, 3], [3, 4]]], ['İi\u0307', 'i\u0307', [[2, 5]]]];
+    for (const [text, query, expected] of samples) {
+        const frames = new FrameBuffer(1, 5);
+        frames.append([0], new TextEncoder().encode(text), '', 1);
+        const matches = run(frames, parseMonitorSearch('text', query, 0, -1, 'utf-8', false));
+        assert.deepEqual(matches.map(match => [match.startByte, match.endByte]), expected, text);
+    }
+});
+
+test('case-insensitive UTF-16 matches supplementary letters across split code units', () => {
+    const samples = [
+        ['utf-16le', [[0x78, 0x00, 0x01, 0xd8, 0x00], [0xdc, 0x41], [0x00, 0x2d, 0x4e]]],
+        ['utf-16be', [[0x00, 0x78, 0xd8, 0x01, 0xdc], [0x00, 0x00], [0x41, 0x4e, 0x2d]]]
+    ];
+    for (const [encoding, chunks] of samples) {
+        const frames = new FrameBuffer(1, 5);
+        chunks.forEach((bytes, frame) => frames.append([0], Uint8Array.from(bytes), '', frame));
+        const matches = run(frames, parseMonitorSearch('text', '𐐨a中', 0, -1, encoding, false));
+        assert.deepEqual(matches.map(match => [match.startFrame, match.startByte,
+            match.endFrame, match.endByte]), [[0, 2, 2, 3]], encoding);
+    }
+});
+
+test('invalid text bytes break insensitive matches and never impersonate a replacement character', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], Uint8Array.of(0x41, 0xff), '', 1);
+    frames.append([0], Uint8Array.of(0x62, 0x41, 0x42, 0xef, 0xbf), '', 2);
+    frames.append([0], Uint8Array.of(0xbd, 0xe4), '', 3);
+    assert.deepEqual(run(frames, parseMonitorSearch('text', 'ab', 0, -1, 'utf-8', false))
+        .map(match => [match.startFrame, match.startByte, match.endFrame, match.endByte]), [[1, 1, 1, 3]]);
+    for (const caseSensitive of [true, false]) {
+        const matches = run(frames, parseMonitorSearch('text', '\uFFFD', 0, -1, 'utf-8', caseSensitive));
+        assert.deepEqual(matches.map(match => [match.startFrame, match.startByte,
+            match.endFrame, match.endByte]), [[1, 3, 2, 1]]);
+    }
+});
+
+test('case-insensitive text keeps regular expression syntax literal', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], new TextEncoder().encode('a.c Axc A.C'), '', 1);
+    const matches = run(frames, parseMonitorSearch('text', 'A.C', 0, -1, 'utf-8', false));
+    assert.deepEqual(matches.map(match => [match.startByte, match.endByte]), [[0, 3], [8, 11]]);
+});
+
+test('Unicode text search maps cross-frame code points to exact original bytes', () => {
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], Uint8Array.of(0x41, 0xe4, 0xb8), '', 1);
+    frames.append([0], Uint8Array.of(0xad, 0xe6, 0x96, 0x87), '', 2);
+    const matches = run(frames, parseMonitorSearch('text', '中文', 0, -1, 'utf-8'));
+    assert.deepEqual(matches.map(match => [match.startFrame, match.startByte,
+        match.endFrame, match.endByte]), [[0, 1, 1, 4]]);
+});
+
+test('text searches use the selected charset, overlap and same-byte multi-character mappings', () => {
+    const samples = [
+        ['ascii', [65], 'A'], ['gbk', [0xd6, 0xd0], '中'],
+        ['gb18030', [0x90, 0x30, 0x81, 0x30], '𐀀'], ['big5', [0xa4, 0xa4], '中'],
+        ['utf-16le', [0x2d, 0x4e], '中'], ['utf-16be', [0x4e, 0x2d], '中'],
+        ['shift_jis', [0x82, 0xa0], 'あ'], ['windows-1252', [0x80], '€']
+    ];
+    for (const [encoding, bytes, query] of samples) {
+        const frames = new FrameBuffer(1, 5);
+        for (let i = 0; i < bytes.length; i++) frames.append([0], Uint8Array.of(bytes[i]), '', i);
+        const matches = run(frames, parseMonitorSearch('text', query, 0, -1, encoding));
+        assert.equal(matches.length, 1, encoding);
+        assert.equal(matches[0].startByte, 0);
+        assert.equal(matches[0].endFrame, bytes.length - 1);
+        assert.equal(matches[0].endByte, 1);
+    }
+    const frames = new FrameBuffer(1, 5);
+    frames.append([0], Uint8Array.of(65, 65), '', 0);
+    frames.append([0], Uint8Array.of(65, 65), '', 1);
+    assert.equal(run(frames, parseMonitorSearch('text', 'AAA')).length, 2);
+});
+
 test('Hex and ASCII searches cross frame boundaries and retain byte positions', () => {
     const frames = new FrameBuffer(1, 5);
     frames.append([1], Uint8Array.of(0x41, 0x42), 't1', 10);

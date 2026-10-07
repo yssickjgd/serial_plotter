@@ -68,3 +68,28 @@ test('dense search hits in one pixel are skipped without scanning each result', 
     assert.equal(strokes, 1);
     assert.ok(lookups < 100);
 });
+
+test('custom search colors update shared waveform markers without changing data or match selection', () => {
+    const context = vm.createContext({});
+    for (const file of ['projectLimits.js', 'plotter.js'])
+        vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context);
+    const { Plotter } = context.SerialPlotter;
+    const frames = new FrameBuffer(1, 10);
+    for (let i = 0; i < 5; i++) frames.append([i], Uint8Array.of(i), `t${i}`, i);
+    const colors = [];
+    let draws = 0;
+    const view = {
+        ctx: { save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {},
+            stroke() { colors.push(this.strokeStyle); } },
+        frames, displayMode: 'time', isPaused: true, isVisible: true,
+        _markViewDirty() {}, draw() { draws++; },
+        navigationMarkers: { timeOrder: null, matches: [{ startOrder: 1 }, { startOrder: 3 }], currentMatch: 1 }
+    };
+    Plotter.prototype.setNavigationColors.call(view, { match: '#112233', current: '#445566' });
+    Plotter.prototype._drawNavigationMarkers.call(view, 100, 50, 0, 5);
+    assert.deepEqual(colors, ['#112233', '#445566']);
+    assert.equal(view.navigationMarkers.currentMatch, 1);
+    assert.equal(draws, 1);
+    assert.equal(frames.length, 5);
+    assert.throws(() => Plotter.prototype.setNavigationColors.call(view, { match: 'invalid' }));
+});

@@ -8,9 +8,10 @@ function bootWithConfig(original, fixedDate) {
     const root = path.resolve(__dirname, '..');
     const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
     const scripts = [...html.matchAll(/<script src="([^"]+)"/g)].map(match => match[1]);
-    const groups = [...html.matchAll(/<div class="choice-group" data-plot-choice="([^"]+)"[^>]*>([\s\S]*?)<\/div>/g)]
-        .map(([, id, markup]) => ({ id, values: [...markup.matchAll(/<input type="radio"[^>]*value="([^"]+)"/g)]
-            .map(match => match[1]) }));
+    const selects = new Map([...html.matchAll(/<select[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)]
+        .map(([, id, markup]) => [id, [...markup.matchAll(/<option([^>]*)value="([^"]+)"([^>]*)>/g)]
+            .map(([, before, value, after]) => ({ value, disabled: /disabled/.test(before + after),
+                selected: /selected/.test(before + after) }))]));
     const defaults = {
         'conn-type': 'serial', 'channels-count': '1', 'max-points': '1000',
         'plot-window-points': '1000',
@@ -23,19 +24,32 @@ function bootWithConfig(original, fixedDate) {
         'serial-baud': '115200', 'serial-data': '8', 'serial-stop': '1',
         'serial-parity': 'none', 'net-port': '9000', 'net-local': '9000',
         'frame-header': 'AB', 'frame-footer': '0D 0A',
-        'monitor-display-mode': 'hex',
+        'capture-mode': 'number', 'text-encoding': 'utf-8', 'text-boundary': 'idle',
+        'idle-gap-seconds': '0.001', 'monitor-search-origin': 'byte', 'nav-jump-mode': 'absolute',
         'send-mode': 'hex', 'send-interval-unit': 's'
     };
     const elements = new Map();
+    const blobs = [], downloads = [];
+    const documentListeners = {};
     const makeElement = () => ({
         listeners: {},
-        style: {}, dataset: {}, classList: { add() {}, remove() {}, replace() {} },
+        style: {}, dataset: {}, classList: (() => {
+            const values = new Set();
+            return { add(...names) { names.forEach(name => values.add(name)); },
+                remove(...names) { names.forEach(name => values.delete(name)); },
+                replace(from, to) { if (values.delete(from)) values.add(to); },
+                contains(name) { return values.has(name); } };
+        })(),
         textContent: '', innerHTML: '', value: '', checked: false,
         children: [],
         clientWidth: 800, clientHeight: 600, offsetWidth: 200, offsetHeight: 20,
         scrollHeight: 0, scrollTop: 0,
-        addEventListener(name, callback) { this.listeners[name] = callback; },
+        addEventListener(name, callback) {
+            const previous = this.listeners[name];
+            this.listeners[name] = previous ? event => { previous(event); callback(event); } : callback;
+        },
         dispatchEvent(event) { this.listeners[event.type]?.(event); },
+        click() { return this.listeners.click?.(); },
         append(...items) { this.children.push(...items); },
         appendChild(item) { this.children.push(item); },
         replaceChildren(...items) { this.children = items; },
@@ -45,29 +59,53 @@ function bootWithConfig(original, fixedDate) {
     const getElement = id => {
         if (!elements.has(id)) {
             const element = makeElement();
-            element.value = defaults[id] ?? '';
-            if (id === 'chk-header') element.checked = true;
+            element.options = selects.get(id);
+            element.tagName = element.options ? 'SELECT' : 'INPUT';
+            element.value = defaults[id] ?? element.options?.find(option => option.selected)?.value
+                ?? element.options?.[0]?.value ?? '';
+            Object.defineProperty(element, 'selectedIndex', {
+                get() { return this.options?.findIndex(option => option.value === this.value) ?? -1; },
+                set(index) { this.value = this.options[index]?.value ?? ''; }
+            });
+            if (id === 'chk-header' || id === 'rebuild-history') element.checked = true;
             element.parentElement = makeElement();
             elements.set(id, element);
         }
         return elements.get(id);
     };
-    const choiceGroups = new Map(groups.map(({ id, values }) => {
+    const tabButtons = new Map(), tabGroups = [];
+    for (const sidebarId of ['sidebar-top', 'channel-sidebar']) {
+        const start = html.indexOf(`id="${sidebarId}"`);
+        const markup = html.slice(start, html.indexOf('</aside>', start));
+        const buttons = [...markup.matchAll(/<button class="tab-btn([^"]*)"(?: id="([^"]+)")? data-tab="([^"]+)">([^<]+)<\/button>/g)]
+            .map(([, classes, buttonId, panelId, title]) => {
+                const button = makeElement(); button.dataset.tab = panelId; button.textContent = title;
+                if (classes.includes('active')) button.classList.add('active');
+                const panel = getElement(panelId);
+                if (new RegExp(`<div class="tab-content active" id="${panelId}"`).test(markup)) panel.classList.add('active');
+                if (buttonId) elements.set(buttonId, button);
+                tabButtons.set(panelId, button); return button;
+            });
         const group = makeElement();
-        group.dataset.plotChoice = id;
-        group.radios = values.map(value => ({ value, checked: value === defaults[id] }));
-        group.querySelectorAll = () => group.radios;
-        return [id, group];
-    }));
+        group.querySelectorAll = selector => selector === '.tab-btn' ? buttons
+            : selector === '.tab-content' ? buttons.map(button => getElement(button.dataset.tab)) : [];
+        tabGroups.push(group);
+    }
     let ready;
     const document = {
         getElementById: getElement,
-        createElement: makeElement,
+        createElement(tag) { const element = makeElement(); element.tagName = tag?.toUpperCase();
+            if (tag === 'a') downloads.push(element); return element; },
         createDocumentFragment: makeElement,
         querySelector: () => makeElement(),
-        querySelectorAll: selector => selector === '[data-plot-choice]'
-            ? [...choiceGroups.values()] : [],
-        addEventListener(name, callback) { if (name === 'DOMContentLoaded') ready = callback; },
+        querySelectorAll: selector => selector === 'select' ? [...selects.keys()].map(getElement)
+            : selector === '.tab-group' ? tabGroups
+                : selector === '.tab-btn' ? [...tabButtons.values()]
+                    : selector === '.tab-content' ? [...tabButtons.keys()].map(getElement) : [],
+        addEventListener(name, callback) {
+            if (name === 'DOMContentLoaded') ready = callback;
+            else (documentListeners[name] ??= []).push(callback);
+        },
         body: { style: {} }
     };
     let stored = original;
@@ -75,6 +113,7 @@ function bootWithConfig(original, fixedDate) {
     let now = 0;
     const intervals = [];
     const timeouts = [];
+    let timeoutId = 0;
     const alerts = [];
     const resizeObservers = [];
     class ResizeObserverForTest {
@@ -90,9 +129,14 @@ function bootWithConfig(original, fixedDate) {
     } : Date;
     const context = vm.createContext({
         document, window: { addEventListener() {} }, localStorage, navigator: {},
-        performance: { now: () => now }, TextEncoder, TextDecoder, Event, Date: DateForTest,
+        performance: { now: () => now }, TextEncoder, TextDecoder, Event, Date: DateForTest, Blob,
+        URL: { createObjectURL(blob) { blobs.push(blob); return 'blob:test'; }, revokeObjectURL() {} },
         setInterval(callback) { intervals.push(callback); }, clearInterval() {},
-        setTimeout(callback) { timeouts.push(callback); }, clearTimeout() {},
+        setTimeout(callback, delay = 0) {
+            const id = ++timeoutId; timeouts.push({ id, callback, due: now + delay }); return id;
+        },
+        clearTimeout(id) { const index = timeouts.findIndex(timer => timer.id === id);
+            if (index >= 0) timeouts.splice(index, 1); },
         requestAnimationFrame() {}, ResizeObserver: ResizeObserverForTest,
         console: { ...console, warn() {} },
         alert(message) { alerts.push(message); },
@@ -103,7 +147,26 @@ function bootWithConfig(original, fixedDate) {
     for (const file of scripts) {
         vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
     }
-    let plotter, parser, monitor;
+    let plotter, parser, monitor, rawParser, serial, sendController;
+    let replayYieldHook = null;
+    const replay = context.SerialPlotter.replayCaptureHistory;
+    context.SerialPlotter.replayCaptureHistory = (history, format, capacity, options = {}) => replay(history,
+        format, capacity, { ...options, yieldControl: async () => {
+            await new Promise(resolve => context.setTimeout(resolve, 0));
+            replayYieldHook?.();
+        } });
+    const OriginalSend = context.SerialPlotter.SendController;
+    context.SerialPlotter.SendController = class extends OriginalSend {
+        constructor(...args) { super(...args); sendController = this; }
+    };
+    const OriginalRawParser = context.SerialPlotter.RawFrameParser;
+    context.SerialPlotter.RawFrameParser = class extends OriginalRawParser {
+        constructor(...args) { super(...args); rawParser = this; }
+    };
+    const OriginalSerial = context.SerialPlotter.SerialEngine;
+    context.SerialPlotter.SerialEngine = class extends OriginalSerial {
+        constructor(...args) { super(...args); serial = this; }
+    };
     const OriginalParser = context.SerialPlotter.DataParser;
     context.SerialPlotter.DataParser = class extends OriginalParser {
         constructor(...args) { super(...args); parser = this; }
@@ -121,21 +184,107 @@ function bootWithConfig(original, fixedDate) {
         button: 0, pointerId: 1, clientX: x, clientY: y,
         preventDefault() {}
     });
-    return { getElement, getStored: () => stored, getWrites: () => writes,
-        getChoiceGroup: id => choiceGroups.get(id),
+    return { getElement,
+        setReplayYieldHook(hook) { replayYieldHook = hook; },
+        async finishRebuild() {
+            for (let i = 0; i < 1000; i++) {
+                await Promise.resolve();
+                if (getElement('history-rebuild-progress').hidden) return;
+                this.flushTimeouts();
+            }
+            assert.fail('history rebuild did not finish');
+        },
+        clickTab(id) { assert.ok(tabButtons.has(id), `missing tab ${id}`); tabButtons.get(id).listeners.click(); },
+        isTabActive(id) { return tabButtons.get(id)?.classList.contains('active') && getElement(id).classList.contains('active'); },
+        getStored: () => stored, getWrites: () => writes,
         flushTimeouts() {
-            for (let count = 0; timeouts.length && count < 1000; count++) timeouts.shift()();
+            for (let count = 0; timeouts.length && count < 1000; count++) {
+                timeouts.sort((a, b) => a.due - b.due);
+                const timer = timeouts.shift(); now = Math.max(now, timer.due); timer.callback();
+            }
             assert.equal(timeouts.length, 0);
         },
-        tick(ms = 1000) { now += ms; intervals.forEach(callback => callback()); },
+        tick(ms = 1000) {
+            now += ms;
+            for (let count = 0; count < 1000; count++) {
+                const index = timeouts.findIndex(timer => timer.due <= now);
+                if (index < 0) break;
+                timeouts.splice(index, 1)[0].callback();
+            }
+            intervals.forEach(callback => callback());
+        },
         notifyResize(id) {
             const element = getElement(id);
             for (const observer of resizeObservers) {
                 if (observer.elements.includes(element)) observer.callback();
             }
         },
-        fireCanvas, plotter, parser, monitor, alerts };
+        fireDocument(name, event) { for (const callback of documentListeners[name] ?? []) callback(event); },
+        setSavePicker(picker) { context.window.showSaveFilePicker = picker; },
+        fireCanvas, plotter, get parser() { return parser; }, monitor,
+        get rawParser() { return rawParser; }, serial, sendController, alerts, blobs, downloads };
 }
+
+test('capture formats apply automatically and raw formats control display and waveform', async () => {
+    const fixture = bootWithConfig(null);
+    const { getElement, plotter, monitor, rawParser } = fixture;
+    const mode = getElement('capture-mode');
+    assert.equal(mode.value, 'number');
+    assert.equal(monitor.mode, 'number');
+    mode.value = 'hex';
+    mode.listeners.change();
+    assert.equal(getElement('format-apply-status').textContent, '');
+    assert.equal(getElement('format-apply-status').hidden, true);
+    assert.equal(monitor.mode, 'hex');
+    assert.equal(plotter.isVisible, false);
+    assert.equal(getElement('canvas-wrapper').hidden, true);
+    assert.equal(getElement('btn-export').disabled, false);
+    rawParser.appendData(Uint8Array.of(65));
+    getElement('btn-pause').listeners.click();
+    assert.equal(plotter.frames.length, 1);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [65]);
+    mode.value = 'text'; mode.listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(monitor.mode, 'text');
+    assert.equal(plotter.frames.length, 1, 'identical raw idle format preserves history');
+    getElement('text-boundary').value = 'crlf';
+    getElement('text-boundary').listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 1);
+    assert.equal(getElement('frame-idle-settings').hidden, true);
+    mode.value = 'number'; mode.listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(monitor.mode, 'number');
+    assert.equal(plotter.isVisible, true);
+    assert.equal(getElement('btn-export').disabled, false);
+});
+
+test('raw text configuration restores charset and framing and hidden numeric values', () => {
+    const { getElement, monitor, plotter, rawParser } = bootWithConfig(JSON.stringify({
+        captureMode: 'text', textEncoding: 'utf-16le', textBoundary: 'lf', idleGapSeconds: '0.01',
+        channelsCount: '3', dataType: 'int16', enableHeader: true, headerHex: 'AB'
+    }));
+    assert.equal(monitor.mode, 'text');
+    assert.equal(getElement('channels-count').value, '3');
+    assert.equal(getElement('frame-numeric-settings').hidden, true);
+    assert.equal(getElement('frame-header-settings').hidden, true);
+    rawParser.appendData(Uint8Array.of(65, 0, 10, 0));
+    assert.equal(plotter.frames.length, 1);
+    assert.equal(plotter.frames.frameAt(0).incomplete, false);
+    getElement('btn-pause').listeners.click();
+    getElement('monitor-search-query').value = 'A';
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 1);
+    assert.equal(getElement('monitor-search-channel').hidden, true);
+    assert.equal(getElement('monitor-search-origin').disabled, true);
+    getElement('nav-jump-relative').value = '0';
+    getElement('nav-jump-mode').value = 'relative';
+    getElement('nav-jump-mode').listeners.change();
+    getElement('nav-jump-button').listeners.click();
+    assert.equal(monitor.cursorOrder, plotter.frames.orderAt(0));
+    assert.equal(getElement('plot-view-mode').value, 'time');
+    assert.equal(plotter.isVisible, false, 'time navigation cannot reopen the waveform');
+});
 
 test('page bootstrap restores saved config without overwriting it', () => {
     const original = JSON.stringify({ connType: 'udp', channelsCount: '23',
@@ -315,13 +464,12 @@ test('imported legacy Y bounds override invalid unsaved range fields', () => {
     assert.equal(plotter.yBounds.time.max, 5);
 });
 
-test('radio choices persist and dependent controls follow their parent selection', () => {
-    const { getElement, getChoiceGroup, getStored, plotter } = bootWithConfig(null);
+test('dropdown choices persist and dependent controls follow their parent selection', () => {
+    const { getElement, getStored, plotter } = bootWithConfig(null);
     const choose = (id, value) => {
-        const group = getChoiceGroup(id);
-        const radio = group.radios.find(item => item.value === value);
-        radio.checked = true;
-        group.listeners.change({ target: radio });
+        const select = getElement(id);
+        select.value = value;
+        select.listeners.change();
     };
     choose('plot-view-mode', 'frequency');
     choose('plot-fft-window', 'flatTop');
@@ -339,6 +487,7 @@ test('radio choices persist and dependent controls follow their parent selection
 test('waveform statistic counts completed draws and returns to zero when idle', () => {
     const { getElement, tick, plotter } = bootWithConfig(null);
     const label = getElement('stat-plot-fps');
+    tick();
     plotter.draw();
     tick();
     assert.equal(label.textContent, '绘图帧率: 1.0 FPS');
@@ -379,11 +528,17 @@ test('frequency FPS counts refreshed spectra rather than cached redraws', () => 
 });
 
 test('channel calibration controls expand only after clicking the CH button', () => {
-    const { getElement } = bootWithConfig(null);
+    const { getElement } = bootWithConfig(JSON.stringify({ channelsCount: '50' }));
     const row = getElement('channel-config-list').children[0];
     const toggle = row.children[0].children[0];
     const controls = row.children[1];
-    assert.equal(toggle.textContent, 'CH1');
+    assert.equal(toggle.textContent, 'CH01');
+    for (const [index, label] of [[0, 'CH01'], [8, 'CH09'], [9, 'CH10'], [49, 'CH50']]) {
+        const main = getElement('channel-config-list').children[index].children[0];
+        assert.equal(main.children[0].textContent, label);
+        assert.equal(main.children[2].placeholder, label);
+        assert.equal(main.children[2].value, label);
+    }
     assert.equal(controls.hidden, true);
     toggle.listeners.click();
     assert.equal(controls.hidden, false);
@@ -556,16 +711,6 @@ test('time jumps, waveform visibility, and decoded-value search are wired to the
     assert.equal(monitor.cursorOrder, 3);
     assert.equal(plotter.navigationMarkers.timeOrder, 3);
 
-    getElement('show-waveform').checked = false;
-    getElement('show-waveform').listeners.change();
-    assert.equal(plotter.isVisible, false);
-    assert.equal(getElement('canvas-wrapper').hidden, true);
-    getElement('show-waveform').checked = true;
-    getElement('show-waveform').listeners.change();
-    assert.equal(plotter.isVisible, true);
-
-    getElement('monitor-display-mode-number').checked = true;
-    getElement('monitor-display-mode-number').listeners.change();
     getElement('monitor-search-query').value = '2';
     getElement('monitor-search-tolerance').value = '0';
     getElement('monitor-search-nearest').listeners.click();
@@ -613,7 +758,7 @@ test('time tools default to local milliseconds and are available only while paus
     assert.equal(getElement('nav-jump-button').disabled, true);
     assert.equal(getElement('monitor-search-prev').disabled, true);
     assert.equal(getElement('monitor-search-next').disabled, true);
-    assert.equal(getElement('monitor-search-origin-wave').disabled, true);
+    assert.equal(getElement('monitor-search-origin').disabled, true);
     assert.equal(getElement('monitor-search-nearest').disabled, true);
     getElement('nav-jump-relative').value = '0';
     getElement('nav-jump-mode').value = 'relative';
@@ -629,13 +774,13 @@ test('time tools default to local milliseconds and are available only while paus
     assert.equal(new Date(value).getMilliseconds(), timestamp % 1000);
     assert.equal(getElement('monitor-search-prev').disabled, false);
     assert.equal(getElement('monitor-search-next').disabled, false);
-    assert.equal(getElement('monitor-search-origin-wave').disabled, false);
+    assert.equal(getElement('monitor-search-origin').disabled, false);
     assert.equal(getElement('monitor-search-nearest').disabled, false);
     getElement('btn-pause').listeners.click();
     assert.equal(getElement('nav-jump-button').disabled, true);
     assert.equal(getElement('monitor-search-prev').disabled, true);
     assert.equal(getElement('monitor-search-next').disabled, true);
-    assert.equal(getElement('monitor-search-origin-wave').disabled, true);
+    assert.equal(getElement('monitor-search-origin').disabled, true);
     assert.equal(getElement('monitor-search-nearest').disabled, true);
 });
 
@@ -647,38 +792,39 @@ test('pausing defaults the shared time locator to the latest retained frame time
     assert.equal(getElement('nav-jump-absolute').value, '2026-10-02T10:30:01.347');
 });
 
-test('receive display, time jump, and search are three rows inside the byte monitor', () => {
+test('buffer settings belong to the untitled shared navigation panel', () => {
     const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
-    assert.match(html, /<section class="navigation-panel" id="navigation-panel"[^>]*>/);
-    assert.match(html, /<div class="monitor-tool-row" id="nav-receive-tools">\s*<span class="tool-label">接收显示<\/span>/);
+    assert.match(html, /<section class="navigation-panel box-border" id="navigation-panel"[^>]*>/);
+    assert.match(html, /aria-label="缓冲区设置"/);
+    assert.match(html, /class="tool-label">缓冲区设置<\/span>/);
+    assert.doesNotMatch(html, /class="monitor-title">时间定位和搜索<\/span>/);
+    assert.ok(html.indexOf('id="navigation-panel"') < html.indexOf('id="board-toolbar"'));
+    assert.ok(html.indexOf('id="board-toolbar"') < html.indexOf('id="nav-time-tools"'));
+    assert.doesNotMatch(html, /画板与缓存/);
+    assert.doesNotMatch(html, /id="(?:nav-receive-tools|monitor-display-mode|show-waveform)"/);
     assert.match(html, /<div class="monitor-tool-row" id="nav-time-tools">\s*<span class="tool-label">时间定位<\/span>\s*<div class="jump-toolbar"/);
     assert.match(html, /<div class="monitor-tool-row" id="nav-search-tools">\s*<span class="tool-label">搜索<\/span>\s*<div class="monitor-search-toolbar"/);
     assert.ok(html.indexOf('id="v-resizer"') < html.indexOf('id="monitor-panel"'));
     assert.ok(html.indexOf('id="monitor-panel"') < html.indexOf('id="send-panel"'));
     assert.ok(html.indexOf('id="send-panel"') < html.indexOf('id="navigation-panel"'));
     assert.ok(html.indexOf('id="navigation-panel"') < html.indexOf('</main>'));
-    assert.match(html, /<\/section>\s*<\/div>\s*<\/main>/);
+    assert.match(html, /<\/section>\s*<\/main>/);
+    assert.match(html, /<\/div>\s*<!-- 独立[^>]*-->\s*<section class="navigation-panel box-border"/);
     assert.doesNotMatch(html, /id="monitor-search-button"/);
     assert.doesNotMatch(html, /id="(?:wave-tools|byte-tools|byte-search-tools)"/);
     assert.doesNotMatch(html, /<details class="monitor-tools"|<summary id="(?:wave|byte)-tools-summary"/);
 });
 
-test('receive display format determines search type and numeric fields', () => {
-    const { getElement } = bootWithConfig(null);
-    assert.equal(getElement('monitor-display-mode-hex').checked, true);
+test('applied capture format determines search type and numeric fields', () => {
+    const { getElement, monitor } = bootWithConfig(null);
     getElement('btn-pause').listeners.click();
-    const number = getElement('monitor-display-mode-number');
-    number.checked = true;
-    number.listeners.change();
-    assert.equal(getElement('monitor-display-mode').value, 'number');
     assert.equal(getElement('monitor-search-tolerance').hidden, false);
-    assert.equal(getElement('monitor-search-channel').hidden, false);
-    const ascii = getElement('monitor-display-mode-ascii');
-    ascii.checked = true;
-    ascii.listeners.change();
-    assert.equal(getElement('monitor-display-mode').value, 'ascii');
+    const mode = getElement('capture-mode');
+    mode.value = 'text'; mode.listeners.change();
+    assert.equal(monitor.mode, 'text');
     assert.equal(getElement('monitor-search-tolerance').hidden, true);
     assert.equal(getElement('monitor-search-channel').hidden, true);
+    assert.equal(getElement('monitor-search-origin').disabled, true);
 });
 
 test('numeric search supports selecting multiple channels without searching the others', () => {
@@ -686,9 +832,6 @@ test('numeric search supports selecting multiple channels without searching the 
     parser.onFrameParsed([1, 1, 1], 't1', Uint8Array.of(1), 1000);
     parser.onFrameParsed([2, 1, 1], 't2', Uint8Array.of(2), 1001);
     getElement('btn-pause').listeners.click();
-    const numeric = getElement('monitor-display-mode-number');
-    numeric.checked = true;
-    numeric.listeners.change();
 
     const picker = getElement('monitor-search-channel-options');
     assert.equal(picker.children.length, 4, 'all channels plus three channel checkboxes');
@@ -702,7 +845,7 @@ test('numeric search supports selecting multiple channels without searching the 
     getElement('monitor-search-nearest').listeners.click();
     assert.deepEqual(Array.from(monitor.matches, match => [match.startFrame, match.channel]),
         [[0, 0], [0, 2], [1, 2]]);
-    assert.equal(getElement('monitor-search-channel-toggle').textContent, 'CH1、CH3');
+    assert.equal(getElement('monitor-search-channel-toggle').textContent, 'CH01、CH03');
 
     const second = picker.children[2].children[0];
     second.checked = true;
@@ -716,26 +859,58 @@ test('numeric search supports selecting multiple channels without searching the 
     assert.equal(second.disabled, true);
 });
 
-test('switching receive display format clears prior matches and changes search parsing', () => {
-    const { getElement, parser, monitor } = bootWithConfig(null);
+test('numeric search channel choices show saved names and track renames without losing selection', () => {
+    const { getElement, parser, monitor } = bootWithConfig(JSON.stringify({ channelsCount: '2',
+        channels: [{ name: 'acc_x', visible: true }, { name: 'CH2', visible: false }] }));
+    const picker = getElement('monitor-search-channel-options');
+    assert.equal(picker.children[1].children[1].textContent, 'CH01 · acc_x',
+        'saved names are reflected even before switching receive display');
+    assert.equal(picker.children[2].children[1].textContent, 'CH02');
+    parser.onFrameParsed([42, 42], 't', Uint8Array.of(1), 1000);
+    getElement('btn-pause').listeners.click();
+    const first = picker.children[1].children[0];
+    first.checked = true;
+    first.listeners.change();
+    const toggle = getElement('monitor-search-channel-toggle');
+    assert.equal(toggle.textContent, 'CH01 · acc_x');
+    getElement('monitor-search-query').value = '42';
+    getElement('monitor-search-nearest').listeners.click();
+    const matches = monitor.matches;
+    const nameInput = getElement('channel-config-list').children[0].children[0].children[2];
+    nameInput.value = '<b>加速度</b>';
+    nameInput.listeners.change();
+    assert.equal(picker.children[1].children[1].textContent, 'CH01 · <b>加速度</b>');
+    assert.equal(picker.children[1].title, 'CH01 · <b>加速度</b>');
+    assert.equal(toggle.textContent, 'CH01 · <b>加速度</b>');
+    assert.equal(toggle.title, 'CH01 · <b>加速度</b>');
+    assert.equal(first.checked, true);
+    assert.equal(monitor.matches, matches, 'renaming does not invalidate the numeric search results');
+    nameInput.value = '';
+    nameInput.listeners.change();
+    assert.equal(picker.children[1].children[1].textContent, 'CH01');
+    assert.equal(toggle.textContent, 'CH01');
+});
+
+test('automatically applying a new parser preserves original history and changes search', async () => {
+    const fixture = bootWithConfig(null);
+    const { getElement, parser, monitor } = fixture;
     parser.onFrameParsed([2], 't', Uint8Array.of(0x41), Date.now());
     getElement('btn-pause').listeners.click();
-    const numeric = getElement('monitor-display-mode-number');
-    numeric.checked = true;
-    numeric.listeners.change();
     getElement('monitor-search-query').value = '2';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 1);
-
-    const ascii = getElement('monitor-display-mode-ascii');
-    ascii.checked = true;
-    ascii.listeners.change();
+    const mode = getElement('capture-mode');
+    mode.value = 'text'; mode.listeners.change();
+    await fixture.finishRebuild();
     assert.equal(monitor.matches.length, 0);
     assert.equal(getElement('monitor-search-status').textContent, '');
+    getElement('btn-pause').listeners.click();
+    fixture.serial.onDataCallback(Uint8Array.of(0x41));
+    getElement('btn-pause').listeners.click();
     getElement('monitor-search-query').value = 'A';
     getElement('monitor-search-nearest').listeners.click();
-    assert.equal(monitor.matches.length, 1);
-    assert.equal(monitor.mode, 'ascii');
+    assert.equal(monitor.matches.length, 2);
+    assert.equal(monitor.mode, 'text');
 });
 
 test('nearest origin selects the wave center or byte center and reuses the matches', () => {
@@ -744,26 +919,19 @@ test('nearest origin selects the wave center or byte center and reuses the match
         parser.onFrameParsed([index === 1 || index === 7 ? 42 : index], `t${index}`,
             Uint8Array.of(index), 1000 + index);
     getElement('btn-pause').listeners.click();
-    const numeric = getElement('monitor-display-mode-number');
-    numeric.checked = true;
-    numeric.listeners.change();
     getElement('monitor-search-query').value = '42';
     plotter.vp.time.displayCount = 4;
     plotter.vp.time.scrollOffset = 3; // visible frame indexes 3..6, centered near order 6
     plotter.vp.time.autoFollow = false;
     monitor.cursorOrder = 2;
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startOrder, 8);
     assert.equal(plotter._timeCenterOrder, 8);
     const cachedMatches = monitor.matches;
 
     monitor.jumpToFrame(1);
-    const byteOrigin = getElement('monitor-search-origin-byte');
-    byteOrigin.checked = true;
-    byteOrigin.listeners.change();
+    getElement('monitor-search-origin').value = 'byte';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches, cachedMatches);
     assert.equal(monitor.matches[monitor.currentMatch].startOrder, 2);
@@ -773,7 +941,7 @@ test('nearest origin selects the wave center or byte center and reuses the match
 test('first previous skips the nearest result then uses the normal direction and cache', () => {
     const { getElement, parser, monitor, plotter } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
-        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+        parser.onFrameParsed([byte === 0x41 ? 41 : 42], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     getElement('monitor-search-query').value = '41';
     getElement('monitor-search-prev').listeners.click();
@@ -796,7 +964,7 @@ test('first previous skips the nearest result then uses the normal direction and
 test('first next uses the window center rather than a clicked byte-row cursor', () => {
     const { getElement, parser, monitor } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42].entries())
-        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+        parser.onFrameParsed([byte === 0x41 ? 41 : 42], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     monitor.cursorOrder = 2;
     monitor.jumpToFrame(0);
@@ -809,7 +977,7 @@ test('first next uses the window center rather than a clicked byte-row cursor', 
 test('moving the window or clicking a row preserves the selected search result', () => {
     const { getElement, parser, monitor } = bootWithConfig(null);
     for (const [index, byte] of [0x41, 0x42, 0x41, 0x42, 0x41].entries())
-        parser.onFrameParsed([index], `t${index}`, Uint8Array.of(byte), 1000 + index);
+        parser.onFrameParsed([byte === 0x41 ? 41 : 42], `t${index}`, Uint8Array.of(byte), 1000 + index);
     getElement('btn-pause').listeners.click();
     getElement('monitor-search-query').value = '41';
     getElement('monitor-search-next').listeners.click();
@@ -827,9 +995,6 @@ function numericSearchFixture(matchingFrames, count = 310, config = null) {
         parser.onFrameParsed([matchingFrames.includes(index + 1) ? 42 : 0], `t${index}`,
             Uint8Array.of(index & 255), 1000 + index);
     getElement('btn-pause').listeners.click();
-    const numeric = getElement('monitor-display-mode-number');
-    numeric.checked = true;
-    numeric.listeners.change();
     getElement('monitor-search-query').value = '42';
     return fixture;
 }
@@ -839,9 +1004,7 @@ test('first direction is reversed only before a result is selected', () => {
         ['nearest', 200, 200]]) {
         const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
         plotter.jumpToFrame(209);
-        const origin = getElement('monitor-search-origin-wave');
-        origin.checked = true;
-        origin.listeners.change();
+        getElement('monitor-search-origin').value = 'wave';
         getElement(`monitor-search-${action}`).listeners.click();
         assert.equal(monitor.matches[monitor.currentMatch].startFrame + 1, firstFrame);
         getElement(`monitor-search-${action}`).listeners.click();
@@ -851,14 +1014,12 @@ test('first direction is reversed only before a result is selected', () => {
 
 test('nearest uses the latest frame by default and the time viewport in frequency mode', () => {
     const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
-    assert.equal(getElement('monitor-search-origin-byte').checked, true);
+    assert.equal(getElement('monitor-search-origin').value, 'byte');
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startFrame, 299);
     plotter.jumpToFrame(109);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startFrame, 99);
 });
@@ -866,9 +1027,7 @@ test('nearest uses the latest frame by default and the time viewport in frequenc
 test('nearest resolves an equal distance toward the earlier frame', () => {
     const { getElement, plotter, monitor } = numericSearchFixture([100, 200, 300]);
     plotter.jumpToFrame(249);
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startFrame, 199);
 });
@@ -878,9 +1037,7 @@ test('an even-sized time window chooses the earlier result at its midpoint', () 
     plotter.vp.time.displayCount = 4;
     plotter.vp.time.scrollOffset = 3;
     plotter.vp.time.autoFollow = false;
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startFrame, 3);
 });
@@ -890,9 +1047,7 @@ test('selected results cycle normally across both ends and survive changing the 
     getElement('monitor-search-nearest').listeners.click();
     const matches = monitor.matches;
     plotter.jumpToFrame(99);
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-next').listeners.click();
     assert.equal(monitor.matches[monitor.currentMatch].startFrame, 99);
     getElement('monitor-search-prev').listeners.click();
@@ -920,8 +1075,6 @@ test('nearest preserves same-frame result order and selects its first channel', 
         parser.onFrameParsed([index === 1 ? 42 : 0, index === 1 ? 42 : 0], `t${index}`,
             Uint8Array.of(index), 1000 + index);
     getElement('btn-pause').listeners.click();
-    getElement('monitor-display-mode-number').checked = true;
-    getElement('monitor-display-mode-number').listeners.change();
     getElement('monitor-search-query').value = '42';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.currentMatch, 0);
@@ -951,9 +1104,7 @@ test('asynchronous search uses the position captured when the button was clicked
     const { getElement, plotter, monitor, flushTimeouts } = numericSearchFixture([100, 4900],
         5000, JSON.stringify({ maxPoints: '6000', plotWindowPoints: '100' }));
     plotter.jumpToFrame(109);
-    const origin = getElement('monitor-search-origin-wave');
-    origin.checked = true;
-    origin.listeners.change();
+    getElement('monitor-search-origin').value = 'wave';
     getElement('monitor-search-nearest').listeners.click();
     assert.equal(monitor.matches.length, 0);
     plotter.jumpToFrame(4899);
@@ -971,14 +1122,14 @@ test('numeric tolerance shows a hint while its default remains empty', () => {
 
 test('shared time-mode choices switch the paired time input', () => {
     const { getElement } = bootWithConfig(null);
-    const relativeChoice = getElement('nav-jump-mode-relative');
-    relativeChoice.checked = true;
+    const relativeChoice = getElement('nav-jump-mode');
+    relativeChoice.value = 'relative';
     relativeChoice.listeners.change();
     assert.equal(getElement('nav-jump-mode').value, 'relative');
     assert.equal(getElement('nav-jump-relative').hidden, false);
     assert.equal(getElement('nav-jump-absolute').hidden, true);
-    const absoluteChoice = getElement('nav-jump-mode-absolute');
-    absoluteChoice.checked = true;
+    const absoluteChoice = getElement('nav-jump-mode');
+    absoluteChoice.value = 'absolute';
     absoluteChoice.listeners.change();
     assert.equal(getElement('nav-jump-mode').value, 'absolute');
     assert.equal(getElement('nav-jump-relative').hidden, true);
@@ -991,32 +1142,23 @@ test('pausing preserves the exact millisecond fraction', () => {
     assert.equal(getElement('nav-jump-absolute').value, '2026-10-02T10:30:00.005');
 });
 
-test('receive, send, and interval radio choices update their existing controls', () => {
-    const { getElement, monitor, getStored } = bootWithConfig(null);
-    getElement('monitor-display-mode-ascii').checked = true;
-    getElement('monitor-display-mode-ascii').listeners.change();
-    assert.equal(monitor.mode, 'ascii');
-    assert.equal(getElement('monitor-display-mode').value, 'ascii');
-
+test('send and interval dropdown choices update controls and preserve conversion', () => {
+    const { getElement, getStored } = bootWithConfig(null);
     getElement('send-input').value = '41';
-    getElement('send-mode-text').checked = true;
-    getElement('send-mode-text').listeners.change();
-    assert.equal(getElement('send-mode').value, 'text');
+    getElement('send-mode').value = 'text';
+    getElement('send-mode').listeners.change();
     assert.equal(getElement('send-input').value, 'A');
-
-    getElement('send-interval-unit-hz').checked = true;
-    getElement('send-interval-unit-hz').listeners.change();
-    assert.equal(getElement('send-interval-unit').value, 'hz');
+    getElement('send-interval-unit').value = 'hz';
+    getElement('send-interval-unit').listeners.change();
     assert.equal(JSON.parse(getStored()).sendIntervalUnit, 'hz');
 });
 
 test('legacy millisecond interval unit restores the second choice', () => {
     const { getElement } = bootWithConfig(JSON.stringify({ sendIntervalUnit: 'ms' }));
     assert.equal(getElement('send-interval-unit').value, 's');
-    assert.equal(getElement('send-interval-unit-s').checked, true);
 });
 
-test('nested navigation panel reserves monitor height while preserving four log rows', () => {
+test('independent navigation panel reserves its own height while preserving four log rows', () => {
     const { getElement, notifyResize } = bootWithConfig(null);
     const main = getElement('main-display');
     main.clientHeight = 800;
@@ -1028,11 +1170,15 @@ test('nested navigation panel reserves monitor height while preserving four log 
     getElement('navigation-panel').offsetHeight = 250;
     notifyResize('navigation-panel');
     assert.ok(parseInt(getElement('canvas-wrapper').style.height, 10) < before);
-    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 530);
+    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 280);
+    const allocated = parseInt(getElement('canvas-wrapper').style.height) +
+        parseInt(getElement('monitor-panel').style.height) + getElement('navigation-panel').offsetHeight;
+    const fixed = 16 + 6 + getElement('v-resizer').offsetHeight;
+    assert.ok(allocated + fixed <= main.clientHeight);
 });
 
 test('shared time and search controls remain visible with the minimum log space', () => {
-    const { getElement } = bootWithConfig(null);
+    const { getElement, notifyResize } = bootWithConfig(null);
     getElement('main-display').clientHeight = 900;
     getElement('v-resizer').offsetHeight = 20;
     getElement('monitor-header').offsetHeight = 40;
@@ -1040,9 +1186,740 @@ test('shared time and search controls remain visible with the minimum log space'
     getElement('send-panel').offsetHeight = 154;
     getElement('navigation-panel').offsetHeight = 209;
     getElement('plot-header').offsetHeight = 150;
-    getElement('monitor-display-mode').listeners.change();
-    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 543);
+    notifyResize('navigation-panel');
+    assert.ok(parseInt(getElement('monitor-panel').style.height, 10) >= 334);
     assert.notEqual(getElement('navigation-panel').hidden, true);
     assert.notEqual(getElement('nav-time-tools').hidden, true);
     assert.notEqual(getElement('nav-search-tools').hidden, true);
+});
+
+test('presentation-only raw format switches keep bytes and clear incompatible search highlights', () => {
+    const { getElement, rawParser, monitor, plotter } = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    rawParser.appendData(Uint8Array.of(0x41));
+    getElement('btn-pause').listeners.click();
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 1);
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    assert.equal(plotter.frames.length, 1);
+    assert.equal(monitor.matches.length, 0);
+    assert.equal(getElement('monitor-search-status').textContent, '');
+    getElement('monitor-search-nearest').listeners.click();
+    assert.equal(monitor.matches.length, 0);
+});
+
+test('legacy imports validate numeric defaults before changing an active raw format', () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    const { getElement, rawParser, plotter, monitor, alerts } = fixture;
+    rawParser.appendData(Uint8Array.of(65)); rawParser.flushPending();
+    const target = { files: [{ text: JSON.stringify({ enableHeader: true, headerHex: 'GG' }) }], value: 'old.json' };
+    getElement('cfg-file-input').listeners.change({ target });
+    assert.equal(alerts.length, 1);
+    assert.equal(getElement('capture-mode').value, 'hex');
+    assert.equal(monitor.mode, 'hex');
+    assert.equal(plotter.frames.length, 1);
+});
+
+test('transport entry, disconnect tail and pause share applied raw framing and statistics', () => {
+    const { getElement, serial, plotter, tick, monitor } = bootWithConfig(JSON.stringify({
+        captureMode: 'text', textBoundary: 'crlf' }));
+    serial.onDataCallback(new TextEncoder().encode('中'));
+    serial.onDataCallback(new TextEncoder().encode('文\r\n尾'));
+    assert.equal(plotter.frames.length, 1);
+    serial.onConnectStatusChange(false);
+    assert.equal(plotter.frames.length, 2);
+    assert.equal(plotter.frames.frameAt(1).incomplete, true);
+    tick();
+    assert.equal(getElement('stat-rx-value').textContent, '11 B/s');
+    assert.equal(getElement('stat-fps-value').textContent, '2 f/s');
+    getElement('btn-pause').listeners.click();
+    serial.onDataCallback(new TextEncoder().encode('丢弃\r\n'));
+    tick();
+    assert.equal(plotter.frames.length, 2);
+    assert.equal(getElement('stat-rx-value').textContent, '11 B/s');
+    assert.equal(monitor.mode, 'text');
+});
+
+test('autosaving unrelated options persists applied format while a field is still being edited', () => {
+    const { getElement, getStored } = bootWithConfig(null);
+    getElement('channels-count').value = '2';
+    getElement('channels-count').listeners.input();
+    getElement('plot-view-mode').value = 'frequency';
+    getElement('plot-view-mode').listeners.change();
+    const saved = JSON.parse(getStored());
+    assert.equal(saved.captureMode, 'number');
+    assert.equal(saved.channelsCount, '1');
+    assert.equal(getElement('format-apply-status').textContent, '');
+    assert.equal(getElement('format-apply-status').hidden, true);
+    getElement('channels-count').listeners.change();
+    assert.equal(JSON.parse(getStored()).channelsCount, '2');
+});
+
+test('raw nearest origin displays byte position and restores the numeric session choice', () => {
+    const { getElement } = bootWithConfig(null);
+    const origin = getElement('monitor-search-origin');
+    origin.value = 'wave';
+    getElement('capture-mode').value = 'hex';
+    getElement('capture-mode').listeners.change();
+    assert.equal(origin.value, 'byte');
+    assert.equal(origin.disabled, true);
+    getElement('capture-mode').value = 'number';
+    getElement('capture-mode').listeners.change();
+    getElement('btn-pause').listeners.click();
+    assert.equal(origin.value, 'wave');
+    assert.equal(origin.disabled, false);
+});
+
+test('import uses resolved applied settings instead of unapplied numeric drafts', () => {
+    const { getElement, plotter, monitor, alerts } = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    getElement('capture-mode').value = 'number';
+    getElement('frame-header').value = 'GG';
+    const target = { files: [{ text: JSON.stringify({ maxPoints: '2000' }) }], value: 'old.json' };
+    getElement('cfg-file-input').listeners.change({ target });
+    assert.equal(alerts.length, 0);
+    assert.equal(getElement('frame-header').value, 'AB');
+    assert.equal(monitor.mode, 'number');
+    assert.equal(plotter.maxPoints, 2000);
+    assert.equal(getElement('max-points').value, '2000');
+});
+
+test('old configs with a smaller history restore a clamped default plot window', () => {
+    const { getElement, plotter } = bootWithConfig(JSON.stringify({ maxPoints: '500' }));
+    assert.equal(getElement('max-points').value, '500');
+    assert.equal(plotter.maxPoints, 500);
+    assert.equal(getElement('plot-window-points').value, '500');
+});
+
+test('frame format changes apply automatically, inactive fields hide, and invalid edits retain acquisition', async () => {
+    const fixture = bootWithConfig(null);
+    const { getElement, serial, parser, monitor, plotter, alerts } = fixture;
+    const header = getElement('chk-header'); header.checked = false; header.listeners.change();
+    assert.equal(getElement('header-config').hidden, true);
+    const type = getElement('data-type'); type.value = 'float64'; type.listeners.change();
+    assert.equal(parser.dataType, 'float64');
+    serial.onDataCallback(Uint8Array.of(0,0,0,0,0,0,0xf0,0x3f));
+    assert.equal(plotter.frames.getValue(0,0), 1);
+    getElement('channels-count').value = '0'; getElement('channels-count').listeners.change();
+    assert.equal(parser.channelsCount, 1);
+    assert.equal(plotter.frames.length, 1);
+    assert.match(getElement('format-apply-status').textContent, /通道数/);
+    assert.equal(getElement('format-apply-status').hidden, false);
+    assert.equal(alerts.length, 0);
+    getElement('channels-count').value = '1'; getElement('channels-count').listeners.change();
+    const mode = getElement('capture-mode'); mode.value = 'hex'; mode.listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(monitor.mode, 'hex');
+    assert.equal(getElement('channels-display-panel').hidden, true);
+    assert.equal(getElement('plot-window-control').hidden, true);
+    assert.equal(getElement('max-points-label').textContent, '最大帧数量');
+    assert.equal(getElement('idle-gap-seconds').value, '0.001');
+    assert.equal(getElement('btn-export').disabled, false);
+});
+
+test('frame and communications settings have peer left tabs and export has a right tab', () => {
+    const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
+    assert.match(html, /data-tab="tab-export"/);
+    const connectionPage = html.slice(html.indexOf('id="tab-connection"'), html.indexOf('id="tab-frame"'));
+    assert.doesNotMatch(connectionPage, /id="export-panel"/);
+    assert.doesNotMatch(connectionPage, /id="capture-mode"|id="rebuild-history"/);
+    assert.match(connectionPage, /id="cfg-save-status"/);
+    assert.doesNotMatch(connectionPage, /id="frame-raw-settings"/);
+    const right = html.slice(html.indexOf('id="channel-sidebar"'));
+    assert.match(right, /id="export-panel"/);
+    assert.doesNotMatch(right, /sidebar-section-header/);
+    assert.doesNotMatch(html, /id="sidebar-resizer"|id="sidebar-controls"/);
+    assert.ok(html.indexOf('id="main-display"') < html.indexOf('id="board-toolbar"'));
+    assert.ok(html.indexOf('id="canvas-wrapper"') < html.indexOf('id="board-toolbar"'));
+    const options = html.match(/<select id="capture-mode">([\s\S]*?)<\/select>/)[1];
+    assert.deepEqual([...options.matchAll(/value="([^"]+)"/g)].map(m => m[1]), ['hex','text','number','custom']);
+});
+
+test('merged buffer controls are counted only through the shared panel height', () => {
+    const { getElement, notifyResize } = bootWithConfig(null);
+    getElement('main-display').clientHeight = 1000;
+    getElement('board-toolbar').offsetHeight = 80;
+    getElement('navigation-panel').offsetHeight = 160;
+    notifyResize('navigation-panel');
+    const plot = getElement('canvas-wrapper'), monitor = getElement('monitor-panel');
+    const reserved = 16 + 6 + getElement('v-resizer').offsetHeight +
+        getElement('navigation-panel').offsetHeight;
+    assert.ok(Math.abs(parseInt(plot.style.height) + parseInt(monitor.style.height) - (1000 - reserved)) <= 1);
+    const before = parseInt(plot.style.height);
+    getElement('board-toolbar').offsetHeight = 140;
+    getElement('navigation-panel').offsetHeight = 220;
+    notifyResize('navigation-panel');
+    assert.ok(parseInt(plot.style.height) < before);
+    assert.notEqual(getElement('board-toolbar').hidden, true);
+    getElement('capture-mode').value = 'hex'; getElement('capture-mode').listeners.change();
+    assert.equal(getElement('canvas-wrapper').hidden, true);
+    assert.notEqual(getElement('board-toolbar').hidden, true);
+    assert.equal(getElement('max-points-label').textContent, '最大帧数量');
+});
+
+test('raw exports include retained successful TX records beyond the visible extra log limit', async () => {
+    const { getElement, rawParser, sendController, blobs, downloads } = bootWithConfig(JSON.stringify({captureMode:'hex'}));
+    rawParser.appendData(Uint8Array.of(1,2)); rawParser.flushPending();
+    for(let i=0;i<125;i++) sendController.onSent(Uint8Array.of(i));
+    getElement('export-format').value = 'binary'; getElement('export-format').listeners.change();
+    getElement('export-direction').value = 'both';
+    await getElement('btn-export').listeners.click();
+    assert.ok(downloads[0].download.endsWith('.bin'));
+    assert.deepEqual(Array.from(new Uint8Array(await blobs[0].arrayBuffer())), [1,2,...Array.from({length:125},(_,i)=>i)]);
+    getElement('max-points').value = '2'; getElement('max-points').listeners.change();
+    getElement('export-direction').value = 'tx';
+    await getElement('btn-export').listeners.click();
+    assert.deepEqual(Array.from(new Uint8Array(await blobs[1].arrayBuffer())), [123,124]);
+    getElement('btn-clear').listeners.click();
+    await getElement('btn-export').listeners.click();
+    assert.equal(blobs.length, 2);
+});
+
+
+test('large combined raw exports succeed when the TX buffer is empty', async () => {
+    const { getElement, rawParser, setSavePicker, alerts } = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    const size = 32 * 1024 * 1024 + 1;
+    const bytes = new Uint8Array(size); bytes[0] = 0x41; bytes[size - 1] = 0xff;
+    rawParser.appendData(bytes); rawParser.flushPending();
+    let written = 0, closed = false;
+    setSavePicker(async () => ({ createWritable: async () => ({
+        async write(chunk) { written += chunk.length; assert.equal(chunk[0], 0x41); assert.equal(chunk[chunk.length - 1], 0xff); },
+        async close() { closed = true; }, async abort() { assert.fail('unchanged export must not abort'); }
+    }) }));
+    getElement('export-format').value = 'binary'; getElement('export-format').listeners.change();
+    getElement('export-direction').value = 'both';
+    await getElement('btn-export').listeners.click();
+    assert.deepEqual(alerts, []);
+    assert.equal(written, size); assert.equal(closed, true);
+});
+
+test('text TX-only export works without RX and readable metadata follows the selected format', async () => {
+    const { getElement, sendController, blobs, alerts } = bootWithConfig(JSON.stringify({ captureMode: 'text' }));
+    sendController.onSent(new TextEncoder().encode('中文\n'));
+    getElement('export-direction').value = 'tx';
+    getElement('export-markers').checked = true;
+    await getElement('btn-export').listeners.click();
+    assert.equal(await blobs[0].text(), 'TX 中文\n');
+    assert.deepEqual(alerts, []);
+    assert.equal(getElement('export-text-metadata').hidden, false);
+    getElement('capture-mode').value = 'number'; getElement('capture-mode').listeners.change();
+    assert.equal(getElement('export-format').value, 'csv');
+    assert.equal(getElement('wrap-export-direction').hidden, true);
+    assert.equal(getElement('export-text-metadata').hidden, false);
+});
+
+
+test('CSV export exposes timestamps without raw markers and keeps the selection across formats', async () => {
+    const { getElement, parser, blobs } = bootWithConfig(null);
+    assert.equal(getElement('export-text-metadata').hidden, false);
+    assert.equal(getElement('wrap-export-markers').hidden, true);
+    parser.onFrameParsed([3], '22:13:20.123', Uint8Array.of(3), 1700000000123);
+    getElement('export-timestamps').checked = true;
+    await getElement('btn-export').listeners.click();
+    assert.match(await blobs[0].text(), /Index,Timestamp,CH01\r\n0,2023-11-14T22:13:20.123Z,3/);
+    const mode = getElement('capture-mode'); mode.value = 'hex'; mode.listeners.change();
+    assert.equal(getElement('export-timestamps').checked, true);
+    assert.equal(getElement('wrap-export-markers').hidden, false);
+    getElement('export-format').value = 'binary'; getElement('export-format').listeners.change();
+    assert.equal(getElement('export-text-metadata').hidden, true);
+    assert.equal(getElement('export-binary-hint').hidden, false);
+});
+
+
+test('byte and waveform tabs preserve communications and hide only waveform controls in raw modes', () => {
+    const { getElement, clickTab, isTabActive } = bootWithConfig(null);
+    assert.equal(isTabActive('tab-connection'), true);
+    assert.equal(isTabActive('tab-monitor-config'), true);
+    clickTab('tab-waveform-config');
+    assert.equal(isTabActive('tab-waveform-config'), true);
+    assert.equal(isTabActive('tab-monitor-config'), false);
+    assert.equal(isTabActive('tab-connection'), true);
+    clickTab('tab-connection');
+    assert.equal(isTabActive('tab-waveform-config'), true);
+    assert.equal(isTabActive('tab-connection'), true);
+    const mode = getElement('capture-mode'); mode.value = 'hex'; mode.listeners.change();
+    assert.equal(getElement('channel-sidebar').hidden, false);
+    assert.equal(isTabActive('tab-monitor-config'), true);
+    assert.equal(getElement('tab-waveform-config-button').hidden, true);
+    assert.equal(getElement('tab-monitor-config-button').hidden, false);
+    assert.equal(getElement('monitor-display-panel').hidden, false);
+    assert.equal(getElement('monitor-config-panel').hidden, false);
+    assert.equal(getElement('monitor-hex-options').hidden, false);
+    assert.equal(getElement('monitor-text-options').hidden, true);
+    mode.value = 'number'; mode.listeners.change();
+    assert.equal(getElement('channel-sidebar').hidden, false);
+    assert.equal(isTabActive('tab-monitor-config'), true);
+    assert.equal(getElement('tab-waveform-config-button').hidden, false);
+    assert.equal(isTabActive('tab-connection'), true);
+    assert.equal(getElement('monitor-display-panel').hidden, false);
+    assert.equal(getElement('monitor-config-panel').hidden, false);
+});
+
+test('raw display settings update and persist without clearing RX TX search or changing framing', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', rebuildHistory: false }));
+    const { getElement, serial, sendController, plotter, monitor, getStored } = fixture;
+    serial.onDataCallback(Uint8Array.of(65, 66, 67));
+    getElement('btn-pause').click();
+    sendController.onSent(Uint8Array.of(90));
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-nearest').click();
+    const matches = monitor.matches.length;
+    const frames = plotter.frames;
+    const progressHidden = getElement('history-rebuild-progress').hidden;
+    const hexWidth = getElement('monitor-hex-bytes-per-line');
+    assert.equal(typeof hexWidth.listeners.change, 'function');
+    hexWidth.value = '8'; hexWidth.listeners.change();
+    const showRx = getElement('monitor-show-rx');
+    showRx.checked = false; showRx.listeners.change();
+    const keyword = getElement('monitor-keyword');
+    keyword.value = 'alarm\nERROR'; keyword.listeners.input();
+    const fold = getElement('monitor-fold-long');
+    fold.checked = true; fold.listeners.change();
+    assert.equal(getElement('monitor-fold-lines-wrap').hidden, false);
+    assert.equal(plotter.frames, frames);
+    assert.deepEqual(Array.from(frames.rawBytesAt(0)), [65, 66, 67]);
+    assert.equal(monitor.extras.length, 1);
+    assert.equal(monitor.matches.length, matches);
+    assert.equal(getElement('history-rebuild-progress').hidden, progressHidden);
+    const saved = JSON.parse(getStored());
+    assert.equal(saved.monitorDisplay.hexBytesPerLine, 8);
+    assert.equal(saved.monitorDisplay.showRx, false);
+    assert.equal(saved.monitorDisplay.keyword, 'alarm\nERROR');
+    assert.equal(saved.monitorDisplay.foldLong, true);
+    assert.equal(saved.captureMode, 'hex');
+    assert.equal(saved.textBoundary, 'idle');
+    getElement('export-format').value = 'binary'; getElement('export-format').listeners.change();
+    await getElement('btn-export').click();
+    assert.deepEqual(Array.from(new Uint8Array(await fixture.blobs.at(-1).arrayBuffer())), [65, 66, 67]);
+});
+
+test('text search case checkbox invalidates prior results without changing capture or other search modes', () => {
+    const { getElement, serial, monitor, plotter } = bootWithConfig(JSON.stringify({ captureMode: 'text', rebuildHistory: false }));
+    const caseOption = getElement('monitor-search-case-sensitive');
+    assert.equal(caseOption.checked, true);
+    assert.equal(caseOption.disabled, true);
+    assert.equal(getElement('monitor-search-case-wrap').hidden, false);
+    serial.onDataCallback(new TextEncoder().encode('Error error ERROR'));
+    getElement('btn-pause').click();
+    const bytes = Array.from(plotter.frames.rawBytesAt(0));
+    assert.equal(caseOption.disabled, false);
+    const query = getElement('monitor-search-query');
+    query.value = 'error'; query.listeners.input();
+    getElement('monitor-search-nearest').click();
+    assert.equal(monitor.matches.length, 1);
+    caseOption.checked = false; caseOption.listeners.change();
+    assert.equal(monitor.matches.length, 0);
+    getElement('monitor-search-nearest').click();
+    assert.equal(monitor.matches.length, 3);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), bytes);
+    getElement('capture-mode').value = 'hex'; getElement('capture-mode').listeners.change();
+    assert.equal(getElement('monitor-search-case-wrap').hidden, true);
+    assert.equal(caseOption.checked, false);
+});
+
+test('record and search colors persist and update waveform markers without clearing matches', () => {
+    const { getElement, serial, monitor, plotter, getStored } = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    serial.onDataCallback(Uint8Array.of(65, 66));
+    getElement('btn-pause').click();
+    getElement('monitor-search-query').value = '41';
+    getElement('monitor-search-nearest').click();
+    const matches = monitor.matches;
+    const color = getElement('monitor-search-current-color');
+    color.value = '#abcdef'; color.listeners.input();
+    assert.equal(monitor.matches, matches);
+    assert.equal(plotter.navigationColors.current, '#abcdef');
+    assert.equal(JSON.parse(getStored()).monitorDisplay.searchCurrentColor, '#abcdef');
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [65, 66]);
+});
+
+test('monitor display restores settings and legacy imports reset defaults while numeric views retain them', () => {
+    const { getElement, getStored } = bootWithConfig(JSON.stringify({ captureMode: 'text',
+        monitorDisplay: { textInvalid: 'escape', textNewline: 'line-break', textTab: 'spaces-8',
+            timestamp: 'none', showDirection: false, foldLong: true, foldLines: 3, numericSignificantDigits: 12 } }));
+    assert.equal(getElement('monitor-text-invalid').value, 'escape');
+    assert.equal(getElement('monitor-text-options').hidden, false);
+    assert.equal(getElement('monitor-hex-options').hidden, true);
+    assert.equal(getElement('monitor-fold-lines').value, '3');
+    assert.equal(getElement('monitor-numeric-significant-digits').value, '12');
+    assert.equal(getElement('monitor-number-options').hidden, true);
+    getElement('capture-mode').value = 'number'; getElement('capture-mode').listeners.change();
+    assert.equal(getElement('monitor-display-panel').hidden, false);
+    assert.equal(getElement('monitor-number-options').hidden, false);
+    const precision = getElement('monitor-numeric-significant-digits');
+    precision.value = '7'; precision.listeners.input();
+    assert.equal(JSON.parse(getStored()).monitorDisplay.numericSignificantDigits, 7);
+    assert.equal(JSON.parse(getStored()).monitorDisplay.textTab, 'spaces-8');
+    getElement('cfg-file-input').listeners.change({ target: { files: [{ text: JSON.stringify({ captureMode: 'hex' }) }] } });
+    assert.equal(getElement('monitor-text-invalid').value, 'replacement');
+    assert.equal(getElement('monitor-timestamp').value, 'clock');
+    assert.equal(getElement('monitor-show-direction').checked, true);
+    assert.equal(getElement('monitor-fold-lines-wrap').hidden, true);
+    assert.equal(JSON.parse(getStored()).monitorDisplay.textTab, 'escape');
+    assert.equal(getElement('monitor-numeric-significant-digits').value, '6');
+    assert.equal(getElement('monitor-number-options').hidden, true);
+});
+
+test('invalid display edits keep the last applied settings and select wheels apply the next option', () => {
+    const { getElement, monitor, getStored, getWrites } = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    const fold = getElement('monitor-fold-lines');
+    assert.equal(typeof fold.listeners.change, 'function');
+    const writes = getWrites();
+    fold.value = '0'; fold.listeners.change();
+    assert.equal(monitor.displayOptions.foldLines, 8);
+    assert.equal(getWrites(), writes);
+    assert.equal(getElement('monitor-display-status').hidden, false);
+    fold.value = '4'; fold.listeners.change();
+    assert.equal(monitor.displayOptions.foldLines, 4);
+    assert.equal(getElement('monitor-display-status').hidden, true);
+    const width = getElement('monitor-hex-bytes-per-line');
+    width.listeners.wheel({ deltaY: 100, preventDefault() {} });
+    assert.equal(width.value, '8');
+    assert.equal(monitor.displayOptions.hexBytesPerLine, 8);
+    assert.equal(JSON.parse(getStored()).monitorDisplay.hexBytesPerLine, 8);
+});
+
+test('unapplied display drafts do not block unrelated saves or legacy imports', () => {
+    const { getElement, getStored, monitor, alerts } = bootWithConfig(JSON.stringify({ captureMode: 'hex',
+        monitorDisplay: { foldLines: 3 } }));
+    const fold = getElement('monitor-fold-lines');
+    fold.value = '0'; fold.listeners.input();
+    const direction = getElement('monitor-show-direction');
+    direction.checked = false; direction.listeners.change();
+    assert.equal(monitor.displayOptions.showDirection, true);
+    getElement('send-interval-unit').value = 's'; getElement('send-interval-unit').listeners.change();
+    assert.equal(JSON.parse(getStored()).monitorDisplay.foldLines, 3);
+    assert.equal(JSON.parse(getStored()).monitorDisplay.showDirection, true);
+    getElement('cfg-file-input').listeners.change({ target: { files: [{ text: JSON.stringify({ captureMode: 'hex' }) }] } });
+    assert.deepEqual(alerts, []);
+    assert.equal(fold.value, '8');
+    assert.equal(direction.checked, true);
+    assert.equal(monitor.displayOptions.foldLines, 8);
+});
+
+test('history replays original bytes across text, Hex and numeric formats without losing TX', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', enableHeader: false, dataType: 'uint8' }));
+    const { getElement, serial, plotter, sendController, blobs } = fixture;
+    serial.onDataCallback(Uint8Array.of(65, 10, 66, 10));
+    getElement('btn-pause').listeners.click();
+    sendController.onSent(Uint8Array.of(90));
+    const originalTime = plotter.frames.timestampAt(0);
+    getElement('text-boundary').value = 'lf';
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    assert.equal(getElement('history-rebuild-progress').hidden, false);
+    assert.equal(getElement('btn-export').disabled, true);
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 2);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [65, 10]);
+    assert.equal(plotter.frames.timestampAt(0), originalTime);
+    assert.equal(getElement('stat-fail-value').textContent, '0 / 4 (0.0%)');
+    getElement('export-direction').value = 'tx';
+    await getElement('btn-export').listeners.click();
+    assert.equal(await blobs.at(-1).text(), 'Z');
+    getElement('capture-mode').value = 'number';
+    getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    assert.deepEqual(Array.from({ length: 4 }, (_, i) => plotter.frames.getValue(0, i)), [65, 10, 66, 10]);
+    getElement('capture-mode').value = 'hex';
+    getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 1);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [65, 10, 66, 10]);
+});
+
+test('text statistics count illegal characters, exempt CR LF TAB and update while paused', () => {
+    const { getElement, serial, tick } = bootWithConfig(JSON.stringify({ captureMode: 'text', textBoundary: 'lf' }));
+    serial.onDataCallback(Uint8Array.of(65, 0, 0xff, 13, 10, 9));
+    tick();
+    assert.equal(getElement('stat-fail-label').textContent, '失败字符 / 总字符:');
+    assert.equal(getElement('stat-fail-value').textContent, '2 / 6 (33.3%)');
+    getElement('btn-pause').listeners.click();
+    assert.equal(getElement('stat-fail-value').textContent, '2 / 6 (33.3%)');
+    getElement('btn-clear').listeners.click();
+    assert.equal(getElement('stat-fail-value').textContent, '0 / 0 (0.0%)');
+});
+
+test('configuration changes cancel older replays and catch bytes received during rebuilding', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    const { getElement, serial, plotter } = fixture;
+    serial.onDataCallback(Uint8Array.of(65, 10));
+    getElement('text-boundary').value = 'lf';
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    serial.onDataCallback(Uint8Array.of(66, 10));
+    getElement('text-boundary').value = 'crlf';
+    getElement('text-boundary').listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 1);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [65, 10, 66, 10]);
+    assert.equal(fixture.monitor.mode, 'text');
+    getElement('capture-mode').value = 'number';
+    getElement('capture-mode').listeners.change();
+    getElement('btn-clear').listeners.click();
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 0);
+    assert.equal(getElement('history-rebuild-progress').hidden, true);
+    assert.equal(getElement('btn-export').disabled, false);
+});
+
+test('replaying after pause and resume preserves incomplete-tail stream boundaries', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ enableHeader: false, dataType: 'float32' }));
+    const { getElement, serial, plotter } = fixture;
+    serial.onDataCallback(Uint8Array.of(0, 0));
+    getElement('btn-pause').click();
+    getElement('btn-pause').click();
+    serial.onDataCallback(Uint8Array.of(0, 0, 128, 63));
+    getElement('btn-pause').click();
+    assert.equal(plotter.frames.getValue(0, 0), 1);
+    getElement('data-type').value = 'uint32';
+    getElement('data-type').listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.getValue(0, 0), 1065353216);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [0, 0, 128, 63]);
+});
+
+test('a presentation failure after replay keeps capture format consistent with installed frames', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ enableHeader: false, dataType: 'uint8' }));
+    const { getElement, serial, plotter, monitor } = fixture;
+    serial.onDataCallback(Uint8Array.of(65));
+    getElement('btn-pause').click();
+    const original = monitor.setEncoding.bind(monitor);
+    let injected = false;
+    monitor.setEncoding = (...args) => {
+        if (!injected) { injected = true; throw new Error('presentation test failure'); }
+        return original(...args);
+    };
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    assert.match(getElement('format-apply-status').textContent, /presentation test failure/);
+    assert.equal(plotter.frames.rawMode, true);
+    getElement('btn-pause').click();
+    serial.onDataCallback(Uint8Array.of(66));
+    getElement('btn-pause').click();
+    assert.equal(plotter.frames.length, 2);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(1)), [66]);
+});
+
+test('new receive bytes arriving during long-text preparation are replayed once before commit', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', idleGapSeconds: '0.001' }));
+    const { getElement, serial, plotter } = fixture;
+    serial.onDataCallback(new Uint8Array(70000).fill(65));
+    fixture.flushTimeouts();
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    for (let i = 0; i < 100; i++) {
+        await Promise.resolve();
+        if (getElement('history-rebuild-progress').textContent.startsWith('正在准备文本显示')) break;
+        fixture.flushTimeouts();
+    }
+    assert.match(getElement('history-rebuild-progress').textContent, /^正在准备文本显示/);
+    serial.onDataCallback(Uint8Array.of(66));
+    await fixture.finishRebuild();
+    assert.equal(plotter.frames.length, 2);
+    assert.equal(plotter.frames.rawBytesAt(0).length, 70000);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(1)), [66]);
+    assert.equal(getElement('stat-fail-value').textContent, '0 / 70001 (0.0%)');
+});
+
+test('pause and resume during text preparation replay a boundary even without new bytes', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex' }));
+    const { getElement, serial, monitor } = fixture;
+    serial.connect = async () => { serial.port = {}; serial.keepReading = true; };
+    await getElement('btn-connect').listeners.click();
+    serial.onDataCallback(new Uint8Array(70000).fill(65));
+    fixture.tick(10);
+    serial.onDataCallback(Uint8Array.of(0xe4, 0xb8));
+    const prepare = monitor.prepareText.bind(monitor);
+    let injected = false;
+    monitor.prepareText = async (...args) => {
+        const state = await prepare(...args);
+        if (!injected) {
+            injected = true;
+            getElement('btn-pause').click();
+            getElement('btn-pause').click();
+        }
+        return state;
+    };
+    getElement('capture-mode').value = 'text';
+    getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    serial.onDataCallback(Uint8Array.of(0xad));
+    getElement('btn-pause').click();
+    assert.equal(getElement('stat-fail-value').textContent, '3 / 70003 (0.0%)');
+    getElement('monitor-search-query').value = '中';
+    getElement('monitor-search-nearest').click();
+    assert.equal(monitor.matches.length, 0);
+});
+
+test('continuous reception does not prevent committing Hex to text or numeric views', async () => {
+    for (const mode of ['text', 'number']) {
+        const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', enableHeader: false,
+            dataType: 'uint8', textBoundary: 'lf' }));
+        const { getElement, serial, monitor, plotter } = fixture;
+        serial.connect = async () => { serial.port = {}; serial.keepReading = true; };
+        await getElement('btn-connect').click();
+        serial.onDataCallback(Uint8Array.of(65, 10));
+        fixture.tick(2);
+        fixture.setReplayYieldHook(() => serial.onDataCallback(Uint8Array.of(66, 10)));
+        getElement('capture-mode').value = mode;
+        getElement('capture-mode').listeners.change();
+        try {
+            for (let i = 0; i < 20; i++) {
+                fixture.flushTimeouts();
+                await Promise.resolve();
+            }
+            assert.equal(monitor.mode, mode, 'a live stream must not starve format commit');
+            assert.equal(plotter.isPaused, false);
+            assert.equal(getElement('canvas-wrapper').hidden, mode !== 'number');
+            assert.equal(getElement('channels-display-panel').hidden, mode !== 'number');
+            assert.ok(plotter.frames.length > 1, 'new frames must continue reaching the installed buffer');
+            assert.equal(getElement('history-rebuild-progress').hidden, true);
+            assert.equal(getElement('btn-export').disabled, false);
+            assert.equal(getElement('max-points').disabled, false);
+        } finally {
+            fixture.setReplayYieldHook(null);
+            await fixture.finishRebuild();
+        }
+    }
+});
+
+test('all framing and decoding controls belong to the frame tab', () => {
+    const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
+    assert.match(html, /data-tab="tab-frame">帧格式<\/button>/);
+    const framePage = html.slice(html.indexOf('id="tab-frame"'), html.indexOf('</aside>'));
+    for (const id of ['capture-mode', 'rebuild-history', 'frame-raw-settings', 'frame-header-settings', 'frame-footer-settings',
+        'frame-checksum-settings', 'frame-numeric-settings']) {
+        assert.match(framePage, new RegExp(`id="${id}"`));
+    }
+    const { clickTab, isTabActive, getElement } = bootWithConfig(null);
+    clickTab('tab-frame');
+    assert.equal(isTabActive('tab-frame'), true);
+    assert.equal(isTabActive('tab-connection'), false);
+    assert.equal(isTabActive('tab-monitor-config'), true);
+    getElement('capture-mode').value = 'hex'; getElement('capture-mode').listeners.change();
+    assert.equal(isTabActive('tab-frame'), true);
+    assert.equal(getElement('frame-raw-settings').hidden, false);
+    assert.equal(getElement('frame-numeric-settings').hidden, true);
+    clickTab('tab-connection');
+    assert.equal(isTabActive('tab-frame'), false);
+    assert.equal(isTabActive('tab-connection'), true);
+});
+
+test('pausing during live catchup retains already received numeric frames and drops later input', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', enableHeader: false,
+        dataType: 'uint8', maxPoints: '5000' }));
+    const { getElement, serial, monitor, plotter } = fixture;
+    serial.connect = async () => { serial.port = {}; serial.keepReading = true; };
+    await getElement('btn-connect').listeners.click();
+    serial.onDataCallback(Uint8Array.of(1)); fixture.tick(2);
+    let queued = false, paused = false;
+    fixture.setReplayYieldHook(() => {
+        if (!queued) { queued = true; serial.onDataCallback(new Uint8Array(4097).fill(7)); }
+        else if (!paused && monitor.mode === 'number') {
+            paused = true;
+            serial.onDataCallback(Uint8Array.of(9));
+            getElement('btn-pause').click();
+            serial.onDataCallback(Uint8Array.of(99));
+        }
+    });
+    getElement('capture-mode').value = 'number'; getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    assert.equal(paused, true);
+    assert.equal(plotter.isPaused, true);
+    assert.deepEqual(Array.from(plotter.frames.channelSlice(0)), [1, ...new Array(4097).fill(7), 9]);
+    fixture.setReplayYieldHook(null);
+    getElement('btn-pause').click(); serial.onDataCallback(Uint8Array.of(11));
+    assert.deepEqual(Array.from(plotter.frames.channelSlice(0)), [1, ...new Array(4097).fill(7), 9, 11]);
+});
+
+test('clearing a committed raw view during catchup restores live idle timers', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', textBoundary: 'idle' }));
+    const { getElement, serial, monitor, plotter } = fixture;
+    serial.connect = async () => { serial.port = {}; serial.keepReading = true; };
+    await getElement('btn-connect').listeners.click();
+    serial.onDataCallback(Uint8Array.of(65)); fixture.tick(2);
+    let queued = false, cleared = false;
+    fixture.setReplayYieldHook(() => {
+        if (!queued) { queued = true; serial.onDataCallback(new Uint8Array(4097).fill(66)); }
+        else if (!cleared && monitor.mode === 'text') {
+            cleared = true; getElement('btn-clear').click();
+            serial.onDataCallback(Uint8Array.of(67));
+        }
+    });
+    getElement('capture-mode').value = 'text'; getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild(); fixture.tick(10);
+    assert.equal(cleared, true);
+    assert.equal(monitor.mode, 'text');
+    assert.equal(plotter.frames.length, 1);
+    assert.deepEqual(Array.from(plotter.frames.rawBytesAt(0)), [67]);
+    fixture.setReplayYieldHook(null);
+});
+
+test('another mode change during live catchup cancels the old parser and keeps the newest view live', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', textBoundary: 'lf',
+        enableHeader: false, dataType: 'uint8', channelsCount: '2', maxPoints: '5000' }));
+    const { getElement, serial, monitor, plotter } = fixture;
+    serial.connect = async () => { serial.port = {}; serial.keepReading = true; };
+    await getElement('btn-connect').listeners.click();
+    serial.onDataCallback(Uint8Array.of(65, 10)); fixture.tick(2);
+    let queued = false, switched = false;
+    fixture.setReplayYieldHook(() => {
+        if (!queued) { queued = true; serial.onDataCallback(Uint8Array.from({ length: 4098 }, (_, i) => i % 2 ? 10 : 66)); }
+        else if (!switched && monitor.mode === 'text') {
+            switched = true;
+            getElement('capture-mode').value = 'number'; getElement('capture-mode').listeners.change();
+            serial.onDataCallback(Uint8Array.of(67, 10));
+        }
+    });
+    getElement('capture-mode').value = 'text'; getElement('capture-mode').listeners.change();
+    await fixture.finishRebuild();
+    fixture.setReplayYieldHook(null);
+    assert.equal(switched, true);
+    assert.equal(monitor.mode, 'number');
+    assert.equal(getElement('canvas-wrapper').hidden, false);
+    assert.deepEqual(Array.from(plotter.frames.channelSlice(0)), [65, ...new Array(2049).fill(66), 67]);
+    serial.onDataCallback(Uint8Array.of(68, 10));
+    assert.deepEqual(Array.from(plotter.frames.channelSlice(0)), [65, ...new Array(2049).fill(66), 67, 68]);
+    assert.equal(plotter.isPaused, false);
+});
+
+test('the rebuild-history checkbox clears RX and TX on format changes without pausing capture', () => {
+    const fixture = bootWithConfig(JSON.stringify({ enableHeader: false, dataType: 'uint8' }));
+    const { getElement, serial, plotter, monitor, sendController, getStored } = fixture;
+    serial.onDataCallback(Uint8Array.of(65)); sendController.onSent(Uint8Array.of(66));
+    getElement('rebuild-history').checked = false; getElement('rebuild-history').dispatchEvent(new Event('change'));
+    assert.equal(plotter.frames.length, 1, 'changing only the retention choice must not delete data');
+    getElement('capture-mode').value = 'text'; getElement('capture-mode').listeners.change();
+    assert.equal(monitor.mode, 'text');
+    assert.equal(plotter.frames.length, 0);
+    assert.equal(monitor.extras.length, 0);
+    assert.equal(getElement('history-rebuild-progress').hidden, true);
+    assert.equal(plotter.isPaused, false);
+    assert.equal(JSON.parse(getStored()).rebuildHistory, false);
+    serial.onDataCallback(Uint8Array.of(67)); fixture.tick(10);
+    assert.equal(plotter.frames.length, 1);
+    getElement('text-encoding').value = 'ascii'; getElement('text-encoding').listeners.change();
+    assert.equal(plotter.frames.length, 0);
+});
+
+test('invalid format changes never clear existing data when history rebuilding is disabled', () => {
+    const fixture = bootWithConfig(JSON.stringify({ enableHeader: false, dataType: 'uint8', rebuildHistory: false }));
+    const { getElement, serial, plotter } = fixture;
+    serial.onDataCallback(Uint8Array.of(7));
+    getElement('channels-count').value = '99'; getElement('channels-count').listeners.change();
+    assert.equal(plotter.frames.length, 1);
+    assert.equal(plotter.frames.getValue(0, 0), 7);
+    assert.equal(getElement('format-apply-status').hidden, false);
+});
+
+test('format changes with rebuilding disabled also clear a TX-only buffer', async () => {
+    const fixture = bootWithConfig(JSON.stringify({ captureMode: 'hex', rebuildHistory: false }));
+    const { getElement, sendController, blobs, monitor } = fixture;
+    sendController.onSent(Uint8Array.of(65));
+    getElement('capture-mode').value = 'text'; getElement('capture-mode').listeners.change();
+    assert.equal(monitor.extras.length, 0);
+    getElement('export-direction').value = 'tx';
+    await getElement('btn-export').click();
+    assert.equal(blobs.length, 0);
 });

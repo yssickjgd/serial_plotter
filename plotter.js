@@ -66,6 +66,7 @@ class Plotter {
         this._selection = null;
         this._timeCenterOrder = null;
         this.navigationMarkers = { timeOrder: null, matches: [], currentMatch: -1 };
+        this.navigationColors = { match: '#745a00', current: '#ff8c00' };
         this._scrollbarDirty = false;
         this._boxZoomY = { time: null, frequency: null };
         this._zoomBaseY = { time: null, frequency: null };
@@ -151,6 +152,17 @@ class Plotter {
         if (redraw && this.isPaused && this.isVisible) this.draw();
     }
 
+    setNavigationColors(colors = {}) {
+        const next = { match: '#745a00', current: '#ff8c00', ...this.navigationColors, ...colors };
+        for (const key of ['match', 'current']) {
+            if (typeof next[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(next[key]))
+                throw new TypeError('搜索标记颜色必须为六位 Hex 颜色');
+        }
+        this.navigationColors = next;
+        this._markViewDirty();
+        if (this.isPaused && this.isVisible) this.draw();
+    }
+
     /* ── Resize ── */
     /** 根据父容器尺寸重置画布宽高，并刷新滚动条 */
     resize() {
@@ -177,7 +189,7 @@ class Plotter {
             this.channels.push({
                 color:   this.defaultColors[idx % this.defaultColors.length],
                 visible: false,
-                name:    `CH${idx + 1}`,
+                name:    globalThis.SerialPlotter.formatChannelId(idx),
                 gainEnabled: false, gain: 1,
                 offsetEnabled: false, offset: 0
             });
@@ -212,7 +224,12 @@ class Plotter {
         }
     }
     /** 设置指定通道的显示名称 */
-    setChannelName(index, name)       { if (this.channels[index]) { this.channels[index].name = name; this._markViewDirty(); } }
+    setChannelName(index, name) {
+        if (!this.channels[index]) return;
+        this.channels[index].name = !name || name === `CH${index + 1}`
+            ? globalThis.SerialPlotter.formatChannelId(index) : name;
+        this._markViewDirty();
+    }
     /** Update one channel's linear calibration and invalidate dependent spectra. */
     setChannelTransform(index, settings) {
         const channel = this.channels[index];
@@ -246,7 +263,8 @@ class Plotter {
             if (!channel) return;
             if (setting.color !== undefined) channel.color = setting.color;
             channel.visible = setting.visible !== false;
-            channel.name = setting.name || `CH${index + 1}`;
+            channel.name = !setting.name || setting.name === `CH${index + 1}`
+                ? globalThis.SerialPlotter.formatChannelId(index) : setting.name;
             channel.gainEnabled = setting.gainEnabled === true;
             channel.gain = setting.gain === undefined ? 1 : Number(setting.gain);
             channel.offsetEnabled = setting.offsetEnabled === true;
@@ -302,13 +320,13 @@ class Plotter {
     }
 
     /** 追加一帧数据到各通道缓冲区，超出 maxPoints 时自动丢弃最早数据 */
-    addFrame(valuesArray, frameBytes, timeStr, order, timestamp) {
-        if (this.isPaused) return;
+    addFrame(valuesArray, frameBytes, timeStr, order, timestamp, metadata) {
+        if (this.isPaused && !metadata?.capturedBeforePause) return;
         const timeView = this.vp.time;
         const previousLength = this.frames.length;
         const previousOffset = timeView.scrollOffset;
         const evictsOldest = previousLength === this.frames.capacity;
-        this.frames.append(valuesArray, frameBytes, timeStr, order, timestamp);
+        this.frames.append(valuesArray, frameBytes, timeStr, order, timestamp, metadata);
         if (timeView.autoFollow)
             timeView.scrollOffset = Math.max(0, this.frames.length - timeView.displayCount);
         else {
@@ -485,7 +503,7 @@ class Plotter {
         const freq = freqSeries.dominantBin && freqSeries.fftSize ? freqSeries.dominantBin / freqSeries.fftSize : 0;
         const period = freqSeries.dominantBin ? (freqSeries.fftSize / freqSeries.dominantBin) : 0;
         return {
-            channelLabel: series.ch.name || `CH${series.channelIndex + 1}`,
+            channelLabel: series.ch.name || globalThis.SerialPlotter.formatChannelId(series.channelIndex),
             max,
             min,
             pp,
@@ -1176,7 +1194,7 @@ class Plotter {
         const ctx = this.ctx;
         ctx.save();
         ctx.lineWidth = 1;
-        ctx.strokeStyle = '#745a00';
+        ctx.strokeStyle = this.navigationColors?.match ?? '#745a00';
         ctx.beginPath();
         let low = 0, high = matches.length;
         while (low < high) {
@@ -1216,7 +1234,7 @@ class Plotter {
         };
         drawSingle(timeOrder, '#5c90be');
         if (currentMatch >= 0 && currentMatch < matches.length)
-            drawSingle(matches[currentMatch].startOrder, '#ff8c00');
+            drawSingle(matches[currentMatch].startOrder, this.navigationColors?.current ?? '#ff8c00');
         ctx.restore();
     }
 

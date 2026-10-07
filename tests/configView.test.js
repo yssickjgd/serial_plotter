@@ -53,6 +53,10 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     assert.equal(saved.plotFreqYScale, 'log');
     assert.equal(saved.plotFftWindow, 'flatTop');
     assert.equal(saved.plotWindowPoints, '1000');
+    assert.ok(saved.monitorDisplay, 'every saved configuration includes monitor display defaults');
+    assert.equal(saved.monitorDisplay.hexBytesPerLine, 'auto');
+    assert.equal(saved.monitorDisplay.timestamp, 'clock');
+    assert.equal(saved.monitorDisplay.showRx, true);
     assert.deepEqual(saved.channels[0], { name: 'CH1', color: '#123456', visible: true,
         gainEnabled: true, gain: -2, offsetEnabled: true, offset: 3 });
     applyConfigToView({ channels: [{ name: 'legacy', color: '#123456', visible: true }] }, {
@@ -72,4 +76,25 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     });
     assert.equal(elements.sendIntervalUnit.value, 's');
     assert.equal(elements.sendInterval.value, '1.5');
+    elements.monitorDisplay = {
+        hexBytesPerLine: { value: '32' }, hexGroupBytes: { value: '4' },
+        showRx: { checked: false }, keyword: { value: 'alarm\nERROR' }
+    };
+    const displayConfig = collectConfigFromView(elements, bounds, []);
+    assert.equal(displayConfig.monitorDisplay.hexBytesPerLine, 32);
+    assert.equal(displayConfig.monitorDisplay.hexGroupBytes, 4);
+    assert.equal(displayConfig.monitorDisplay.showRx, false);
+    assert.equal(displayConfig.monitorDisplay.keyword, 'alarm\nERROR');
+    assert.equal(displayConfig.monitorDisplay.textTab, 'escape');
+    const apply = config => applyConfigToView(config, {
+        elements, bounds, updateConnectionModeUI() {}, updateFrameFormat() {},
+        updateChannels() {}, updatePlot() {}
+    });
+    apply({ monitorDisplay: { hexBytesPerLine: 8, showRx: false, keyword: 'warning' } });
+    assert.equal(elements.monitorDisplay.hexBytesPerLine.value, '8');
+    assert.equal(elements.monitorDisplay.keyword.value, 'warning');
+    apply({});
+    assert.equal(elements.monitorDisplay.hexBytesPerLine.value, 'auto');
+    assert.equal(elements.monitorDisplay.showRx.checked, true);
+    assert.equal(elements.monitorDisplay.keyword.value, '');
 });
