@@ -113,7 +113,10 @@
                                 <option value="custom" disabled>自定义帧（暂未开放）</option>
                             </select>
                         </div>
-                        <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />重建历史数据</label>
+                    </div>
+                    <div class="control-group" id="frame-history-settings">
+                        <div class="section-title">重建历史数据</div>
+                        <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
                         <span class="hint-text">未勾选时，格式变更会清理 RX/TX 缓冲区。</span>
                     </div>
                     <div class="control-group" id="frame-raw-settings" hidden>
