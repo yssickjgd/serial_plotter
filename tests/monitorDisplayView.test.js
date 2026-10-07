@@ -108,7 +108,8 @@ test('literal keyword edits apply full options and invalid drafts display an err
     assert.equal(applied.length, 1);
     assert.equal(applied[0].keyword, '[alarm]\nerror.*');
     assert.equal(applied[0].showDirection, true);
-    assert.equal(applied[0].refreshRate, 10);
+    assert.ok(!Object.hasOwn(view.elements, 'refreshRate'));
+    assert.ok(!Object.hasOwn(applied[0], 'refreshRate'));
     keyword.value = 'x'.repeat(257); keyword.listeners.input();
     assert.equal(applied.length, 1);
     assert.equal(getElement('monitor-display-status').hidden, false);

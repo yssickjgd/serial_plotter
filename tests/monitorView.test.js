@@ -304,7 +304,7 @@ test('long raw frames fold, expand on demand and retain all bytes for positionin
     } finally { global.document = oldDocument; }
 });
 
-test('timestamps and refresh settings stay applied when switching to numerical mode', () => {
+test('timestamps stay applied across display modes and timer fallback has no refresh-rate delay', () => {
     const oldDocument = global.document, oldTimeout = global.setTimeout, oldClearTimeout = global.clearTimeout;
     global.document = monitorDocument();
     const delays = [];
@@ -318,7 +318,7 @@ test('timestamps and refresh settings stay applied when switching to numerical m
         view.setDisplayOptions({ timestamp: 'relative', showDirection: false, refreshRate: 20 });
         assert.equal(view.spacer.children[1].children[0].textContent, '[0.250 s] ');
         view.schedule();
-        assert.equal(delays.at(-1), 50);
+        assert.equal(delays.at(-1), 0);
         view.setDisplayOptions({ timestamp: 'none', keywordFormat: 'hex', keyword: '42', keywordColor: '#abcdef' });
         assert.equal(view.spacer.children[1].children[0].textContent, '');
         assert.ok(view.spacer.children[1].children[1].children.some(span =>
@@ -326,6 +326,51 @@ test('timestamps and refresh settings stay applied when switching to numerical m
         view.setMode('number');
         assert.equal(view.spacer.children[1].children[0].textContent, '');
     } finally { global.document = oldDocument; global.setTimeout = oldTimeout; global.clearTimeout = oldClearTimeout; }
+});
+
+test('live byte updates coalesce into the next animation frame and can refresh above 30 FPS', () => {
+    const oldDocument = global.document;
+    const oldAnimationFrame = global.requestAnimationFrame;
+    const oldCancelAnimationFrame = global.cancelAnimationFrame;
+    global.document = monitorDocument();
+    const callbacks = new Map();
+    let nextId = 0;
+    global.requestAnimationFrame = callback => { const id = nextId++; callbacks.set(id, callback); return id; };
+    global.cancelAnimationFrame = id => callbacks.delete(id);
+    try {
+        const frames = new FrameBuffer(1, 500);
+        const view = monitorFixture(frames);
+        let renders = 0;
+        const render = view.render.bind(view);
+        view.render = () => { renders++; render(); };
+        for (let tick = 0; tick < 120; tick++) {
+            for (let batch = 0; batch < 3; batch++) {
+                frames.append([tick], Uint8Array.of(tick), 't', tick * 3 + batch);
+                view.appendFrame();
+            }
+            assert.equal(callbacks.size, 1, 'all arrivals before a paint share one callback');
+            const [id, callback] = callbacks.entries().next().value;
+            callbacks.delete(id);
+            callback(tick * 1000 / 120);
+            assert.equal(callbacks.size, 0, 'no new data means no further refresh is queued');
+            assert.equal(view.lastRows.at(-1).order, tick * 3 + 2);
+        }
+        assert.equal(renders, 120);
+        assert.equal(frames.length, 360, 'display batching retains every received frame');
+        view.appendFrame();
+        view.render();
+        assert.equal(callbacks.size, 0, 'explicit renders cancel redundant queued updates');
+        view.appendFrame();
+        view.setDisplayOptions({ showDirection: false });
+        assert.equal(callbacks.size, 0, 'settings update cancels the queued animation frame');
+        view.appendFrame();
+        assert.equal(callbacks.size, 1, 'settings updates do not suspend subsequent reception');
+        view._cancelScheduledRender();
+    } finally {
+        global.document = oldDocument;
+        global.requestAnimationFrame = oldAnimationFrame;
+        global.cancelAnimationFrame = oldCancelAnimationFrame;
+    }
 });
 
 test('long prepared text keeps configured breaks and escaping after worker preparation and resize', async () => {

@@ -35,6 +35,11 @@ test('right sidebar separates byte, waveform, and export settings with no wavefo
     assert.ok(!html.includes('id="tab-channel-config"'));
 });
 
+test('byte display settings have no configurable refresh rate', () => {
+    assert.doesNotMatch(html, /monitor-refresh-rate/);
+    assert.doesNotMatch(panel('monitor-display-panel'), /刷新率/);
+});
+
 test('sidebar includes keyword type, record colors and a checked text-search case control', () => {
     assert.match(html, /<select id="monitor-keyword-format">[\s\S]*?<option value="text"[^>]*>文本/);
     assert.match(html, /id="monitor-keyword-case-wrap"/);

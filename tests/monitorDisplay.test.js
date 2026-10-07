@@ -22,7 +22,7 @@ test('display options fill missing defaults without sharing mutable input state'
         keyword: 'ACK\n[warn]', keywordFormat: 'text', keywordColor: '#ABC123', keywordCaseSensitive: false,
         rxColor: '#50b4ff', txColor: '#63ff9a', rxErrorColor: '#ffcc02', txErrorColor: '#ff5a5a',
         searchCurrentColor: '#ff8c00', searchMatchColor: '#745a00',
-        foldLong: false, foldLines: 8, refreshRate: 20, numericSignificantDigits: 6
+        foldLong: false, foldLines: 8, numericSignificantDigits: 6
     });
     assert.equal(input.hexBytesPerLine, '16');
     options.showRx = false;
@@ -38,7 +38,7 @@ test('display options reject invalid known values instead of silently resetting 
         { textTab: 4 }, { timestamp: 'date' }, { showDirection: 1 }, { showRx: null },
         { showTx: 'false' }, { showErrors: undefined }, { keywordCaseSensitive: 0 },
         { foldLong: 1 }, { foldLines: 0 }, { foldLines: 65 }, { foldLines: 1.5 },
-        { refreshRate: '15' }, { keywordColor: 'red' }, { keyword: 5 },
+        { keywordColor: 'red' }, { keyword: 5 },
         { numericSignificantDigits: 0 }, { numericSignificantDigits: 18 },
         { numericSignificantDigits: 6.5 }, { numericSignificantDigits: '6' }
     ];
@@ -49,6 +49,16 @@ test('display options reject invalid known values instead of silently resetting 
     assert.equal(normalizeDisplayOptions({ foldLines: 64 }).foldLines, 64);
     assert.equal(normalizeDisplayOptions({ numericSignificantDigits: 1 }).numericSignificantDigits, 1);
     assert.equal(normalizeDisplayOptions({ numericSignificantDigits: 17 }).numericSignificantDigits, 17);
+});
+
+test('legacy refresh rates are ignored and never become active display settings', () => {
+    const { normalizeDisplayOptions, DEFAULTS } = displayModule();
+    assert.ok(!Object.hasOwn(DEFAULTS, 'refreshRate'));
+    for (const refreshRate of [1, '20', 60, 'obsolete']) {
+        const options = normalizeDisplayOptions({ refreshRate, showTx: false });
+        assert.ok(!Object.hasOwn(options, 'refreshRate'));
+        assert.equal(options.showTx, false);
+    }
 });
 
 test('keyword configuration enforces total, per-line and nonempty-line bounds', () => {

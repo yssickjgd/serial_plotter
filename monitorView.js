@@ -276,6 +276,7 @@ class MonitorView {
         this.rowHeight = 20;
         this.charWidth = 8;
         this.pending = null;
+        this.pendingAnimationFrame = false;
         this.followTail = true;
         this._renderedScrollTop = container.scrollTop;
         this.anchor = null;
@@ -415,7 +416,7 @@ class MonitorView {
             this.textPreparation = null;
         }
         this.displayOptions = next;
-        if (this.pending !== null) { clearTimeout(this.pending); this.pending = null; }
+        this._cancelScheduledRender();
         if (!deferRender) this.render();
     }
 
@@ -947,13 +948,24 @@ class MonitorView {
         if (!deferRender) this.render();
     }
 
+    _cancelScheduledRender() {
+        if (this.pending === null) return;
+        if (this.pendingAnimationFrame) cancelAnimationFrame(this.pending);
+        else clearTimeout(this.pending);
+        this.pending = null;
+    }
+
+    /** Coalesce receive bursts into the next browser paint, without a fixed refresh cap. */
     schedule() {
         if (this.pending !== null) return;
-        this.pending = setTimeout(() => { this.pending = null; this.render(); },
-            1000 / this._displayOptions().refreshRate);
+        const update = () => { this.pending = null; this.render(); };
+        this.pendingAnimationFrame = typeof requestAnimationFrame === 'function' &&
+            typeof cancelAnimationFrame === 'function';
+        this.pending = this.pendingAnimationFrame ? requestAnimationFrame(update) : setTimeout(update, 0);
     }
 
     render() {
+        this._cancelScheduledRender();
         if (this.followTail) this.centerPadding = 0;
         if (this._usesLargeLayout()) {
             this._renderLarge();

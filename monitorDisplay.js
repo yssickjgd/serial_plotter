@@ -8,13 +8,13 @@
         keyword: '', keywordFormat: 'text', keywordColor: '#bc8fff', keywordCaseSensitive: false,
         rxColor: '#50b4ff', txColor: '#63ff9a', rxErrorColor: '#ffcc02', txErrorColor: '#ff5a5a',
         searchCurrentColor: '#ff8c00', searchMatchColor: '#745a00',
-        foldLong: false, foldLines: 8, refreshRate: 10, numericSignificantDigits: 6
+        foldLong: false, foldLines: 8, numericSignificantDigits: 6
     });
     const ENUMS = {
         hexBytesPerLine: ['auto', 8, 16, 32], hexGroupBytes: [1, 2, 4, 8],
         hexOffset: ['none', 'frame', 'stream'], textInvalid: ['replacement', 'escape'],
         textNewline: ['escape', 'line-break'], textTab: ['escape', 'spaces-4', 'spaces-8'],
-        timestamp: ['clock', 'absolute', 'relative', 'none'], refreshRate: [1, 5, 10, 20, 30],
+        timestamp: ['clock', 'absolute', 'relative', 'none'],
         keywordFormat: ['hex', 'text']
     };
     const COLORS = new Set(['keywordColor', 'rxColor', 'txColor', 'rxErrorColor', 'txErrorColor',

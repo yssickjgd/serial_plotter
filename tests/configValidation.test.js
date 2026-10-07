@@ -102,7 +102,7 @@ test('validates nested monitor display settings without modifying imported confi
     assert.equal(JSON.stringify(config), before);
     for (const monitorDisplay of [null, [], 'bad', { hexBytesPerLine: 12 },
         { showRx: 'false' }, { textInvalid: 'ignore' }, { textTab: 'spaces-3' },
-        { foldLines: 0 }, { foldLines: 65 }, { refreshRate: 60 },
+        { foldLines: 0 }, { foldLines: 65 },
         { keyword: 'a'.repeat(257) }, { keyword: new Array(33).fill('alarm').join('\n') },
         { keywordColor: 'red' }]) {
         assert.throws(() => validateConfig({ monitorDisplay }));

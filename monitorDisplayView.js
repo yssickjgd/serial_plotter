@@ -13,7 +13,7 @@ const MONITOR_DISPLAY_IDS = {
     rxColor: 'monitor-rx-color', txColor: 'monitor-tx-color',
     rxErrorColor: 'monitor-rx-error-color', txErrorColor: 'monitor-tx-error-color',
     searchCurrentColor: 'monitor-search-current-color', searchMatchColor: 'monitor-search-match-color',
-    foldLong: 'monitor-fold-long', foldLines: 'monitor-fold-lines', refreshRate: 'monitor-refresh-rate',
+    foldLong: 'monitor-fold-long', foldLines: 'monitor-fold-lines',
     numericSignificantDigits: 'monitor-numeric-significant-digits'
 };
 

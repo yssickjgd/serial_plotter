@@ -296,6 +296,19 @@ test('page bootstrap restores saved config without overwriting it', () => {
     assert.equal(getStored(), original);
 });
 
+test('old monitor refresh limits do not survive restore or subsequent configuration saves', () => {
+    const { getElement, getStored, monitor } = bootWithConfig(JSON.stringify({
+        monitorDisplay: { refreshRate: 1, showDirection: false }
+    }));
+    assert.equal(monitor.displayOptions.showDirection, false);
+    assert.ok(!Object.hasOwn(monitor.displayOptions, 'refreshRate'));
+    getElement('monitor-show-direction').checked = true;
+    getElement('monitor-show-direction').listeners.change();
+    const saved = JSON.parse(getStored());
+    assert.equal(saved.monitorDisplay.showDirection, true);
+    assert.ok(!Object.hasOwn(saved.monitorDisplay, 'refreshRate'));
+});
+
 test('invalid partial config leaves the initial frame controls intact', () => {
     const { getElement } = bootWithConfig(JSON.stringify({ headerHex: 'GG' }));
     assert.equal(getElement('frame-header').value, 'AB');
