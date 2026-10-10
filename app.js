@@ -83,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
         onZoomChange: zoom => {
             el('workspace-zoom-percent').value = String(Math.round(zoom * 100));
             for (const widget of widgets?.widgets.values() ?? [])
-                if (widget.type === 'wave') widget.view.resize();
+                if (widget.type === 'wave' || widget.type === 'pose') widget.view.resize();
         },
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
         onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
@@ -464,14 +464,14 @@ document.addEventListener('DOMContentLoaded', () => {
             rates.set(source, { count, epoch: service.epoch, generation: source.generation });
         }
         for (const widget of widgets.widgets.values()) {
-            if (widget.type === 'wave') {
-                const count = widget.view.displayMode !== 'time' ? widget.view.completedSpectrumDraws : widget.view.completedDraws;
-                const previous = draws.get(widget.id), mode = widget.view.displayMode;
+            if (widget.type === 'wave' || widget.type === 'pose') {
+                const count = widget.type === 'wave' && widget.view.displayMode !== 'time' ? widget.view.completedSpectrumDraws : widget.view.completedDraws;
+                const previous = draws.get(widget.id), mode = widget.type === 'pose' ? 'pose' : widget.view.displayMode;
                 const fps = previous?.mode === mode ? Math.max(0, count - previous.count) / elapsed : 0;
                 draws.set(widget.id, { count, mode });
                 widget.refs['stat-plot-fps'].textContent = '绘图帧率: ' + Math.round(fps) + ' FPS';
                 const rate = widget.source.sampleRate?.rate;
-                if (!service.paused && rate > 0 && !widget.view.frames.responseMode) widget.view.setSampleRateHz(rate);
+                if (widget.type === 'wave' && !service.paused && rate > 0 && !widget.view.frames.responseMode) widget.view.setSampleRateHz(rate);
             } else {
                 widget.refs['stat-rx-value'].textContent = bytesLabel(rxRate) + '/s (' + bytesLabel(service.stats.rxBytes) + ')';
                 widget.refs['stat-tx-value'].textContent = bytesLabel(txRate) + '/s (' + bytesLabel(service.stats.txBytes) + ')';

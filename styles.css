@@ -716,6 +716,18 @@ input.channel-name-input {
 .workspace-panel .plot-y-scrollbar-wrap { right: 7px; }
 .workspace-panel .plot-scrollbar-wrap { flex-shrink: 0; }
 
+.pose-panel { display: flex; flex-direction: column; overflow: hidden; }
+.pose-header { flex: 0 0 auto; background: #1a1a1a; color: #eee; border-bottom: 1px solid #333; }
+.pose-header [data-role="stat-plot-fps"] { margin-left: auto; font-size: .7rem; }
+.pose-panel canvas { display: block; width: 100%; flex: 1 1 0; min-height: 0; min-width: 0; touch-action: none; }
+.pose-status { flex: 0 0 auto; padding: 4px 6px; color: #a8c7dc; font-size: .65rem; overflow-wrap: anywhere; border-top: 1px solid #333; }
+.pose-status[data-valid="false"] { color: #ffd078; }
+.pose-matrix-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.pose-component-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 4px; }
+.pose-input-group { min-width: 0; }
+.pose-input-group input[type="checkbox"] { width: 14px; height: 14px; }
+.pose-error { color: #c33232; font-size: .7rem; overflow-wrap: anywhere; margin: 4px 0; }
+
 /* ── 波形绘图区 ── */
 .canvas-wrapper {
     --monitor-title-bg: #1a1a1a;

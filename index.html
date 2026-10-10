@@ -118,6 +118,7 @@
                     <div class="control-group"><div class="section-title">控件库</div>
                         <div class="widget-library-item" data-widget-type="wave" draggable="false"><span>波形</span><small>时域、频域与多通道分析</small><button type="button" data-add-widget="wave">添加</button></div>
                         <div class="widget-library-item" data-widget-type="byte" draggable="false"><span>字节流</span><small>Hex、文本与数值记录</small><button type="button" data-add-widget="byte">添加</button></div>
+                        <div class="widget-library-item" data-widget-type="pose" draggable="false"><span>位姿</span><small>Euler 角、四元数与旋转矩阵</small><button type="button" data-add-widget="pose">添加</button></div>
                         <span class="hint-text">拖动条目到工作区。标题可移动控件，边缘可调整大小。</span>
                     </div>
                 </div>
@@ -364,9 +365,22 @@
                     <button class="tab-btn active" id="tab-monitor-config-button" data-tab="tab-monitor-config">显示方式</button>
                     <button class="tab-btn" id="tab-waveform-channels-button" data-tab="tab-waveform-channels">通道配置</button>
                     <button class="tab-btn" id="tab-monitor-channels-button" data-tab="tab-monitor-channels">通道配置</button>
+                    <button class="tab-btn" data-tab="tab-pose-frame">帧解析</button>
+                    <button class="tab-btn" data-tab="tab-pose-display">显示方式</button>
+                    <button class="tab-btn" data-tab="tab-pose-channels">通道配置</button>
                 </div>
                 <span id="format-apply-status" class="hint-text format-status sidebar-status" role="status" aria-live="polite" hidden></span>
                 <span id="monitor-display-status" class="hint-text monitor-display-status sidebar-status" role="status" aria-live="polite" hidden></span>
+                <div class="tab-content" id="tab-pose-frame" hidden>
+                    <div class="control-group">
+                        <div class="section-title">重建历史数据</div>
+                        <label class="chk-label"><input type="checkbox" id="rebuild-history-pose" checked />格式变更时重建</label>
+                        <p class="hint-text">数值帧规则影响所有波形、位姿及数值字节流控件。</p>
+                    </div>
+                    <div id="pose-numeric-settings"></div>
+                </div>
+                <div class="tab-content" id="tab-pose-display" hidden></div>
+                <div class="tab-content" id="tab-pose-channels" hidden></div>
                 <div class="tab-content" id="tab-waveform-frame">
                     <div class="control-group" id="frame-history-settings">
                         <div class="section-title">重建历史数据</div>
@@ -848,6 +862,19 @@
 
 
                         </div></template>
+    <template id="pose-widget-template"><div class="pose-panel box-border workspace-panel" data-role="pose-panel">
+        <div class="monitor-title-row pose-header" data-role="pose-header" title="拖动标题移动；双击聚焦或返回">
+            <span class="monitor-title">位姿</span><span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
+        </div>
+        <canvas data-role="pose-canvas" aria-label="三维位姿：odom 与 body 坐标轴和机体立方体"></canvas>
+        <div class="pose-status" data-role="pose-status" role="status">无保留数据</div>
+    </div></template>
+    <script src="poseMath.js"></script>
+    <script src="poseConfig.js"></script>
+    <script src="poseData.js"></script>
+    <script src="poseRenderer.js"></script>
+    <script src="poseView.js"></script>
+    <script src="poseConfigView.js"></script>
     <script src="channelOperations.js"></script>
     <script src="exportParsing.js"></script>
     <script src="systemResponse.js"></script>

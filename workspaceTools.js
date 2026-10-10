@@ -3,10 +3,11 @@
     'use strict';
     const dependencies = typeof module !== 'undefined' && module.exports
         ? { MonitorSearch: require('./monitorSearch'), FrameNavigation: require('./frameNavigation'),
-            ...require('./channelTransform'), MonitorDisplay: require('./monitorDisplay') } : root.SerialPlotter;
-    const { MonitorSearch, FrameNavigation, transformChannelValue, MonitorDisplay } = dependencies;
+            ...require('./channelTransform'), MonitorDisplay: require('./monitorDisplay'), PoseConfig: require('./poseConfig').PoseConfig } : root.SerialPlotter;
+    const { MonitorSearch, FrameNavigation, transformChannelValue, MonitorDisplay, PoseConfig } = dependencies;
     const framesOf = widget => widget?.source?.frames ?? widget?.source;
     const isWave = widget => widget?.type === 'wave' || widget?.type === 'waveform';
+    const hasMarkers = widget => isWave(widget) || widget?.type === 'pose';
     const endAt = (frames, index) => frames.rawEndByteAt?.(index) ?? frames.rawByteOffsetAt(index) + frames.rawBytesAt(index).length;
     const indexAt = (frames, offset) => {
         if (!frames?.length || !Number.isFinite(offset)) return -1;
@@ -129,7 +130,12 @@
             this.lastPaused = enabled;
         }
 
-        _kind() { const widget = this._source(); return isWave(widget) ? 'number' : widget?.settings?.captureMode ?? 'hex'; }
+        _kind() { const widget = this._source(); return hasMarkers(widget) ? 'number' : widget?.settings?.captureMode ?? 'hex'; }
+        _poseChannels() {
+            const widget = this._source(), frames = framesOf(widget);
+            return widget?.type === 'pose' ? PoseConfig.boundChannels(widget.settings)
+                .filter(index => index < frames.channelCount && (!frames.isSignal || frames.isSignal(index))) : null;
+        }
         _syncSearchFields() {
             const kind = this._kind(), numeric = kind === 'number';
             for (const id of ['monitor-search-tolerance', 'monitor-search-channel']) if (this._el(id)) this._el(id).hidden = !numeric;
@@ -150,18 +156,20 @@
             if (!container) return;
             container.replaceChildren();
             const count = framesOf(this._source())?.channelCount ?? 0;
+            const allowed = this._poseChannels();
             if (this.selectedChannels) {
-                this.selectedChannels = new Set([...this.selectedChannels].filter(channel => channel < count));
+                this.selectedChannels = new Set([...this.selectedChannels].filter(channel => channel < count && (!allowed || allowed.includes(channel))));
                 if (!this.selectedChannels.size) this.selectedChannels = null;
             }
             const names = this.getChannelNames();
             for (let channel = -1; channel < count; channel++) {
+                if (channel >= 0 && allowed && !allowed.includes(channel)) continue;
                 if (channel >= 0 && framesOf(this._source())?.isSignal && !framesOf(this._source()).isSignal(channel)) continue;
                 const label = this.document.createElement('label'), input = this.document.createElement('input');
                 const text = this.document.createElement('span');
                 const number = `CH${String(channel + 1).padStart(2, '0')}`;
                 const name = names[channel] ?? this._source()?.view?.channels?.[channel]?.name;
-                text.textContent = channel < 0 ? '全部通道' : name && name !== number ? `${number} · ${name}` : number;
+                text.textContent = channel < 0 ? allowed ? '全部绑定通道' : '全部通道' : name && name !== number ? `${number} · ${name}` : number;
                 text.className = 'search-channel-name'; input.type = 'checkbox'; input.value = String(channel);
                 label.append(input, text); label.title = text.textContent; container.appendChild(label);
                 this.channelInputs.push({ channel, input, text });
@@ -185,7 +193,7 @@
                 if (channel >= 0 && input.checked) names.push(text.textContent);
             }
             const toggle = this._el('monitor-search-channel-toggle');
-            if (toggle) { toggle.textContent = !names.length ? '全部通道' : names.length > 2 ? `已选 ${names.length} 通道` : names.join('、'); toggle.title = names.join('、'); }
+            if (toggle) { toggle.textContent = !names.length ? this._source()?.type === 'pose' ? '全部绑定通道' : '全部通道' : names.length > 2 ? `已选 ${names.length} 通道` : names.join('、'); toggle.title = names.join('、'); }
         }
 
         invalidate() {
@@ -226,7 +234,7 @@
                     if (index === this.currentMatch) current = mapped.length;
                     mapped.push(local);
                 }
-                if (isWave(widget)) {
+                if (hasMarkers(widget)) {
                     widget.view.setNavigationColors?.(colors);
                     widget.view.setNavigationMarkers?.({ timeOrder: widget.view.navigationMarkers?.timeOrder ?? null,
                         matches: mapped, currentMatch: current });
@@ -246,9 +254,9 @@
                 const moved = widget.view.jumpToByteOffset ? widget.view.jumpToByteOffset(offset)
                     : widget.view.jumpToFrame?.(index);
                 if (moved === false) { skipped.push(widget.title); continue; }
-                if (timeMarker && isWave(widget)) widget.view.setNavigationMarkers?.({
+                if (timeMarker && hasMarkers(widget)) widget.view.setNavigationMarkers?.({
                     ...widget.view.navigationMarkers, timeOrder: frames.orderAt(index) });
-                if (!isWave(widget)) widget.view.cursorOrder = frames.orderAt(index);
+                if (!hasMarkers(widget)) widget.view.cursorOrder = frames.orderAt(index);
             }
             return skipped;
         }
@@ -287,7 +295,8 @@
                 const byteOffset = reference.view.getReferenceByteOffset?.();
                 if (!Number.isFinite(byteOffset)) { this._searchStatus('参考控件没有可用的时间位置'); return Promise.resolve(false); }
                 const query = this._el('monitor-search-query').value, tolerance = this._el('monitor-search-tolerance').value;
-                const channels = this.selectedChannels ? [...this.selectedChannels].sort((a, b) => a - b) : -1;
+                const channels = this.selectedChannels ? [...this.selectedChannels].sort((a, b) => a - b) : this._poseChannels() ?? -1;
+                if (Array.isArray(channels) && !channels.length) throw new Error('请先绑定姿态来源通道');
                 const kind = this._kind(), encoding = widget.settings.textEncoding ?? 'utf-8';
                 const caseSensitive = this._el('monitor-search-case-sensitive').checked;
                 const options = MonitorSearch.parseMonitorSearch(kind, query, tolerance, channels, encoding, caseSensitive);

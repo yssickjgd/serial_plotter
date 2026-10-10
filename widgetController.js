@@ -18,6 +18,7 @@ class WidgetController {
         this.cleanups = [];
         this.register('wave', { template: 'wave-widget-template', title: '波形' });
         this.register('byte', { template: 'byte-widget-template', title: '字节流' });
+        this.register('pose', { template: 'pose-widget-template', title: '位姿' });
         this.fieldIds = {
             plotViewMode: 'plot-view-mode', plotTimeXUnit: 'plot-time-x-unit',
             plotFreqXScale: 'plot-freq-x-scale', plotFreqYScale: 'plot-freq-y-scale',
@@ -41,6 +42,7 @@ class WidgetController {
             if (this.active?.type === 'byte') this.channelView.render(list, this.active);
         };
         this._bindInspector();
+        this.poseConfigView = new SerialPlotter.PoseConfigView(document, this);
         this.activate(null);
     }
 
@@ -76,13 +78,13 @@ class WidgetController {
             .map(node => [node.dataset.role, node]));
         refs[element.dataset.role] = element;
         for (const [role, node] of Object.entries(refs)) node.id = `${id}-${role}`;
-        const handle = refs[type === 'wave' ? 'waveform-drag-handle' : 'monitor-header'];
+        const handle = refs[type === 'wave' ? 'waveform-drag-handle' : type === 'pose' ? 'pose-header' : 'monitor-header'];
         handle.querySelector('span').textContent = title;
         const remove = this.document.createElement('button');
         remove.className = 'widget-close'; remove.type = 'button'; remove.textContent = '×';
         remove.setAttribute('aria-label', `删除${title}`);
         handle.append(remove);
-        const source = this.service.acquireSource(type === 'wave' ? { captureMode: 'number' } : settings);
+        const source = this.service.acquireSource(type !== 'byte' ? { captureMode: 'number' } : settings);
         const widget = { id, type, title, settings, element, refs, source, lastTab: null, disposed: false };
         if (type === 'wave') widget.pendingViewport = settings[settings.plotContent === 'response' ? 'responseViewport' : 'viewport'];
         this.widgets.set(id, widget);
@@ -108,7 +110,17 @@ class WidgetController {
                 this._cancelViewportRestore(widget);
                 this.onChange();
             };
-        } else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
+        } else if (type === 'pose') widget.view = new SerialPlotter.PoseView(refs['pose-canvas'], source.frames, {
+            settings, statusElement: refs['pose-status'], getRebuilding: () => widget.source.rebuilding || widget.source.frames.rebuilding,
+            getGeneration: () => `${this.service.epoch}:${widget.source.generation}`,
+            onCameraChange: camera => {
+                if (widget.disposed) return;
+                widget.settings.camera = camera;
+                if (this.activeId === id) this.poseConfigView.render(widget);
+                this.onChange();
+            }
+        });
+        else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: this.service.txFrames, getSourceErrors: () => widget.source.errors
         });
         if (type === 'byte') {
@@ -202,6 +214,8 @@ class WidgetController {
             widget.appliedContent = settings.plotContent;
             if (view.isPaused !== this.service.paused) view.togglePause();
             view.resize();
+        } else if (widget.type === 'pose') {
+            view.setFrames(widget.source.frames); view.setSettings(settings); view.setPaused(this.service.paused); view.resize();
         } else {
             view.setMode(settings.captureMode);
             view.setEncoding(settings.textEncoding);
@@ -232,13 +246,14 @@ class WidgetController {
         }
         this.syncGlobals();
         if (widget.type === 'wave') this._bindYBounds(widget);
-        else { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.settings.captureMode); }
+        else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.settings.captureMode); }
+        else this.poseConfigView.render(widget);
         this.displayView.setChannels(this.channelMeta());
         this._renderChannels(widget);
         this._syncSections(widget);
         this.binding = false;
         this.onActivate(widget);
-        this.selectTab(widget.lastTab ?? (widget.type === 'wave' ? 'tab-waveform-config' : 'tab-monitor-config'));
+        this.selectTab(widget.lastTab ?? (widget.type === 'wave' ? 'tab-waveform-config' : widget.type === 'pose' ? 'tab-pose-display' : 'tab-monitor-config'));
     }
 
     channelMeta() {
@@ -257,6 +272,7 @@ class WidgetController {
     }
 
     channelVisible(widget, index) {
+        if (widget.type === 'pose') return false;
         if (!(widget.type === 'wave' ? widget.view.frames : this.service.numericSource.frames).isSignal(index)) return false;
         return widget.type === 'wave' ? widget.view.getChannelMeta()[index]?.visible === true
             : !widget.settings.monitorDisplay.numericHiddenChannels.includes(index);
@@ -264,6 +280,7 @@ class WidgetController {
 
     setChannelVisible(index, visible) {
         const widget = this.active;
+        if (widget?.type === 'pose') return;
         if (!widget || !(widget.type === 'wave' ? widget.view.frames : this.service.numericSource.frames).isSignal(index)) return;
         if (widget.type === 'wave') {
             widget.view.setChannelVisible(index, visible); widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
@@ -284,7 +301,7 @@ class WidgetController {
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave') {
                 widget.view.setChannelColor(index, color); widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
-            } else {
+            } else if (widget.type === 'byte') {
                 widget.view.channelColors = Array.from({ length: this.service.numericSource.frames.channelCount }, (_, i) => this.channelColor(i));
                 widget.view.invalidateData();
             }
@@ -365,6 +382,7 @@ class WidgetController {
             if (widget.type === 'wave') for (const key of ['channels', 'responseChannels'])
                 widget.settings[key] = reorder(widget.settings[key]).map((channel, index) => ({ ...channel,
                     name: this.globals.channelNames[index], color: this.globals.channelColors[index] }));
+            else if (widget.type === 'pose') widget.settings = SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap);
             else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
             for (const profile of Object.values(widget.settings.exportSettings?.formats ?? {}))
                 if (profile.channelIndices !== null) profile.channelIndices = indices(profile.channelIndices);
@@ -379,8 +397,16 @@ class WidgetController {
     }
 
     _channelsChanged() {
+        // History replay may still expose the previous frame shape. Bind against the new rules.
+        const originalCount = Number(this.globals.channelsCount);
+        const engine = new SerialPlotter.ChannelOperations(originalCount, this.globals.channelDefinitions);
+        const isScalar = index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula';
         for (const widget of this.widgets.values()) {
-            if (widget.type === 'wave') this.applySettings(widget);
+            if (widget.type === 'pose') {
+                for (const group of [widget.settings.bindings, widget.settings.overlay.bindings]) for (const key of Object.keys(group))
+                    group[key] = group[key].map(index => index !== null && !isScalar(index) ? null : index);
+                this.applySettings(widget);
+            } else if (widget.type === 'wave') this.applySettings(widget);
             else {
                 widget.view.channelColors = Array.from({ length: this.service.numericSource.frames.channelCount }, (_, index) => this.channelColor(index));
                 widget.view.setDisplayOptions(widget.settings.monitorDisplay);
@@ -399,6 +425,7 @@ class WidgetController {
             widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
         }
         this.displayView.setChannels(this.channelMeta());
+        if (this.active?.type === 'pose') this.poseConfigView.render(this.active);
         this.onChange();
     }
 
@@ -410,7 +437,7 @@ class WidgetController {
             const input = this.element(id);
             if (input.type === 'checkbox') input.checked = this.globals[key]; else input.value = this.globals[key];
         }
-        for (const id of ['rebuild-history', 'rebuild-history-byte', 'channel-rebuild-wave', 'channel-rebuild-byte'])
+        for (const id of ['rebuild-history', 'rebuild-history-byte', 'rebuild-history-pose', 'channel-rebuild-wave', 'channel-rebuild-byte'])
             this.element(id).checked = this.globals.rebuildHistory;
         this.element('header-config').hidden = !this.globals.enableHeader;
         this.element('footer-config').hidden = !this.globals.enableFooter;
@@ -438,9 +465,9 @@ class WidgetController {
         const widget = this.active;
         if (!widget) return;
         const wave = widget.type === 'wave';
-        const valid = new Set(wave ? ['tab-waveform-frame', 'tab-waveform-config', 'tab-waveform-channels']
+        const valid = new Set(widget.type === 'pose' ? ['tab-pose-frame', 'tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-frame', 'tab-waveform-config', 'tab-waveform-channels']
             : ['tab-byte-frame', 'tab-monitor-config', ...(widget.settings.captureMode === 'number' ? ['tab-monitor-channels'] : [])]);
-        if (!valid.has(tab)) tab = wave ? 'tab-waveform-config' : 'tab-monitor-config';
+        if (!valid.has(tab)) tab = widget.type === 'pose' ? 'tab-pose-display' : wave ? 'tab-waveform-config' : 'tab-monitor-config';
         widget.lastTab = tab;
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn')) {
             const selected = button.dataset.tab === tab;
@@ -462,9 +489,10 @@ class WidgetController {
         const s = widget.settings;
         const byteNumeric = widget.type === 'byte' && s.captureMode === 'number';
         const shared = this.element('shared-numeric-settings');
-        const host = this.element(byteNumeric ? 'byte-numeric-settings' : 'tab-waveform-frame');
+        const host = this.element(widget.type === 'pose' ? 'pose-numeric-settings' : byteNumeric ? 'byte-numeric-settings' : 'tab-waveform-frame');
         if (shared.parentElement !== host) host.append(shared);
         this.element('byte-numeric-settings').hidden = !byteNumeric;
+        if (widget.type === 'pose') return;
         this.element('plot-response-status').textContent = widget.responseStatus ?? '';
         this.element('plot-response-status').hidden = !widget.responseStatus;
         const response = s.plotContent === 'response', phase = s.plotViewMode === 'phase', db = this._magnitudeUnit(s) === 'db';
@@ -497,7 +525,7 @@ class WidgetController {
         if (!title) { field.value = widget.title; return; }
         if (title === widget.title) return;
         widget.title = title;
-        widget.refs[widget.type === 'wave' ? 'waveform-drag-handle' : 'monitor-header'].querySelector('span').textContent = title;
+        widget.refs[widget.type === 'wave' ? 'waveform-drag-handle' : widget.type === 'pose' ? 'pose-header' : 'monitor-header'].querySelector('span').textContent = title;
         this.element('active-monitor-caption').textContent = title;
         const entry = this.workspace.entries.get(widget.id);
         if (entry) { entry.title = title; entry.handle.setAttribute('aria-label', `${title}: arrow keys move, Shift + arrows resize, Delete removes`); }
@@ -536,7 +564,7 @@ class WidgetController {
         });
         for (const [key, id] of Object.entries(this.fieldIds)) this._listen(this.element(id), 'change', () => {
             const widget = this.active;
-            if (!widget || this.binding) return;
+            if (!widget || widget.type === 'pose' || this.binding) return;
             const field = this.element(id), candidate = { ...widget.settings,
                 [key]: field.type === 'checkbox' ? field.checked : field.value };
             try {
@@ -608,11 +636,11 @@ class WidgetController {
                 new SerialPlotter.ChannelOperations(Number(candidate.channelsCount), candidate.channelDefinitions);
                 Object.assign(this.globals, candidate);
                 void this.service.updateNumericFormat(candidate).then(() => this.syncData(this.service.numericSource));
-                for (const widget of this.widgets.values()) if (widget.type === 'wave') this.applySettings(widget);
+                this._channelsChanged();
                 this.syncGlobals(); this.activate(this.activeId); this.onRulesChange(); this.onChange(); this._showError('');
             } catch (error) { this._showError(error.message); }
         });
-        for (const id of ['rebuild-history', 'rebuild-history-byte', 'channel-rebuild-wave', 'channel-rebuild-byte']) this._listen(this.element(id), 'change', () => {
+        for (const id of ['rebuild-history', 'rebuild-history-byte', 'rebuild-history-pose', 'channel-rebuild-wave', 'channel-rebuild-byte']) this._listen(this.element(id), 'change', () => {
             this.globals.rebuildHistory = this.element(id).checked;
             this.service.rebuildHistory = this.globals.rebuildHistory;
             this.syncGlobals(); this.onChange();
@@ -636,6 +664,7 @@ class WidgetController {
     }
 
     _renderChannels(widget) {
+        if (widget.type === 'pose') { this.poseConfigView.render(widget); return; }
         const category = widget.channelCategory ?? 'all', restricted = category !== 'all';
         this.element(`channel-category-${widget.type}`).value = category;
         const type = this.element(`channel-add-type-${widget.type}`), button = this.element(`channel-add-${widget.type}`);
@@ -679,6 +708,7 @@ class WidgetController {
     syncData(source) {
         for (const widget of this.widgets.values()) if (!source || widget.source === source) {
             if (widget.type === 'wave' && widget.settings.plotContent === 'response') continue;
+            if (widget.view && widget.view.frames !== widget.source.frames) widget.view.setFrames(widget.source.frames);
             if (widget.view) this._restoreViewport(widget);
             widget.view?.invalidateData();
         }
@@ -724,6 +754,7 @@ class WidgetController {
     setPaused(paused) {
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave' && widget.view.isPaused !== paused) widget.view.togglePause();
+            if (widget.type === 'pose') widget.view.setPaused(paused);
             if (!paused) {
                 this._cancelViewportRestore(widget); widget.pendingViewport = null;
                 widget.view.followLatest?.();

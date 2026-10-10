@@ -3,6 +3,7 @@ const widgetConfigUtils = typeof module !== 'undefined' ? require('./configValid
 const widgetDisplayUtils = typeof module !== 'undefined' ? require('./monitorDisplay') : globalThis.SerialPlotter.MonitorDisplay;
 const widgetChannelUtils = typeof module !== 'undefined' ? require('./channelOperations') : globalThis.SerialPlotter;
 const widgetViewportUtils = () => typeof module !== 'undefined' ? require('./widgetViewport') : globalThis.SerialPlotter.WidgetViewport;
+const widgetPoseUtils = () => typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : globalThis.SerialPlotter.PoseConfig;
 
 const GLOBAL_DEFAULTS = {
     connType: 'serial', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
@@ -91,6 +92,12 @@ function legacyWindowPoints(settings = {}) {
 
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
+    if (type === 'pose') {
+        const originalCount = Number(globals.channelsCount);
+        const engine = new widgetChannelUtils.ChannelOperations(originalCount, globals.channelDefinitions ?? []);
+        return widgetPoseUtils().normalize(settings, { channelCount: engine.channelCount,
+            isSignal: index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula' });
+    }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
         result.plotResponseTimePoints = settings.plotResponseTimePoints ?? settings.plotResponsePoints ?? String(Math.max(2, Number(globals.plotWindowPoints)));
@@ -149,7 +156,7 @@ function validateWorkspaceConfig(config) {
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
-        if (!['wave', 'byte'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
+        if (!['wave', 'byte', 'pose'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
             throw new Error('控件类型或标题无效');
         ids.add(widget.id);
         return { id: widget.id, type: widget.type, title: widget.title,
