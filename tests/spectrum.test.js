@@ -12,6 +12,20 @@ test('FFT identifies a sampled sine peak and DC removal suppresses a constant in
     assert.ok(prepareFrequencySeries([1, NaN, Infinity, 0], false).mags.every(Number.isFinite));
 });
 
+test('FFT exposes phase relative to its first input sample without changing amplitude', () => {
+    const cosine = prepareFrequencySeries(Array.from({ length: 64 }, (_, i) =>
+        2 * Math.cos(2 * Math.PI * 4 * i / 64 + Math.PI / 4)), false, 'rectangular');
+    assert.ok(Array.isArray(cosine.phases));
+    assert.ok(Math.abs(cosine.phases[4] - 45) < 1e-10);
+    assert.ok(Math.abs(cosine.mags[4] - 2) < 1e-10);
+    const silent = prepareFrequencySeries(Array(64).fill(0), false, 'rectangular');
+    assert.ok(silent.phases.every(Number.isNaN));
+});
+
+test('an entirely invalid computed signal does not manufacture a zero spectrum', () => {
+    assert.deepEqual(prepareFrequencySeries([NaN, Infinity, NaN, NaN]), { mags: [], dominantBin: 0, fftSize: 0 });
+});
+
 test('one-sided Hann spectrum preserves bin-centred sine, DC and Nyquist amplitudes', () => {
     const size = 64;
     const sine = prepareFrequencySeries(Array.from({ length: size }, (_, i) =>

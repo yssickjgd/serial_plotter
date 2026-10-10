@@ -9,6 +9,14 @@ function run(frames, options) {
     return search.matches;
 }
 
+test('numeric search optionally compares transformed display values while retaining channel metadata', () => {
+    const frames = new FrameBuffer(2, 5);
+    frames.append([2, 5], Uint8Array.of(1, 2), '', 7);
+    const options = { ...parseMonitorSearch('number', '5'), valueTransform: (value, channel) => channel === 0 ? value * 2 + 1 : value };
+    assert.deepEqual(run(frames, options).map(match => match.channel), [0, 1]);
+    assert.deepEqual(run(frames, parseMonitorSearch('number', '5')).map(match => match.channel), [1]);
+});
+
 test('text searches store a boolean case option and preserve the case-sensitive default', () => {
     const frames = new FrameBuffer(1, 5);
     frames.append([0], new TextEncoder().encode('aBc ABC abc'), '', 1);

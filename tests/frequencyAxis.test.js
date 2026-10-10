@@ -27,7 +27,7 @@ function createPlotter() {
     const context = vm.createContext({ document, window: { addEventListener() {} },
         performance, requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'systemResponse.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
@@ -38,6 +38,30 @@ function createPlotter() {
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     return { plotter, labels, canvasEvents };
 }
+
+test('phase radians convert FFT series after unwrapping and label the axis and hover', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'phase', phaseUnit: 'radians', phaseUnwrap: false });
+    const cached = { mags: [1, 1, 1, 1], phases: [90, 170, -170, NaN], fftSize: 8 };
+    const results = new Map([[0, cached]]);
+    let series = plotter._collectWindowSeries(0, 4, results);
+    assert.ok(Math.abs(series[0].mags[0] - Math.PI / 2) < 1e-12);
+    assert.ok(Number.isNaN(series[0].mags[3]));
+    assert.equal(cached.phases[0], 90, 'cached phases stay in degrees');
+    plotter.mousePos = { x: 100, y: 100 };
+    plotter.draw();
+    assert.equal(plotter._drawState.min, -Math.PI);
+    assert.equal(plotter._drawState.max, Math.PI);
+    assert.ok(labels.includes('3.141593 rad'));
+    assert.ok(labels.some(label => label.startsWith('Phase:') && label.endsWith(' rad')));
+    plotter.setDisplayOptions({ phaseUnwrap: true });
+    series = plotter._collectWindowSeries(0, 4, results);
+    assert.ok(Math.abs(series[0].mags[2] - 190 * Math.PI / 180) < 1e-12);
+    plotter.setDisplayOptions({ phaseUnit: 'degrees', phaseUnwrap: false });
+    labels.length = 0; plotter.draw();
+    assert.equal(plotter._drawState.max, 180);
+    assert.ok(labels.includes('180.000000°'));
+});
 
 test('frequency axis and cursor show hertz after a measured sample rate is available', () => {
     const { plotter, labels } = createPlotter();

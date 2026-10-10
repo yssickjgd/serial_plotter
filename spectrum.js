@@ -54,6 +54,7 @@ function windowCoefficient(type, index, length) {
 function prepareFrequencySeries(values, removeDc = false, windowType = 'hann') {
     if (!FFT_WINDOWS.includes(windowType)) throw new RangeError('FFT 窗函数无效');
     if (values.length < 2) return { mags: [], dominantBin: 0, fftSize: 0 };
+    if (!values.some(Number.isFinite)) return { mags: [], dominantBin: 0, fftSize: 0 };
     const fftSize = nextPow2(values.length);
     const re = new Float64Array(fftSize);
     const im = new Float64Array(fftSize);
@@ -75,18 +76,24 @@ function prepareFrequencySeries(values, removeDc = false, windowType = 'hann') {
     }
     fftInPlace(re, im);
     const mags = new Array((fftSize >> 1) + 1);
+    const phases = new Array(mags.length);
     let dominantBin = 0, dominantMag = -Infinity;
     for (let i = 0; i < mags.length; i++) {
         const oneSidedFactor = i === 0 || i === fftSize / 2 ? 1 : 2;
         const rawMagnitude = Math.hypot(re[i], im[i]);
         const magnitude = rawMagnitude * oneSidedFactor / windowGain;
         mags[i] = magnitude;
+        phases[i] = rawMagnitude > 0 ? Math.atan2(im[i], re[i]) * 180 / Math.PI : NaN;
         if (rawMagnitude > dominantMag) { dominantMag = rawMagnitude; dominantBin = i; }
     }
-    return { mags, dominantBin, fftSize };
+    const peak = mags[dominantBin];
+    for (let i = 0; i < phases.length; i++) if (!(mags[i] > peak * 1e-12)) phases[i] = NaN;
+    return { mags, phases, dominantBin, fftSize };
 }
 
-if (typeof module !== 'undefined') module.exports = { prepareFrequencySeries, FFT_WINDOWS };
+if (typeof module !== 'undefined') module.exports = { prepareFrequencySeries, FFT_WINDOWS, fftInPlace, nextPow2 };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.prepareFrequencySeries = prepareFrequencySeries;
 globalThis.SerialPlotter.FFT_WINDOWS = FFT_WINDOWS;
+globalThis.SerialPlotter.fftInPlace = fftInPlace;
+globalThis.SerialPlotter.nextPow2 = nextPow2;

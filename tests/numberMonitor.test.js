@@ -40,6 +40,21 @@ const fieldsFor = values => values.map((value, channel) => ({
     text: `CH${channel + 1}=${value}`, channel
 }));
 
+test('scientific columns fill available width and keep the grid stable across finite and invalid values', () => {
+    for (const digits of [1, 6, 17]) {
+        const valueWidth = Math.max(9, 1 + digits + (digits > 1 ? 1 : 0) + 2 + 3);
+        const cell = 5 + valueWidth, columns = cell * 2 + 2;
+        const values = [1, -2, Number.MAX_VALUE, Number.MIN_VALUE, Infinity, NaN];
+        const layout = buildNumericRowLayout(fieldsFor(values.map(value => formatScientificValue(value, digits))), columns, null, digits);
+        assert.equal(layout.lineCount, 3);
+        assert.ok(layout.numberText.split('\n').every(line => line.length <= columns));
+        assert.ok(layout.numberText.split('\n').every(line => line.indexOf('CH', 1) === cell + 2));
+        const small = buildNumericRowLayout(fieldsFor(Array(6).fill(formatScientificValue(0, digits))), columns, null, digits);
+        assert.equal(small.lineCount, layout.lineCount);
+        assert.equal(small.numberText.split('\n')[0].indexOf('CH02='), cell + 2);
+    }
+});
+
 function assertChannelText(layout, fields) {
     assert.equal(layout.numberSegments.map(segment => segment.text).join(''), layout.numberText);
     for (const field of fields) {

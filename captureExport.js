@@ -37,7 +37,8 @@ function* captureExportChunks(rx, tx, options = {}) {
         return;
     }
     const decoders = Object.fromEntries([['rx', rx], ['tx', tx]].map(([kind, frames]) =>
-        [kind, new captureExportCodec.MappedTextDecoder(encoding, { byteOffset: frames.rawByteOffsetAt(0) ?? 0 })]));
+        [kind, new captureExportCodec.MappedTextDecoder(encoding,
+            { byteOffset: (frames.rawByteOffsetAt(0) ?? 0) - (frames.streamStartByteAt?.(0) ?? 0) })]));
     const owners = new Map(), queue = [];
     let position = 0, queueStart = 0;
     const consume = tokens => {
@@ -60,6 +61,10 @@ function* captureExportChunks(rx, tx, options = {}) {
         owners.set(owner.index, owner);
         queue.push(owner);
         consume(decoders[record.kind].write(record.bytes, owner.index));
+        if (record.streamEnded) {
+            consume(decoders[record.kind].flush());
+            decoders[record.kind] = new captureExportCodec.MappedTextDecoder(encoding);
+        }
         yield* readyRows();
     }
     for (const decoder of Object.values(decoders)) consume(decoder.flush());

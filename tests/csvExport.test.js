@@ -59,3 +59,32 @@ test('streamed CSV uses the same optional timestamp column as downloaded CSV', a
     assert.equal(new TextDecoder().decode(Buffer.concat(chunks)),
         exportFrameCsv(frames, [{ name: 'CH1' }], { timestamps: true }));
 });
+
+test('CSV channel selection keeps physical indices and channel transforms when skipping columns', async () => {
+    const { exportFrameCsv, writeFrameCsv } = require('../csvExport');
+    const frames = new FrameBuffer(3, 2);
+    frames.append([10, 20, 30], Uint8Array.of(1));
+    const channels = [{ name: 'A', gainEnabled: true, gain: -2 }, { name: 'B' },
+        { name: 'C,值', offsetEnabled: true, offset: 1 }];
+    const options = { channelIndices: [2, 0, 2] };
+    const expected = 'Index,A,"C,值"\r\n0,-20,31\r\n';
+    assert.equal(exportFrameCsv(frames, channels, options), expected);
+    const chunks = [];
+    await writeFrameCsv(frames, channels, { async write(bytes) { chunks.push(bytes); } }, () => {}, options);
+    assert.equal(new TextDecoder().decode(Buffer.concat(chunks)), expected);
+    assert.deepEqual(options.channelIndices, [2, 0, 2]);
+    assert.equal(frames.getValue(1, 0), 20);
+});
+
+test('CSV rejects invalid channel choices and produces no numeric file from raw records', () => {
+    const { exportFrameCsv, writeFrameCsv } = require('../csvExport');
+    const frames = new FrameBuffer(2, 2), channels = [{ name: 'A' }, { name: 'B' }];
+    frames.append([1, 2]);
+    for (const channelIndices of [[-1], [2], [0.5], ['0'], 'all'])
+        assert.throws(() => exportFrameCsv(frames, channels, { channelIndices }), /通道/);
+    assert.equal(exportFrameCsv(frames, channels, { channelIndices: [] }), null);
+    frames.clear(); frames.setRawMode(true); frames.appendRaw(Uint8Array.of(1, 2), 't', 1);
+    assert.equal(exportFrameCsv(frames, channels), null);
+    return writeFrameCsv(frames, channels, { write() { throw new Error('raw records are not CSV samples'); } })
+        .then(result => assert.equal(result, false));
+});

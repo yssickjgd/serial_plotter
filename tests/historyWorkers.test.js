@@ -51,6 +51,139 @@ function loadPool() {
     return exports;
 }
 
+test('Hex assembly uses the worker budget and preserves every original input byte', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const gate = new SharedArrayBuffer(4), started = deferred(), threads = new Set();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 5,
+        workerFactory: nodeWorkerFactory({ gate, onStart({ threadId }) {
+            threads.add(threadId);
+            if (threads.size === 3) started.resolve();
+        } }) });
+    t.after(() => { Atomics.store(new Int32Array(gate), 0, 1); Atomics.notify(new Int32Array(gate), 0); pool.dispose(); });
+    const parts = [Uint8Array.of(0, 255), Uint8Array.of(65), new Uint8Array(0), Uint8Array.of(10, 13)];
+    const tasks = Promise.all(Array.from({ length: 5 }, () => pool.runTask({ kind: 'hex-assemble',
+        bytes: new Uint8Array(0), parts })));
+    tasks.catch(() => {});
+    await started.promise;
+    assert.equal(pool.workerCount, 3);
+    Atomics.store(new Int32Array(gate), 0, 1); Atomics.notify(new Int32Array(gate), 0);
+    const results = await tasks;
+    assert.ok(results.every(bytes => bytes instanceof Uint8Array));
+    assert.deepEqual(results.map(bytes => [...bytes]), Array.from({ length: 5 }, () => [0, 255, 65, 10, 13]));
+    assert.deepEqual(parts.map(bytes => [...bytes]), [[0, 255], [65], [], [10, 13]]);
+});
+
+test('parallel Hex replay preserves idle boundaries, capacity, timestamps and live pending bytes', async t => {
+    const { CaptureHistory, replayCaptureHistory } = require('../captureHistory');
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 5, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const capture = new CaptureHistory();
+    for (let i = 0; i < 12; i++) {
+        capture.append(Uint8Array.of(i, 255), { arrival: i * 20, timestamp: 1000 + i, order: i * 2 + 1 });
+        capture.append(Uint8Array.of(65), { arrival: i * 20 + 2, timestamp: 2000 + i, order: i * 2 + 2 });
+        if (i === 5) capture.markBoundary();
+    }
+    let dispatched = 0;
+    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01 }, 5, {
+        maxDecodeFrames: 1, maxPendingDecodes: 3, flushPending: false,
+        assembleRawBatch(records) {
+            dispatched++;
+            return pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0), parts: records.flatMap(record => record.parts) });
+        }
+    });
+    assert.ok(dispatched >= 11, 'closed Hex frames must actually be processed in workers');
+    assert.equal(pool.peakWorkers, 3);
+    assert.equal(result.frameCount, 11);
+    assert.equal(result.pendingBytes, 3);
+    assert.equal(result.frames.length, 5);
+    for (let i = 0; i < 5; i++) {
+        assert.deepEqual([...result.frames.rawBytesAt(i)], [i + 6, 255, 65]);
+        assert.equal(result.frames.timestampAt(i), 1006 + i);
+        assert.equal(result.frames.orderAt(i), (i + 6) * 2 + 1);
+        assert.equal(result.frames.rawByteOffsetAt(i), (i + 6) * 3);
+    }
+    assert.equal(result.parser.onFrameParts, null, 'the live parser must not retain historical batch callbacks');
+    result.parser.appendData(Uint8Array.of(66), { arrival: 225, timestamp: 4000, byteOffset: 36, order: 30 });
+    result.parser.flushPending();
+    assert.deepEqual([...result.frames.rawBytesAt(4)], [11, 255, 65, 66]);
+    assert.equal(result.frames.timestampAt(4), 1011);
+    assert.equal(capture.byteLength, 36);
+});
+
+test('Hex replay handles pause boundaries, asynchronous fallback and pause during queued assembly', async t => {
+    const { CaptureHistory, replayCaptureHistory } = require('../captureHistory');
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2, sliceBytes: 1 });
+    t.after(() => pool.dispose());
+    const capture = new CaptureHistory();
+    capture.append(Uint8Array.of(1, 2), { arrival: 0, timestamp: 1000, order: 1 });
+    capture.markBoundary();
+    capture.append(Uint8Array.of(3, 4), { arrival: 1, timestamp: 1001, order: 2 });
+    capture.append(Uint8Array.of(5), { arrival: 21, timestamp: 1002, order: 3 });
+    let paused = false, jobs = 0;
+    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01 }, 10, {
+        maxDecodeFrames: 1, flushPending: () => paused,
+        async assembleRawBatch(records) {
+            jobs++;
+            const bytes = await pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0), parts: records.flatMap(record => record.parts) });
+            paused = true;
+            return bytes;
+        }
+    });
+    assert.equal(jobs, 3);
+    assert.deepEqual(Array.from({ length: result.frames.length }, (_, i) => [...result.frames.rawBytesAt(i)]), [[1, 2], [3, 4], [5]]);
+    assert.equal(result.frames.streamEndedAt(0), true);
+    assert.equal(result.frames.streamEndedAt(1), false);
+    assert.equal(result.frames.streamEndedAt(2), true);
+    assert.equal(result.pendingBytes, 0);
+});
+
+test('Hex worker failure falls back asynchronously without losing a long frame or detached source views', async t => {
+    const { CaptureHistory, replayCaptureHistory } = require('../captureHistory');
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, sliceBytes: 4096,
+        workerFactory: nodeWorkerFactory({ crash: true }) });
+    t.after(() => pool.dispose());
+    const capture = new CaptureHistory();
+    const bytes = Uint8Array.from({ length: 150000 }, (_, i) => i % 251);
+    capture.append(bytes, { arrival: 0, timestamp: 1000, order: 1 });
+    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01 }, 5, {
+        assembleRawBatch: records => pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0),
+            parts: records.flatMap(record => record.parts) })
+    });
+    assert.equal(result.frameCount, 1);
+    assert.deepEqual(result.frames.rawBytesAt(0), bytes);
+    assert.deepEqual(capture.snapshot()[0].bytes, bytes);
+    assert.equal(result.frames.streamEndedAt(0), true);
+    assert.equal(pool.available, false);
+    assert.equal(result.parser.onFrameParts, null);
+});
+
+test('cancellation during Hex assembly never commits queued bytes or leaves a deferred live parser', async t => {
+    const { CaptureHistory, replayCaptureHistory } = require('../captureHistory');
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2, sliceBytes: 1 });
+    t.after(() => pool.dispose());
+    const capture = new CaptureHistory();
+    capture.append(Uint8Array.of(1, 2), { arrival: 0 });
+    capture.append(Uint8Array.of(3), { arrival: 20 });
+    let cancelled = false;
+    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01 }, 5, {
+        maxDecodeFrames: 1, isCancelled: () => cancelled,
+        async assembleRawBatch(records) {
+            const bytes = await pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0),
+                parts: records.flatMap(record => record.parts) });
+            cancelled = true;
+            return bytes;
+        }
+    });
+    assert.equal(result.cancelled, true);
+    assert.equal(result.frames.length, 0);
+    assert.equal(result.parser.onFrameParts, null);
+    assert.equal(capture.byteLength, 3);
+});
+
 test('history worker budget reserves two logical cores and creates workers only when needed', () => {
     const { HistoryWorkerPool } = loadPool();
     for (const [hardwareConcurrency, expected] of [

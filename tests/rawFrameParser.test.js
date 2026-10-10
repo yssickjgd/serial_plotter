@@ -3,6 +3,39 @@ const assert = require('node:assert/strict');
 const rawModule = require('node:fs').existsSync(require('node:path').join(__dirname, '../rawFrameParser.js'))
     ? require('../rawFrameParser') : {};
 
+test('size segments retain every byte and recognize a delimiter across forced cuts', () => {
+    const f = fixture({ boundary: 'crlf', maxFrameBytes: 2 });
+    f.parser.appendData(Uint8Array.of(65, 13), { timestamp: 100 });
+    f.parser.appendData(Uint8Array.of(10, 66, 67), { timestamp: 200 });
+    f.parser.flushPending();
+    assert.deepEqual(f.frames.map(frame => frame.bytes), [[65, 13], [10], [66, 67]]);
+    assert.deepEqual(f.frames.map(frame => frame.endReason), ['limit', 'delimiter', 'limit']);
+    assert.equal(f.frames[0].segmented, true);
+    assert.equal(f.frames[0].streamEnded, false);
+    assert.deepEqual(f.frames.map(frame => frame.timestamp), [100, 200, 200]);
+    assert.ok(f.parser.length <= 2);
+});
+
+test('idle and UTF16 framing remain bounded at odd size limits', () => {
+    const idle = fixture({ maxFrameBytes: 3 });
+    idle.parser.appendData(Uint8Array.of(1, 2, 3, 4, 5, 6, 7));
+    idle.parser.flushPending();
+    assert.deepEqual(idle.frames.map(frame => frame.bytes), [[1, 2, 3], [4, 5, 6], [7]]);
+    const text = fixture({ boundary: 'crlf', encoding: 'utf-16le', maxFrameBytes: 3 });
+    text.parser.appendData(Uint8Array.of(65, 0, 13, 0, 10, 0, 66, 0));
+    text.parser.flushPending();
+    assert.deepEqual(text.frames.map(frame => frame.bytes), [[65, 0, 13], [0, 10, 0], [66, 0]]);
+    assert.equal(text.frames[1].endReason, 'delimiter');
+});
+
+test('an idle gap after an exact size limit starts a fresh unsegmented frame', () => {
+    const f = fixture({ maxFrameBytes: 2 });
+    f.parser.appendData(Uint8Array.of(1, 2));
+    f.at(20); f.parser.appendData(Uint8Array.of(3));
+    f.at(30); f.fire();
+    assert.equal(f.frames[1].segmented, false);
+});
+
 function fixture(format = {}) {
     assert.equal(typeof rawModule.RawFrameParser, 'function', 'raw framing must be available');
     let now = 0, wallNow = 1700000000000, timerId = 0;
@@ -16,6 +49,29 @@ function fixture(format = {}) {
     return { parser, frames, received, timers, at: (ms, wall = 1700000000000 + ms) => { now = ms; wallNow = wall; },
         fire: () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(timer => timer.callback()); } };
 }
+
+test('deferred idle assembly preserves frame parts and restores the pending live tail', () => {
+    const f = fixture();
+    const batches = [];
+    assert.equal(typeof f.parser.setFramePartsCallback, 'function');
+    f.parser.setFramePartsCallback((parts, time, timestamp, metadata) =>
+        batches.push({ parts: parts.map(bytes => [...bytes]), timestamp, ...metadata }));
+    f.parser.appendData(Uint8Array.of(1, 2));
+    f.at(8); f.parser.appendData(Uint8Array.of(3));
+    f.at(18); f.parser.appendData(Uint8Array.of(4));
+    assert.deepEqual(batches.map(frame => frame.parts), [[[1, 2], [3]]]);
+    assert.equal(batches[0].byteOffset, 0);
+    assert.equal(batches[0].endByte, 3);
+    assert.equal(batches[0].timestamp, 1700000000000);
+    assert.equal(f.frames.length, 0);
+    f.parser.setFramePartsCallback(null);
+    f.at(20); f.parser.appendData(Uint8Array.of(5));
+    f.at(30); f.fire();
+    assert.deepEqual(f.frames.map(frame => frame.bytes), [[4, 5]]);
+    assert.equal(f.parser.frameCount, 2);
+    const line = fixture({ boundary: 'lf' });
+    assert.throws(() => line.parser.setFramePartsCallback(() => {}), /idle|空闲/);
+});
 
 test('idle parser groups bytes and keeps the first arrival timestamp', () => {
     const f = fixture();

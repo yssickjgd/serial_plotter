@@ -3,6 +3,7 @@ const historyDependencies = typeof module !== 'undefined'
     ? { ...require('./dataParser'), ...require('./rawFrameParser'), ...require('./frameBuffer') }
     : globalThis.SerialPlotter;
 const captureHistoryStates = new WeakMap();
+const captureHistoryErrorCallbacks = new WeakSet();
 
 class CaptureHistory {
     constructor({ maxBytes = Infinity } = {}) {
@@ -129,7 +130,7 @@ async function replayCaptureHistory(history, format, capacity, {
     onProgress = () => {}, onBytes = () => {}, onBoundary = () => {}, onGap = () => {}, isCancelled = () => false,
     yieldControl = () => new Promise(resolve => globalThis.setTimeout(resolve, 0)),
     maxSliceBytes = 16384, flushPending = true, resumeTimers = false, previousResult = null,
-    stopByte = Infinity, preserveCallbacks = false, decodeBatch = null,
+    stopByte = Infinity, startByte = history.startByte, preserveCallbacks = false, decodeBatch = null, assembleRawBatch = null,
     maxDecodeFrames = 2048, maxDecodeBytes = 131072, maxPendingDecodes = 1
 } = {}) {
     if (!(history instanceof CaptureHistory)) throw new TypeError('Expected a CaptureHistory');
@@ -145,7 +146,8 @@ async function replayCaptureHistory(history, format, capacity, {
     else if (!previousResult) {
         frames.setRawMode(true);
         parser.setFormat({ boundary: format.captureMode === 'hex' ? 'idle' : (format.textBoundary || 'idle'),
-            idleGapSeconds: Number(format.idleGapSeconds || 0.001), encoding: format.textEncoding || 'utf-8' });
+            idleGapSeconds: Number(format.idleGapSeconds || 0.001), encoding: format.textEncoding || 'utf-8',
+            maxFrameBytes: format.maxRawFrameBytes ?? format.maxFrameBytes ?? 1048576 });
         parser.suspendTimers = true;
     }
     if (!numeric) { parser.suspendTimers = true; parser._cancelTimer(); }
@@ -156,18 +158,24 @@ async function replayCaptureHistory(history, format, capacity, {
         if (errors.length - errorHead > capacity) errors[errorHead++] = null;
         if (errorHead > 1024) { errors.splice(0, errorHead); errorHead = 0; }
     };
+    // Returned error lists are copies. Rebind our collector on catchup while preserving caller callbacks.
+    if (!preserveCallbacks || captureHistoryErrorCallbacks.has(parser.onFrameError)) {
+        parser.onFrameError = recordError;
+        captureHistoryErrorCallbacks.add(recordError);
+    }
     const batchedDecode = numeric && !!decodeBatch && !previousResult && !preserveCallbacks;
+    const batchedRaw = format.captureMode === 'hex' && !!assembleRawBatch && !previousResult && !preserveCallbacks;
+    const batchedFrames = batchedDecode || batchedRaw;
     let decodeRecords = [], decodeBytes = 0, pendingDecodes = [];
     const dispatchDecode = () => {
         if (!decodeRecords.length) return;
         const records = decodeRecords;
-        const promise = Promise.resolve().then(() => decodeBatch(records, format));
+        const promise = Promise.resolve().then(() => (batchedRaw ? assembleRawBatch : decodeBatch)(records, format));
         promise.catch(() => {}); // Every queued result is consumed in order, including failures.
         pendingDecodes.push({ records, promise });
         decodeRecords = []; decodeBytes = 0;
     };
     if (!preserveCallbacks) {
-        parser.onFrameError = recordError;
         if (batchedDecode) {
             parser.decodeValues = false;
             parser.onFrameParsed = (_values, time, bytes, timestamp, metadata) => {
@@ -178,6 +186,11 @@ async function replayCaptureHistory(history, format, capacity, {
             frames.append(values, bytes, time, metadata.order, timestamp, metadata);
         else parser.onFrameParsed = (bytes, time, timestamp, metadata) =>
             frames.appendRaw(bytes, time, metadata.order, timestamp, metadata);
+        if (batchedRaw) parser.setFramePartsCallback((parts, time, timestamp, metadata) => {
+            decodeRecords.push({ parts, time, timestamp, metadata });
+            decodeBytes += metadata.endByte - metadata.byteOffset;
+            if (decodeRecords.length >= maxDecodeFrames || decodeBytes >= maxDecodeBytes) dispatchDecode();
+        });
     }
     const state = captureHistoryStates.get(history), generation = state.generation;
     const consumeDecoded = async keep => {
@@ -186,12 +199,23 @@ async function replayCaptureHistory(history, format, capacity, {
             const values = await promise;
             if (isCancelled() || state.generation !== generation) return false;
             const channels = Number(format.channelsCount);
-            if (values.length !== records.length * channels) throw new Error('Decoded sample count does not match frames');
+            const expected = batchedRaw ? records.reduce((total, record) =>
+                total + record.metadata.endByte - record.metadata.byteOffset, 0) : records.length * channels;
+            if (!values || values.length !== expected || batchedRaw && !(values instanceof Uint8Array))
+                throw new Error('Decoded sample count or raw byte count does not match frames');
             let started = performance.now();
+            let byteOffset = 0;
             for (let i = 0; i < records.length; i++) {
                 const record = records[i], start = i * channels;
-                const samples = values.subarray ? values.subarray(start, start + channels) : values.slice(start, start + channels);
-                frames.append(samples, record.bytes, record.time, record.metadata.order, record.timestamp, record.metadata);
+                if (batchedRaw) {
+                    const end = byteOffset + record.metadata.endByte - record.metadata.byteOffset;
+                    frames.appendRaw(values.subarray(byteOffset, end), record.time, record.metadata.order,
+                        record.timestamp, record.metadata);
+                    byteOffset = end;
+                } else {
+                    const samples = values.subarray ? values.subarray(start, start + channels) : values.slice(start, start + channels);
+                    frames.append(samples, record.bytes, record.time, record.metadata.order, record.timestamp, record.metadata);
+                }
                 if (performance.now() - started >= 8) {
                     await yieldControl(); started = performance.now();
                     if (isCancelled() || state.generation !== generation) return false;
@@ -200,7 +224,7 @@ async function replayCaptureHistory(history, format, capacity, {
         }
         return true;
     };
-    let cursor = previousResult?.endByte ?? state.startByte,
+    let cursor = previousResult?.endByte ?? Math.max(state.startByte, startByte),
         processedBytes = previousResult?.processedBytes || 0, cancelled = false;
     const targetEnd = () => Math.min(stopByte, state.endByte);
     const progress = () => onProgress({ processedBytes, totalBytes: processedBytes + targetEnd() - cursor,
@@ -219,6 +243,11 @@ async function replayCaptureHistory(history, format, capacity, {
     };
     const flushStream = byteOffset => {
         parser.flushPending();
+        const pendingFrame = batchedRaw && (decodeRecords.at(-1) || pendingDecodes.at(-1)?.records.at(-1));
+        if (pendingFrame && pendingFrame.metadata.endByte <= byteOffset) {
+            pendingFrame.metadata.streamEnded = true;
+            return;
+        }
         const last = frames.length - 1;
         if (!numeric && last >= 0 && frames.rawByteOffsetAt(last) + frames.rawBytesAt(last).length <= byteOffset)
             frames.markStreamEnded(last);
@@ -261,7 +290,7 @@ async function replayCaptureHistory(history, format, capacity, {
         cursor += length; processedBytes += length;
         batchBytes += length;
         if (cursor === chunk.endByte) index++;
-        if (batchedDecode && pendingDecodes.length >= maxPendingDecodes &&
+        if (batchedFrames && pendingDecodes.length >= maxPendingDecodes &&
             !await consumeDecoded(maxPendingDecodes - 1)) { cancelled = true; break; }
         const atTarget = cursor === targetEnd();
         const timeBudgetReached = performance.now() - batchStarted >= 8;
@@ -269,14 +298,14 @@ async function replayCaptureHistory(history, format, capacity, {
             progress();
             // Fill independent worker jobs until the time budget, keeping each input slice small.
             // Live catchup hands off in this turn rather than admitting another tail at the end.
-            if (!(preserveCallbacks && atTarget) && (!batchedDecode || timeBudgetReached || atTarget)) {
+            if (!(preserveCallbacks && atTarget) && (!batchedFrames || timeBudgetReached || atTarget)) {
                 await yieldControl();
                 batchStarted = performance.now();
             }
             batchBytes = 0;
         }
     }
-    if (batchedDecode && !cancelled) {
+    if (batchedFrames && !cancelled) {
         dispatchDecode();
         if (!await consumeDecoded(0)) cancelled = true;
     }
@@ -289,6 +318,25 @@ async function replayCaptureHistory(history, format, capacity, {
     // A paused snapshot can still have queued bytes before its real stream boundary.
     if (!cancelled && cursor >= state.endByte &&
         (typeof flushPending === 'function' ? flushPending() : flushPending)) flushStream(cursor);
+    if (batchedRaw) {
+        if (!cancelled) {
+            dispatchDecode();
+            if (!await consumeDecoded(0)) cancelled = true;
+        }
+        parser.setFramePartsCallback(null);
+    }
+    if (isCancelled() || state.generation !== generation) cancelled = true;
+    // A pause/disconnect may arrive while the final worker job is outstanding. Apply its
+    // boundary before acknowledging the current revision; later snapshot bytes stay for catchup.
+    if (!cancelled) {
+        let checkpoint = nextBoundary();
+        while (checkpoint && checkpoint.byteOffset <= cursor) {
+            flushStream(checkpoint.byteOffset);
+            onBoundary({ ...checkpoint });
+            lastBoundaryByte = checkpoint.byteOffset;
+            checkpoint = nextBoundary();
+        }
+    }
     if (!numeric && !cancelled && resumeTimers) parser.resumeTimers();
     const revision = state.revision;
     progress();

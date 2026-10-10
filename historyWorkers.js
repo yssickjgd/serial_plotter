@@ -1,6 +1,30 @@
 /** Lazy historical decode workers with two logical cores reserved for the UI. */
 function createHistoryTaskProcessor(task, dependencies) {
     if (!(task?.bytes instanceof Uint8Array)) throw new TypeError('History task bytes must be a Uint8Array');
+    if (task.kind === 'hex-assemble') {
+        if (!Array.isArray(task.parts) || task.parts.some(part => !(part instanceof Uint8Array)))
+            throw new TypeError('Historical Hex parts must be Uint8Arrays');
+        const length = task.parts.reduce((total, part) => total + part.length, 0);
+        if (!Number.isSafeInteger(length)) throw new RangeError('Historical Hex batch is too large');
+        const bytes = new Uint8Array(length);
+        let partIndex = 0, partOffset = 0, offset = 0;
+        return {
+            step(byteBudget) {
+                let remaining = Math.max(1, byteBudget);
+                while (partIndex < task.parts.length) {
+                    const part = task.parts[partIndex];
+                    const end = Math.min(part.length, partOffset + remaining);
+                    bytes.set(part.subarray(partOffset, end), offset);
+                    const count = end - partOffset;
+                    offset += count; remaining -= count; partOffset = end;
+                    if (partOffset === part.length) { partIndex++; partOffset = 0; }
+                    if (remaining <= 0) break;
+                }
+                return partIndex === task.parts.length;
+            },
+            result() { return bytes; }
+        };
+    }
     if (task.kind === 'numeric') {
         const { frameLength, headerLength, channels, type } = task;
         const width = Object.hasOwn(dependencies.TYPE_LENGTH, type) ? dependencies.TYPE_LENGTH[type] : 0;
@@ -123,7 +147,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                         TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload });
                 processor.step(Infinity);
                 const result = processor.result();
-                const transfer = result instanceof Float64Array ? [result.buffer] : [];
+                const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
                 if (result.chunks) {
                     for (const chunk of result.chunks) {
                         for (const key of ['offsets', 'cells', 'starts', 'ends', 'crosses', 'failed', 'breaks'])
@@ -177,6 +201,9 @@ class HistoryWorkerPool {
         if (this.disposed) return Promise.reject(historyAbortError());
         if (!(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
+        if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
+            task.parts.some(part => !(part instanceof Uint8Array))))
+            return Promise.reject(new TypeError('Historical Hex parts must be Uint8Arrays'));
         if (task.kind === 'text-prepare' && [task.before, task.following].some(parts => parts != null &&
             (!Array.isArray(parts) || parts.some(part => !(part?.bytes instanceof Uint8Array)))))
             return Promise.reject(new TypeError('History text context bytes must be Uint8Arrays'));
@@ -217,6 +244,13 @@ class HistoryWorkerPool {
                 try {
                     const bytes = new Uint8Array(job.task.bytes);
                     const task = { ...job.task, bytes }, transfer = [bytes.buffer];
+                    if (task.kind === 'hex-assemble') {
+                        task.parts = task.parts.map(part => {
+                            const copy = new Uint8Array(part);
+                            transfer.push(copy.buffer);
+                            return copy;
+                        });
+                    }
                     if (task.kind === 'text-prepare') {
                         for (const key of ['before', 'following']) {
                             task[key] = (task[key] ?? []).map(part => {

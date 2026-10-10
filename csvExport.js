@@ -4,9 +4,21 @@ const csvFieldForExport = typeof module !== 'undefined'
 const transformForExport = typeof module !== 'undefined'
     ? require('./channelTransform').transformChannelValue : globalThis.SerialPlotter.transformChannelValue;
 
-function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, { timestamps = false } = {}) {
-    if (!channels.length || !frames.length) return;
-    yield ['Index', ...(timestamps ? ['Timestamp'] : []), ...channels.map(ch => csvFieldForExport(ch.name))].join(',') + '\r\n';
+function csvChannelIndices(channels, { channelIndices = null } = {}) {
+    if (channelIndices === null) return channels.flatMap((channel, index) => channel.signal === false ? [] : [index]);
+    if (!Array.isArray(channelIndices) || channelIndices.some(index =>
+        !Number.isInteger(index) || index < 0 || index >= channels.length))
+        throw new RangeError('CSV 通道选择无效');
+    return [...new Set(channelIndices)].filter(index => channels[index].signal !== false).sort((a, b) => a - b);
+}
+
+function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, options = {}) {
+    if (frames.rawMode || !channels.length || !frames.length) return;
+    const indices = csvChannelIndices(channels, options);
+    if (!indices.length) return;
+    const { timestamps = false } = options;
+    yield ['Index', ...(timestamps ? ['Timestamp'] : []),
+        ...indices.map(index => csvFieldForExport(channels[index].name))].join(',') + '\r\n';
     const count = frames.length;
     const firstOrder = frames.orderAt(0);
     for (let start = 0; start < count; start += rowsPerChunk) {
@@ -19,7 +31,7 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, { timestamps = f
                 const time = frames.timestampAt(row);
                 fields.push(Number.isFinite(time) ? new Date(time).toISOString() : '');
             }
-            for (let channel = 0; channel < channels.length; channel++) {
+            for (const channel of indices) {
                 const value = transformForExport(frames.getValue(channel, row), channels[channel]);
                 fields.push(Number.isFinite(value) ? value : '');
             }
@@ -30,12 +42,12 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, { timestamps = f
 }
 
 function exportFrameCsv(frames, channels, options = {}) {
-    if (!channels.length || !frames.length) return null;
+    if (frames.rawMode || !channels.length || !frames.length || !csvChannelIndices(channels, options).length) return null;
     return [...frameCsvChunks(frames, channels, 1024, options)].join('');
 }
 
 async function writeFrameCsv(frames, channels, writable, onProgress = () => {}, options = {}) {
-    if (!channels.length || !frames.length) return false;
+    if (frames.rawMode || !channels.length || !frames.length || !csvChannelIndices(channels, options).length) return false;
     const encoder = new TextEncoder();
     await writable.write(encoder.encode('\uFEFF'));
     let chunk = 0;

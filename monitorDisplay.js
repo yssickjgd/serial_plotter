@@ -7,8 +7,10 @@
         timestamp: 'clock', showDirection: true, showRx: true, showTx: true, showErrors: true,
         keyword: '', keywordFormat: 'text', keywordColor: '#bc8fff', keywordCaseSensitive: false,
         rxColor: '#50b4ff', txColor: '#63ff9a', rxErrorColor: '#ffcc02', txErrorColor: '#ff5a5a',
+        rxInvalidColor: '#ffffff', rxLimitColor: '#ffcc02',
         searchCurrentColor: '#ff8c00', searchMatchColor: '#745a00',
-        foldLong: false, foldLines: 8, numericSignificantDigits: 6
+        foldLong: false, foldLines: 8, numericSignificantDigits: 6,
+        numericHiddenChannels: Object.freeze([])
     });
     const ENUMS = {
         hexBytesPerLine: ['auto', 8, 16, 32], hexGroupBytes: [1, 2, 4, 8],
@@ -18,6 +20,7 @@
         keywordFormat: ['hex', 'text']
     };
     const COLORS = new Set(['keywordColor', 'rxColor', 'txColor', 'rxErrorColor', 'txErrorColor',
+        'rxInvalidColor', 'rxLimitColor',
         'searchCurrentColor', 'searchMatchColor']);
 
     function hexKeywordPatterns(keyword) {
@@ -41,7 +44,7 @@
     function normalizeDisplayOptions(input = {}) {
         if (!input || typeof input !== 'object' || Array.isArray(input))
             throw new TypeError('Display options must be an object');
-        const result = { ...DEFAULTS };
+        const result = { ...DEFAULTS, numericHiddenChannels: [] };
         for (const key of Object.keys(DEFAULTS)) {
             if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
             let value = input[key];
@@ -60,6 +63,10 @@
             } else if (key === 'numericSignificantDigits') {
                 if (!Number.isInteger(value) || value < 1 || value > 17)
                     throw new RangeError('numericSignificantDigits must be an integer from 1 to 17');
+            } else if (key === 'numericHiddenChannels') {
+                if (!Array.isArray(value) || value.some(index => !Number.isInteger(index) || index < 0 || index >= 256))
+                    throw new RangeError('numericHiddenChannels must contain channel indices from 0 to 255');
+                value = [...new Set(value)].sort((a, b) => a - b);
             } else if (COLORS.has(key)) {
                 if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value))
                     throw new TypeError(`${key} must be a six-digit Hex color`);

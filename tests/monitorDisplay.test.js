@@ -21,13 +21,27 @@ test('display options fill missing defaults without sharing mutable input state'
         timestamp: 'clock', showDirection: true, showRx: true, showTx: true, showErrors: true,
         keyword: 'ACK\n[warn]', keywordFormat: 'text', keywordColor: '#ABC123', keywordCaseSensitive: false,
         rxColor: '#50b4ff', txColor: '#63ff9a', rxErrorColor: '#ffcc02', txErrorColor: '#ff5a5a',
+        rxInvalidColor: '#ffffff', rxLimitColor: '#ffcc02',
         searchCurrentColor: '#ff8c00', searchMatchColor: '#745a00',
-        foldLong: false, foldLines: 8, numericSignificantDigits: 6
+        foldLong: false, foldLines: 8, numericSignificantDigits: 6, numericHiddenChannels: []
     });
     assert.equal(input.hexBytesPerLine, '16');
     options.showRx = false;
     assert.equal(DEFAULTS.showRx, true);
     assert.equal(normalizeDisplayOptions().showRx, true);
+});
+
+test('numeric channel visibility validates independent saved channel indices without sharing arrays', () => {
+    const { normalizeDisplayOptions } = displayModule();
+    const input = { numericHiddenChannels: [49, 2, 2, 0] };
+    const options = normalizeDisplayOptions(input);
+    assert.deepEqual(options.numericHiddenChannels, [0, 2, 49]);
+    options.numericHiddenChannels.push(1);
+    assert.deepEqual(input.numericHiddenChannels, [49, 2, 2, 0]);
+    assert.deepEqual(normalizeDisplayOptions().numericHiddenChannels, []);
+    assert.deepEqual(normalizeDisplayOptions({ numericHiddenChannels: [50, 255] }).numericHiddenChannels, [50, 255]);
+    for (const value of [null, '0', [-1], [256], [1.5], ['1']])
+        assert.throws(() => normalizeDisplayOptions({ numericHiddenChannels: value }));
 });
 
 test('display options reject invalid known values instead of silently resetting them', () => {
@@ -85,6 +99,17 @@ test('display color options accept only six-digit Hex values and fill old saved 
         for (const value of ['red', '#abc', '#12345678', '#12fg34', '123456', null, 0])
             assert.throws(() => normalizeDisplayOptions({ [key]: value }), Error,
                 `accepted invalid ${key}: ${value}`);
+    }
+});
+
+test('RX invalid-character and frame-limit colors round-trip and validate old configurations', () => {
+    const { normalizeDisplayOptions } = displayModule();
+    const old = normalizeDisplayOptions({ rxColor: '#123456' });
+    assert.equal(old.rxInvalidColor, '#ffffff');
+    assert.equal(old.rxLimitColor, '#ffcc02');
+    for (const key of ['rxInvalidColor', 'rxLimitColor']) {
+        assert.equal(normalizeDisplayOptions({ [key]: '#abcdef' })[key], '#abcdef');
+        assert.throws(() => normalizeDisplayOptions({ [key]: 'red' }));
     }
 });
 

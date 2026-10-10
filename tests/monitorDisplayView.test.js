@@ -2,17 +2,46 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MonitorDisplayView } = require('../monitorDisplayView');
 
-function displayFixture() {
+function displayFixture(options = {}) {
     const elements = new Map();
-    const document = { getElementById(id) {
-        if (!elements.has(id)) elements.set(id, { value: '', checked: false, hidden: false,
-            textContent: '', listeners: {}, addEventListener(type, callback) { this.listeners[type] = callback; } });
+    const makeElement = () => ({ value: '', checked: false, hidden: false, children: [], style: {},
+        textContent: '', listeners: {}, addEventListener(type, callback) { this.listeners[type] = callback; },
+        removeEventListener(type, callback) { if (this.listeners[type] === callback) delete this.listeners[type]; },
+        append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; } });
+    const document = { createElement: makeElement, getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement());
         return elements.get(id);
     } };
     const applied = [];
-    const view = new MonitorDisplayView(document, { onChange: options => applied.push(options) });
+    const view = new MonitorDisplayView(document, { onChange: options => applied.push(options), ...options });
     return { view, applied, getElement: id => document.getElementById(id) };
 }
+
+test('shared channel name editor reports names independently and disposal removes static bindings', () => {
+    const names = [];
+    const { view, applied, getElement } = displayFixture({ onChannelNameChange: (index, name) => names.push([index, name]) });
+    view.setChannels([{ index: 0, name: '速度' }]);
+    const row = getElement('monitor-channel-list').children[0];
+    const editor = row.children.find(child => child.type === 'text');
+    assert.ok(editor);
+    editor.value = '温度'; editor.listeners.change();
+    assert.deepEqual(names, [[0, '温度']]); assert.deepEqual(applied, []);
+    view.dispose();
+    assert.equal(getElement('monitor-timestamp').listeners.change, undefined);
+    assert.equal(getElement('btn-monitor-channels-all-on').listeners.click, undefined);
+});
+
+test('RX character and segment color controls restore and apply independent saved values', () => {
+    const { view, applied, getElement } = displayFixture();
+    view.apply({ rxInvalidColor: '#123456', rxLimitColor: '#abcdef' });
+    assert.equal(getElement('monitor-rx-invalid-color').value, '#123456');
+    assert.equal(getElement('monitor-rx-limit-color').value, '#abcdef');
+    const control = getElement('monitor-rx-invalid-color');
+    control.value = '#fedcba'; control.listeners.input();
+    assert.equal(applied.at(-1).rxInvalidColor, '#fedcba');
+    assert.equal(applied.at(-1).rxLimitColor, '#abcdef');
+    view.dispose();
+});
 
 test('restoring display options changes controls and conditional panels without applying user edits', () => {
     const { view, applied, getElement } = displayFixture();
@@ -40,6 +69,30 @@ test('restoring display options changes controls and conditional panels without 
     view.apply();
     assert.equal(view.read().hexBytesPerLine, 'auto');
     assert.equal(getElement('monitor-fold-lines-wrap').hidden, true);
+});
+
+test('byte channel controls retain independent visibility and show channel names safely', () => {
+    const { view, applied, getElement } = displayFixture();
+    view.apply({ numericHiddenChannels: [1] });
+    view.setChannels([{ index: 0, name: '速度' }, { index: 1, name: '<img src=x>' }]);
+    const list = getElement('monitor-channel-list');
+    assert.equal(list.children[0].children[0].checked, true);
+    assert.equal(list.children[1].children[0].checked, false);
+    assert.equal(list.children[1].children[1].textContent, 'CH02 · <img src=x>');
+    const input = list.children[0].children[0];
+    input.checked = false; input.listeners.change();
+    assert.deepEqual(applied.at(-1).numericHiddenChannels, [0, 1]);
+    getElement('btn-monitor-channels-all-on').listeners.click();
+    assert.deepEqual(view.read().numericHiddenChannels, []);
+    getElement('btn-monitor-channels-all-off').listeners.click();
+    assert.deepEqual(view.read().numericHiddenChannels, [0, 1]);
+    view.setMode('text');
+    assert.equal(getElement('monitor-channel-options').hidden, true);
+    view.setMode('number');
+    assert.equal(getElement('monitor-channel-options').hidden, false);
+    assert.deepEqual(view.read().numericHiddenChannels, [0, 1]);
+    view.apply();
+    assert.equal(list.children[0].children[0].checked, true);
 });
 
 test('numeric significant digits restore and apply without accepting invalid drafts', () => {

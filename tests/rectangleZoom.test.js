@@ -7,9 +7,11 @@ function createPlotter(canvasScale = 1) {
     const events = new Map();
     const documentEvents = new Map();
     const overlays = [];
+    const transforms = [];
     const context2d = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? () => ({ width: 20 })
         : key === 'strokeRect' ? (...args) => { overlays.push(args); }
+            : key === 'setTransform' ? (...args) => { transforms.push(args); }
             : () => {} });
     const element = () => ({ style: {}, listeners: {}, offsetHeight: 0, offsetWidth: 100,
         clientWidth: 800, clientHeight: 378,
@@ -51,8 +53,74 @@ function createPlotter(canvasScale = 1) {
     const fireDocument = (name, event) => {
         for (const callback of documentEvents.get(name) || []) callback(event);
     };
-    return { plotter, fire, fireDocument, nodes, events, overlays };
+    return { plotter, fire, fireDocument, nodes, events, overlays, transforms, context };
 }
+
+test('resizing a workspace panel excludes its padding and border from the canvas dimensions', () => {
+    const { plotter, nodes, context } = createPlotter();
+    context.getComputedStyle = () => ({ paddingLeft: '5px', paddingRight: '5px',
+        paddingTop: '5px', paddingBottom: '5px', borderLeftWidth: '1px', borderRightWidth: '1px',
+        borderTopWidth: '1px', borderBottomWidth: '1px' });
+    plotter.resize();
+    assert.equal(nodes.get('waveform-canvas').width, 788);
+    assert.equal(nodes.get('waveform-canvas').height, 388);
+});
+
+test('workspace scale increases canvas resolution while keeping Y scrollbar in logical coordinates', () => {
+    const { plotter, fire, nodes } = createPlotter(2);
+    plotter.canvas.closest = () => ({ dataset: { workspaceZoom: '2' } });
+    plotter.canvas.parentElement.getBoundingClientRect = () => ({ width: 1600, height: 800, left: 10, top: 20 });
+    plotter.resize(); plotter.draw();
+    assert.equal(plotter.canvas.width, 1600); assert.equal(plotter.canvas.height, 800);
+    fire('pointerdown', 100, 100); fire('pointerup', 500, 250);
+    assert.equal(parseFloat(nodes.get('plot-y-scrollbar-wrap').style.height), 378);
+});
+
+test('high DPI workspace redraw preserves logical axes pointer coordinates and the data viewport', () => {
+    const { plotter, fire, context, transforms } = createPlotter(2);
+    const viewport = JSON.stringify(plotter.vp);
+    plotter.canvas.closest = () => ({ dataset: { workspaceZoom: '2' } });
+    plotter.canvas.parentElement.getBoundingClientRect = () => ({ width: 1600, height: 800, left: 10, top: 20 });
+    context.window.devicePixelRatio = 2;
+    plotter.resize(); plotter.draw(); plotter.draw();
+    assert.equal(plotter.canvas.width, 3200); assert.equal(plotter.canvas.height, 1600);
+    assert.equal(plotter.width, 800); assert.equal(plotter.height, 400);
+    assert.equal(plotter._drawState.plotW, 710); assert.equal(plotter._drawState.plotH, 378);
+    assert.deepEqual(transforms.at(-1), [4, 0, 0, 4, 0, 0]);
+    fire('pointermove', 200, 150);
+    assert.equal(plotter.mousePos.x, 200); assert.equal(plotter.mousePos.y, 150);
+    assert.equal(JSON.stringify(plotter.vp), viewport);
+    context.window.devicePixelRatio = 1.25;
+    plotter.resize(); plotter.draw();
+    assert.equal(plotter.canvas.width, 2000); assert.equal(plotter.canvas.height, 1000);
+    assert.deepEqual(transforms.at(-1), [2.5, 0, 0, 2.5, 0, 0]);
+});
+
+test('scaled horizontal scrollbar dragging uses logical rather than screen distance', () => {
+    const { plotter, fireDocument, nodes } = createPlotter();
+    plotter.canvas.closest = () => ({ dataset: { workspaceZoom: '2' } });
+    Object.assign(plotter.vp.time, { displayCount: 40, scrollOffset: 0, autoFollow: false });
+    nodes.get('plot-scrollbar-thumb').listeners.mousedown({ clientX: 100, preventDefault() {} });
+    fireDocument('mousemove', { clientX: 300 });
+    fireDocument('mouseup', {});
+    assert.equal(plotter.vp.time.scrollOffset, 9);
+});
+
+test('raw capture draws an empty waveform without decoding samples or calculating FFT', () => {
+    const { plotter } = createPlotter();
+    plotter.frames.clear(); plotter.frames.setRawMode(true);
+    plotter.frames.appendRaw(Uint8Array.of(1, 2), 't', 1);
+    plotter.frames.getValue = () => { throw new Error('raw capture must not read samples'); };
+    const statistics = [];
+    plotter.onStatsUpdate = value => statistics.push(value);
+    for (const displayMode of ['time', 'frequency']) {
+        plotter.setDisplayOptions({ displayMode });
+        plotter.draw();
+        assert.equal(plotter._drawState, null);
+        assert.equal(plotter._computeFftForVisibleChannels().size, 0);
+    }
+    assert.equal(statistics.at(-1), null);
+});
 
 test('wave search position follows latest data or the time window center even in frequency mode', () => {
     const { plotter, fire } = createPlotter();
@@ -86,6 +154,40 @@ test('left-button rectangle zoom selects both sample and Y ranges', () => {
     assert.equal(plotter.yBounds.time.max, 1);
     assert.ok(Math.abs(plotter._drawState.min - 21) < 1e-9);
     assert.ok(Math.abs(plotter._drawState.max - 79) < 1e-9);
+});
+
+test('user viewport callbacks cover X/Y zoom and pan in both modes and right-click reset only', () => {
+    const { plotter, fire, fireDocument, nodes } = createPlotter();
+    const changes = [];
+    plotter.onViewportChange = () => changes.push(plotter.displayMode);
+    plotter.addFrame([102], Uint8Array.of(102)); plotter.draw();
+    assert.equal(changes.length, 0);
+    for (const mode of ['time', 'frequency']) {
+        plotter.setDisplayOptions({ displayMode: mode }); plotter.draw();
+        const before = changes.length;
+        fire('wheel', 200, 100, { deltaY: -1 });
+        assert.equal(changes.length, before + 1, mode + ' X wheel');
+        plotter.draw();
+        fire('wheel', 790, 100, { deltaY: -1 });
+        assert.equal(changes.length, before + 2, mode + ' Y wheel');
+        plotter.draw();
+        nodes.get('plot-y-scrollbar-wrap').listeners.click({ clientY: 21, target: nodes.get('plot-y-scrollbar-wrap') });
+        assert.equal(changes.length, before + 3, mode + ' Y track pan');
+        nodes.get('plot-y-scrollbar-thumb').listeners.mousedown({ clientY: 21, preventDefault() {} });
+        fireDocument('mousemove', { clientY: 100 }); fireDocument('mouseup', {});
+        assert.equal(changes.length, before + 4, mode + ' Y thumb pan');
+        fire('pointerdown', 100, 100); fire('pointerup', 350, 220);
+        assert.equal(changes.length, before + 5, mode + ' rectangle zoom');
+        nodes.get('plot-scrollbar-wrap').listeners.click({ clientX: 11, target: nodes.get('plot-scrollbar-wrap') });
+        assert.equal(changes.length, before + 6, mode + ' X track pan');
+        fire('contextmenu', 0, 0);
+        assert.equal(changes.length, before + 7, mode + ' reset');
+    }
+    const count = changes.length;
+    plotter.dispose();
+    assert.equal(plotter.onViewportChange, null);
+    plotter._notifyViewportChange?.('outdated');
+    assert.equal(changes.length, count);
 });
 
 test('tiny drag and cancelled pointer leave the viewport unchanged', () => {

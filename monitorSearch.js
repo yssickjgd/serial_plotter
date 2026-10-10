@@ -85,7 +85,8 @@ class MonitorSearchSession {
         for (let frame = this.position; frame < end; frame++) {
             if (options.kind === 'number') {
                 for (const channel of this.numericChannels) {
-                    const value = frames.getValue(channel, frame);
+                    const raw = frames.getValue(channel, frame);
+                    const value = options.valueTransform ? options.valueTransform(raw, channel) : raw;
                     if (Number.isFinite(value) && Math.abs(value - options.value) <= options.tolerance)
                         this.matches.push({ startOrder: frames.orderAt(frame), endOrder: frames.orderAt(frame),
                             startFrame: frame, endFrame: frame, channel });

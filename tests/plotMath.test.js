@@ -1,5 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+test('spectral pixel buckets retain gaps even when both segments occupy one pixel', () => {
+    const points = bucketAxisExtrema([1, NaN, 2, 3], [0, 0.1, 0.2, 1]);
+    assert.ok(points.find(point => point.index === 2)?.break);
+    assert.deepEqual(points.map(point => point.index), [0, 2, 3]);
+});
 const { axisFraction, axisValueAtFraction, bucketAxisExtrema,
     bucketExtrema, csvField } = require('../plotMath');
 
@@ -90,6 +96,14 @@ test('invalid sensor values do not become canvas coordinates', () => {
     assert.deepEqual(bucketExtrema([0, NaN, Infinity, 2], 2), [
         { index: 0, value: 0 }, { index: 3, value: 2 }
     ]);
+});
+
+test('decimated trace retains breaks inside a pixel bucket', () => {
+    const { bucketTraceExtrema } = require('../plotMath');
+    assert.equal(typeof bucketTraceExtrema, 'function');
+    const points = bucketTraceExtrema([1, 2, NaN, 3, 4, NaN, 5], 1);
+    assert.deepEqual(points.filter(point => point.break).map(point => point.index), [3, 6]);
+    assert.ok(points.every(point => Number.isFinite(point.value)));
 });
 
 test('CSV channel names with separators, quotes or line breaks are escaped', () => {

@@ -20,6 +20,8 @@ class SerialEngine {
         this.readTask = null;
         this._closing = null;
         this._connected = false;
+        this._generation = 0;
+        this._disposed = false;
         this.onDataCallback = null;
         this.onConnectStatusChange = null;
         this._onSerialDisconnect = (event) => {
@@ -44,17 +46,27 @@ class SerialEngine {
 
     /** 请求用户选择串口并打开，成功后启动 readLoop 持续读取 */
     async connect(config) {
+        if (this._disposed) throw new Error('串口适配器已销毁');
         if (!('serial' in navigator)) {
             throw new Error('当前浏览器不支持 Web Serial API');
         }
+        const generation = ++this._generation;
+        const cancelled = () => {
+            const error = new Error('串口连接已取消'); error.name = 'AbortError'; return error;
+        };
         try {
             const port = await navigator.serial.requestPort();
+            if (generation !== this._generation || this._disposed) throw cancelled();
             await port.open({
                 baudRate: config.baudRate || 115200,
                 dataBits: config.dataBits || 8,
                 stopBits: config.stopBits || 1,
                 parity:   config.parity   || 'none'
             });
+            if (generation !== this._generation || this._disposed) {
+                try { await port.close(); } catch { /* The cancelled port must never become active. */ }
+                throw cancelled();
+            }
             this.port = port;
             this.keepReading = true;
             this.readTask = this.readLoop();
@@ -62,15 +74,16 @@ class SerialEngine {
             if (this.onConnectStatusChange) this.onConnectStatusChange(true);
             return true;
         } catch (error) {
-            this.port = null;
+            if (generation === this._generation) this.port = null;
             throw error;
         }
     }
 
     /** 安全断开串口：取消读取 → 释放读取器 → 关闭端口 → 通知状态 */
     async disconnect() {
+        this._generation++;
         if (this._closing) return this._closing;
-        this._closing = (async () => {
+        const closing = (async () => {
             this.keepReading = false;
             try { if (this.reader) await this.reader.cancel(); } catch (_) {}
             try { if (this.readTask) await this.readTask; } catch (_) {}
@@ -81,9 +94,18 @@ class SerialEngine {
                 this._connected = false;
                 if (this.onConnectStatusChange) this.onConnectStatusChange(false);
             }
-            this._closing = null;
         })();
-        return this._closing;
+        this._closing = closing;
+        try { await closing; }
+        finally { if (this._closing === closing) this._closing = null; }
+    }
+
+    async dispose() {
+        this._disposed = true;
+        navigator.serial?.removeEventListener?.('disconnect', this._onSerialDisconnect);
+        this.onDataCallback = null;
+        this.onConnectStatusChange = null;
+        await this.disconnect();
     }
 
     /** 强制断开（接口与 NetEngine 保持一致，内部委托给 disconnect） */

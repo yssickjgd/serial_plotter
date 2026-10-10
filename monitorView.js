@@ -12,7 +12,7 @@ const monitorChannelId = typeof module !== 'undefined'
 
 function monitorPrefix(row, options, frames) {
     const direction = row.kind === 'rx' || row.kind === 'error' ? 'RX' : 'TX';
-    const reason = row.reason || (row.incomplete ? '帧未完整' : '');
+    const reason = row.reason || (row.endReason === 'limit' ? '超限' : row.incomplete ? '帧未完整' : '');
     let time = row.time;
     if (options.timestamp === 'none') time = '';
     else if (options.timestamp === 'relative' && Number.isFinite(row.timestamp) && Number.isFinite(frames?.originTimestamp))
@@ -197,9 +197,12 @@ function compactVisibleParts(data, lineStarts, firstLine, lastLine) {
 function decodedRowFields(row, frames, options = monitorDisplayUtils.DEFAULTS) {
     if (row.kind !== 'rx' || row.frameIndex === undefined) return null;
     const fields = [];
-    for (let channel = 0; channel < frames.channelCount; channel++)
+    for (let channel = 0; channel < frames.channelCount; channel++) {
+        if (frames.isSignal && !frames.isSignal(channel)) continue;
+        if (options.numericHiddenChannels?.includes(channel)) continue;
         fields.push({ text: `${monitorChannelId(channel)}=${monitorNumberUtils.formatScientificValue(
             frames.getValue(channel, row.frameIndex), options.numericSignificantDigits)}`, channel });
+    }
     return fields;
 }
 
@@ -215,7 +218,7 @@ function monitorRowLayout(row, columns, mode = 'hex', frames = null, textTokens 
     }
     const fields = mode === 'number' && frames ? decodedRowFields(row, frames, options) : null;
     if (fields) return { prefix, byteMode: 'number',
-        ...monitorNumberUtils.buildNumericRowLayout(fields, bodyColumns) };
+        ...monitorNumberUtils.buildNumericRowLayout(fields, bodyColumns, null, options.numericSignificantDigits) };
     const byteMode = mode === 'ascii' ? 'ascii' : 'hex';
     if (byteMode === 'hex') return { prefix,
         ...monitorDisplayUtils.hexRowLayout(row.bytes.length, bodyColumns, options,
@@ -268,9 +271,100 @@ function visibleTextParts(parts, firstLine, lastLine) {
     return parts.slice(start, end);
 }
 
+/** A random-access merge of sorted stores; payloads are fetched only for requested rows. */
+class MonitorRecordIndex {
+    constructor(sources) {
+        this.sources = sources.filter(source => source.length);
+        this.length = this.sources.reduce((sum, source) => sum + source.length, 0);
+    }
+
+    _bound(source, order, inclusive = false) {
+        let low = 0, high = source.length;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2), value = source.orderAt(mid);
+            if (value < order || inclusive && value === order) low = mid + 1;
+            else high = mid;
+        }
+        return low;
+    }
+
+    indexAtOrAfterOrder(order) {
+        return Math.min(Math.max(0, this.length - 1), this.sources.reduce((sum, source) => sum + this._bound(source, order), 0));
+    }
+
+    _rank(sourceIndex, index) {
+        const order = this.sources[sourceIndex].orderAt(index);
+        return this.sources.reduce((sum, source, other) => sum + (other === sourceIndex ? index
+            : this._bound(source, order, other < sourceIndex)), 0);
+    }
+
+    _locate(rank) {
+        if (rank < 0 || rank >= this.length) return null;
+        if (this.sources.length === 1) return { sourceIndex: 0, index: rank };
+        for (let sourceIndex = 0; sourceIndex < this.sources.length; sourceIndex++) {
+            let low = 0, high = this.sources[sourceIndex].length;
+            while (low < high) {
+                const mid = Math.floor((low + high) / 2), position = this._rank(sourceIndex, mid);
+                if (position === rank) return { sourceIndex, index: mid };
+                if (position < rank) low = mid + 1; else high = mid;
+            }
+        }
+        return null;
+    }
+
+    orderAt(rank) {
+        const found = this._locate(rank);
+        return found ? this.sources[found.sourceIndex].orderAt(found.index) : NaN;
+    }
+
+    itemAt(rank) { return this.slice(rank, rank + 1)[0]; }
+
+    between(firstOrder, lastOrder) {
+        return new MonitorRecordIndex(this.sources.map(source => {
+            const first = this._bound(source, firstOrder), end = this._bound(source, lastOrder, true);
+            return { length: end - first, orderAt: index => source.orderAt(first + index),
+                itemAt: index => source.itemAt(first + index) };
+        }));
+    }
+
+    slice(start, end) {
+        const found = this._locate(start);
+        if (!found) return [];
+        const order = this.sources[found.sourceIndex].orderAt(found.index);
+        const positions = this.sources.map((source, index) => index === found.sourceIndex ? found.index
+            : this._bound(source, order, index < found.sourceIndex));
+        const rows = [];
+        for (let rank = start; rank < Math.min(this.length, end); rank++) {
+            let best = -1, firstOrder = Infinity;
+            for (let index = 0; index < positions.length; index++) {
+                if (positions[index] >= this.sources[index].length) continue;
+                const candidate = this.sources[index].orderAt(positions[index]);
+                if (candidate < firstOrder) { best = index; firstOrder = candidate; }
+            }
+            if (best < 0) break;
+            rows.push({ ...this.sources[best].itemAt(positions[best]++), recordIndex: rank });
+        }
+        return rows;
+    }
+}
+
 class MonitorView {
-    constructor(container, frames) {
+    constructor(container, frames, options = {}) {
+        this._listeners = [];
+        this._rowListeners = [];
+        this._yieldTasks = new Map();
+        this._disposed = false;
+        this.isVisible = true;
+        this._inViewport = true;
+        this.decodeCache = options.decodeCache ?? null;
+        this.prepareRecord = options.prepareRecord ?? null;
+        this.txFrames = options.txFrames ?? null;
+        this.getSourceErrors = options.getSourceErrors ?? (() => []);
         this.container = container;
+        this.document = container.ownerDocument ?? document;
+        this._selectingText = false;
+        this._selectionHold = false;
+        this._renderDeferred = false;
         this.frames = frames;
         this.extras = [];
         this.rowHeight = 20;
@@ -279,6 +373,10 @@ class MonitorView {
         this.pendingAnimationFrame = false;
         this.followTail = true;
         this._renderedScrollTop = container.scrollTop;
+        this._scrollGeometry = null;
+        this._scrollSession = null;
+        this._scrollPointerDown = false;
+        this._scrollFinishTimer = null;
         this.anchor = null;
         this.lastRows = [];
         this.lastOffsets = [0];
@@ -300,56 +398,221 @@ class MonitorView {
         this.matches = [];
         this.currentMatch = -1;
         this.cursorOrder = null;
+        this.cursorByteOffset = null;
         this.largeThreshold = 2000;
         this.centerPadding = 0;
-        this.spacer = document.createElement('div');
+        this.spacer = (this.document ?? document).createElement('div');
         this.spacer.className = 'monitor-spacer';
         // Long virtual rows must not extend the browser's scroll range past the spacer.
         this.spacer.style.overflow = 'clip';
         container.replaceChildren(this.spacer);
-        const probe = document.createElement('span');
+        const probe = (this.document ?? document).createElement('span');
         if (probe.getBoundingClientRect) {
             probe.className = 'monitor-measure';
             probe.textContent = '0000000000';
             this.spacer.appendChild(probe);
-            const width = probe.getBoundingClientRect().width;
+            const displayScale = Number(container.closest?.('.workspace-surface')?.dataset.workspaceZoom) || 1;
+            const width = probe.getBoundingClientRect().width / displayScale;
             if (width > 0) this.charWidth = width / 10;
             this.spacer.replaceChildren();
         }
-        container.addEventListener('scroll', () => {
+        this._listen(container, 'scroll', () => {
             if (this._settingScroll ||
                 Math.abs(container.scrollTop - this._renderedScrollTop) <= 1) return;
+            if (this._logSelection()) this._holdSelectionView();
             const bottom = Math.max(0, container.scrollHeight - container.clientHeight);
-            this.followTail = bottom - container.scrollTop <= 1;
+            this._beginScrollSession();
+            const geometry = this._scrollSession?.geometry ?? this._scrollGeometry;
+            this.followTail = !this._selectionHold && bottom - container.scrollTop <= 1;
             if (this.followTail) {
                 this.anchor = null;
-            } else if (this._usesLargeLayout()) {
+            } else if (geometry?.large) {
+                const records = this._records().between(geometry.firstOrder, geometry.lastOrder);
                 const maxScroll = Math.max(1, bottom);
-                const position = Math.max(0, Math.min(this.frames.length - 1,
-                    container.scrollTop / maxScroll * (this.frames.length - 1)));
+                const position = Math.max(0, Math.min(records.length - 1,
+                    container.scrollTop / maxScroll * (records.length - 1)));
                 const index = Math.floor(position);
                 this.anchor = {
-                    order: this.frames.orderAt(index),
+                    order: records.orderAt(index),
                     fraction: position - index,
                     center: this.anchor?.center ?? false
                 };
-            } else if (this.lastRows.length) {
-                const index = Math.min(this.lastRows.length - 1,
-                    firstRowAt(this.lastOffsets, container.scrollTop));
+            } else if (geometry?.rows.length) {
+                const index = Math.min(geometry.rows.length - 1,
+                    firstRowAt(geometry.offsets, container.scrollTop));
                 this.anchor = {
-                    order: this.lastRows[index].order,
-                    within: container.scrollTop - this.lastOffsets[index]
+                    order: geometry.rows[index].order,
+                    within: container.scrollTop - geometry.offsets[index]
                 };
             }
-            this.render();
+            if (!this._selectingText && this._logSelection()) this._releaseTextSelection();
+            this.render({ userAction: true });
+            if (this.followTail && !this._scrollPointerDown) this._finishScrollSession();
+            else if (!this._scrollPointerDown && !('onscrollend' in container)) {
+                clearTimeout(this._scrollFinishTimer);
+                this._scrollFinishTimer = setTimeout(() => this._finishScrollSession(), 250);
+            }
         });
+        this._listen(container, 'scrollend', () => {
+            if (!this._scrollPointerDown) this._finishScrollSession();
+        });
+        this._listen(container, 'contextmenu', event => {
+            event.preventDefault();
+            this.followLatest();
+        });
+        this._listen(container, 'wheel', event => {
+            if (!this._scrollPointerDown) this._finishScrollSession();
+            if (event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY || this.mode === 'number' ||
+                !this._usesLargeLayout() || this._logSelection()) return;
+            const delta = event.deltaY * (event.deltaMode === 1 ? this.rowHeight : event.deltaMode === 2 ? container.clientHeight : 1);
+            if (this._scrollVirtualBy(delta)) event.preventDefault();
+        }, { passive: false });
+        this._listen(container, 'pointerdown', event => {
+            if (event.button === 0 && event.target?.closest?.('.monitor-prefix, .monitor-data'))
+                this._selectingText = true;
+            else if (event.button === 0 && this._isScrollbarPointer(event)) {
+                this._beginScrollSession();
+                this._scrollPointerDown = true;
+            }
+        });
+        const finishSelection = () => {
+            this._selectingText = false;
+            if (this._scrollPointerDown) {
+                this._scrollPointerDown = false;
+                this._finishScrollSession();
+            }
+            this._resumeDeferredRender();
+        };
+        this._listen(this.document, 'pointerup', finishSelection);
+        this._listen(this.document, 'pointercancel', finishSelection);
+        this._listen(this.document.defaultView, 'blur', finishSelection);
+        this._listen(this.document, 'selectionchange', () => this._resumeDeferredRender());
         if (typeof ResizeObserver !== 'undefined') {
-            this.resizeObserver = new ResizeObserver(() => this.render());
+            this.resizeObserver = new ResizeObserver(() => this.render({ userAction: true }));
             this.resizeObserver.observe(container);
+        }
+        if (typeof IntersectionObserver !== 'undefined') {
+            this.intersectionObserver = new IntersectionObserver(entries => {
+                this._inViewport = entries.at(-1)?.isIntersecting !== false;
+                if (this._inViewport) this.schedule();
+                else { this._cancelScheduledRender(); this._cancelTextPreparation(); }
+            });
+            this.intersectionObserver.observe(container);
         }
     }
 
+    _listen(target, name, listener, options, rows = false) {
+        if (!target?.addEventListener) return;
+        target.addEventListener(name, listener, options);
+        (rows ? this._rowListeners : this._listeners).push(() => target.removeEventListener?.(name, listener, options));
+    }
+
+    _clearRowListeners() {
+        for (const remove of this._rowListeners.splice(0)) remove();
+    }
+
+    _yieldControl() {
+        return new Promise(resolve => {
+            const id = setTimeout(() => { this._yieldTasks.delete(id); resolve(); }, 0);
+            this._yieldTasks.set(id, resolve);
+        });
+    }
+
+    _cancelTextPreparation() {
+        this.textPreparationVersion++;
+        this.textPreparation = null;
+        for (const [id, resolve] of this._yieldTasks) { clearTimeout(id); resolve(); }
+        this._yieldTasks.clear();
+    }
+
+    setFrames(frames, { deferRender = false } = {}) {
+        if (this._disposed || this.frames === frames) return;
+        this._cancelScheduledRender();
+        this._cancelTextPreparation();
+        this.frames = frames;
+        this.lastRows = [];
+        this.lastOffsets = [0];
+        this.rowPositions = [];
+        this.clear({ deferRender });
+    }
+
+    setVisible(visible) {
+        if (this._disposed) return;
+        this.isVisible = !!visible;
+        if (this.isVisible) this.schedule();
+        else { this._cancelScheduledRender(); this._cancelTextPreparation(); }
+    }
+
+    dispose() {
+        if (this._disposed) return;
+        this._disposed = true;
+        clearTimeout(this._scrollFinishTimer);
+        this._scrollSession = null;
+        this._scrollGeometry = null;
+        this._cancelScheduledRender();
+        this._cancelTextPreparation();
+        for (const remove of this._listeners.splice(0)) remove();
+        this._clearRowListeners();
+        this.resizeObserver?.disconnect();
+        this.intersectionObserver?.disconnect();
+        this.preparedText = null;
+        this.textCache.clear();
+        this.textLayouts.clear();
+        this.textStates.clear();
+    }
+
     appendFrame() { this.schedule(); }
+    invalidateData() { this.schedule(); }
+    onDataChanged() { this.schedule(); }
+
+    _logSelection() {
+        const selection = this.document.getSelection?.();
+        return selection && !selection.isCollapsed &&
+            (this.container.contains?.(selection.anchorNode) || this.container.contains?.(selection.focusNode))
+            ? selection : null;
+    }
+
+    _resumeDeferredRender() {
+        if (this._logSelection()) this._holdSelectionView();
+        if (this._renderDeferred && !this._selectionHold && !this._selectingText) this.schedule();
+    }
+
+    _holdSelectionView() {
+        if (this._selectionHold) return;
+        this._selectionHold = true;
+        this.followTail = false;
+        // Anchor to the records actually displayed, including when new frames have
+        // already arrived but have not yet been painted.
+        if (this.anchor || !this.lastRows.length) return;
+        if (this.lastOffsets.length > 1) {
+            const index = Math.min(this.lastRows.length - 1,
+                firstRowAt(this.lastOffsets, this.container.scrollTop));
+            this.anchor = { order: this.lastRows[index].order,
+                within: this.container.scrollTop - this.lastOffsets[index] };
+        } else {
+            const row = this.lastRows.at(-1);
+            if (row) this.anchor = { order: row.order, fraction: 0, center: false };
+        }
+    }
+
+    _releaseTextSelection() {
+        this._selectingText = false;
+        this._logSelection()?.removeAllRanges();
+    }
+
+    /** Return to live following without discarding records, filters or search results. */
+    followLatest() {
+        this._resetScrollSession();
+        this._selectionHold = false;
+        this._releaseTextSelection();
+        this.followTail = true;
+        this.anchor = null;
+        this.cursorOrder = null;
+        this.cursorByteOffset = null;
+        this.revealOrder = null;
+        this.centerPadding = 0;
+        this.render();
+    }
 
     /** Search from the latest frame or the sample nearest the visible log midpoint. */
     currentFrameIndex() {
@@ -376,6 +639,105 @@ class MonitorView {
         return nearest;
     }
 
+    /** Reference the source byte on the actual wrapped line at the viewport midpoint. */
+    getReferenceByteOffset() {
+        const index = this.currentFrameIndex();
+        if (index < 0) return null;
+        const start = this.frames.rawByteOffsetAt(index);
+        if (this.followTail) return start ?? null;
+        const position = this.rowPositions.find(row => row.frameIndex === index);
+        if (!position) return start ?? null;
+        const row = { ...this.frames.frameAt(index), frameIndex: index };
+        const layout = this._rowLayout(row, this._columns());
+        const css = typeof getComputedStyle === 'function' ? getComputedStyle(this.container) : null;
+        const padding = (parseFloat(css?.paddingTop) || 0) + (parseFloat(css?.paddingBottom) || 0);
+        const center = this.container.scrollTop + (this.container.clientHeight - padding) / 2;
+        const line = Math.max(0, Math.min(layout.lineCount - 1,
+            Math.floor((center - position.top) / this.rowHeight)));
+        return (start ?? 0) + this._byteAtLine(row, layout, line);
+    }
+
+    _byteAtLine(row, layout, line) {
+        if (layout.byteMode === 'number') return 0;
+        if (layout.hex) {
+            const parts = monitorDisplayUtils.hexVisibleParts(row.bytes, { ...layout, firstLine: line, lastLine: line + 1 });
+            const part = parts.find(part => Number.isInteger(part.byteIndex));
+            return part?.byteIndex ?? Math.min(row.bytes.length - 1,
+                Math.floor(line / layout.linesPerBlock) * layout.bytesPerLine);
+        }
+        if (layout.byteMode === 'text' && !layout.unprepared) {
+            const parts = layout.data ? compactVisibleParts(layout.data, layout.lineStarts, line, line + 1)
+                : visibleTextParts(layout.parts, line, line + 1);
+            const token = parts.find(part => part.token)?.token;
+            return token?.startByte ?? Math.max(0, row.bytes.length - 1);
+        }
+        const columns = layout.bytesPerLine ?? Math.max(2, this._columns() - textCells(layout.prefix));
+        return Math.max(0, Math.min(row.bytes.length - 1, line * columns));
+    }
+
+    _lineAtByte(row, layout, byte) {
+        if (layout.byteMode === 'number') return 0;
+        if (layout.hex) {
+            let line = Math.floor(byte / layout.bytesPerLine) * layout.linesPerBlock;
+            const parts = monitorDisplayUtils.hexVisibleParts(row.bytes,
+                { ...layout, firstLine: line, lastLine: line + layout.linesPerBlock });
+            for (const part of parts) {
+                if (part.byteIndex === byte) return line;
+                if (part.text === '\n') line++;
+            }
+            return Math.min(layout.lineCount - 1, line);
+        }
+        if (layout.data) {
+            let character = layout.data.length - 1;
+            for (const chunk of layout.data.chunks) {
+                if (chunk.ends.at(-1) <= byte) continue;
+                const local = chunk.ends.findIndex(end => end > byte);
+                if (local >= 0) { character = chunk.base + local; break; }
+            }
+            let low = 0, high = layout.lineStarts.length;
+            while (low < high) {
+                const mid = Math.floor((low + high) / 2);
+                if (layout.lineStarts[mid] <= character) low = mid + 1;
+                else high = mid;
+            }
+            return Math.max(0, low - 1);
+        }
+        if (layout.byteMode === 'text' && !layout.unprepared) {
+            let line = 0;
+            for (const part of layout.parts) {
+                if (part.token?.endByte > byte) return line;
+                if (part.text === '\n') line++;
+            }
+            return line;
+        }
+        const columns = layout.bytesPerLine ?? Math.max(2, this._columns() - textCells(layout.prefix));
+        return Math.floor(byte / columns);
+    }
+
+    jumpToByteOffset(offset) {
+        if (this._disposed || !Number.isFinite(offset) || !this.frames.length) return false;
+        let low = 0, high = this.frames.length;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (this.frames.rawByteOffsetAt(mid) <= offset) low = mid + 1;
+            else high = mid;
+        }
+        const index = low - 1;
+        if (index < 0 || offset >= this.frames.rawByteOffsetAt(index) + this.frames.rawBytesAt(index).length)
+            return false;
+        this._releaseTextSelection();
+        this.followTail = false;
+        this.revealOrder = this.frames.orderAt(index);
+        this.cursorOrder = this.revealOrder;
+        this.cursorByteOffset = offset;
+        if (this.expandedRows.size >= 256) this.expandedRows.delete(this.expandedRows.values().next().value);
+        this.expandedRows.add(this.revealOrder);
+        this.anchor = { order: this.revealOrder, center: true, byteOffset: offset };
+        this.centerPadding = Math.ceil(this.container.clientHeight / 2);
+        this.render({ userAction: true });
+        return true;
+    }
+
     _setScrollTop(value) {
         this._settingScroll = true;
         this.container.scrollTop = value;
@@ -383,11 +745,94 @@ class MonitorView {
         this._settingScroll = false;
     }
 
+    _isScrollbarPointer(event) {
+        const container = this.container;
+        if (event.target !== container || !Number.isFinite(event.clientX) ||
+            !(container.offsetWidth > container.clientWidth) || container.scrollHeight <= container.clientHeight) return false;
+        const rect = container.getBoundingClientRect();
+        const border = container.clientLeft || 0;
+        const scrollbar = container.offsetWidth - container.clientWidth - border * 2;
+        return scrollbar > 0 && event.clientX >= rect.right - (scrollbar + border) * rect.width / container.offsetWidth;
+    }
+
+    _beginScrollSession() {
+        if (!this._scrollSession && this._scrollGeometry)
+            this._scrollSession = { geometry: this._scrollGeometry };
+    }
+
+    _resetScrollSession() {
+        clearTimeout(this._scrollFinishTimer);
+        this._scrollFinishTimer = null;
+        this._scrollSession = null;
+        this._scrollPointerDown = false;
+    }
+
+    _finishScrollSession() {
+        if (!this._scrollSession || this._disposed) return;
+        this._resetScrollSession();
+        this.render({ userAction: true });
+    }
+
+    _captureScrollGeometry(records, large) {
+        this._scrollGeometry = { large, firstOrder: records.orderAt(0), lastOrder: records.orderAt(records.length - 1),
+            height: this.spacer.style.height, rows: this.lastRows, offsets: this.lastOffsets };
+    }
+
+    /** Grow the live scroll range without replacing DOM nodes belonging to a native selection. */
+    _updateHeldScrollRange() {
+        // A pressed scrollbar must keep its original track and record mapping until release.
+        if (this._scrollSession) return;
+        const records = this._records(), container = this.container;
+        const large = records.length > this.largeThreshold;
+        const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
+        const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
+        const columns = this._layoutColumns(Math.max(2, Math.floor((container.clientWidth - padding) / this.charWidth)));
+        let rows = [], offsets = [], height, target = container.scrollTop;
+        const painted = this.rowPositions.find(row => row.top + row.height > container.scrollTop);
+        const order = painted?.order ?? this.anchor?.order;
+        const within = painted ? container.scrollTop - painted.top : this.anchor?.within ?? 0;
+        const index = Number.isFinite(order) && records.length ? records.indexAtOrAfterOrder(order) : 0;
+        if (large) {
+            const sample = records.itemAt(0);
+            const rowHeight = this._foldLayout(sample, this._rowLayout(sample, columns, true)).lineCount * this.rowHeight;
+            height = Math.min(8_000_000, Math.max(container.clientHeight, records.length * rowHeight));
+            const row = records.itemAt(index);
+            const anchorHeight = this._foldLayout(row, this._rowLayout(row, columns, true)).lineCount * this.rowHeight;
+            const position = index + Math.max(0, Math.min(1, within / anchorHeight));
+            target = Math.max(0, height - container.clientHeight) * position / Math.max(1, records.length - 1);
+        } else {
+            rows = records.slice(0, records.length);
+            const layouts = this._rowLayouts(rows, columns);
+            offsets = [this.centerPadding];
+            for (let i = 0; i < rows.length; i++)
+                offsets.push(offsets[i] + layouts[i].lineCount * this.rowHeight);
+            height = offsets.at(-1) + this.centerPadding;
+            if (rows.length && Number.isFinite(order)) target = offsets[index] + within;
+        }
+        const oldTop = container.scrollTop;
+        this.spacer.style.height = `${height}px`;
+        this._setScrollTop(Math.max(0, Math.min(target, container.scrollHeight - container.clientHeight)));
+        const shift = container.scrollTop - oldTop;
+        if (shift) {
+            for (const node of this.spacer.children) {
+                const top = parseFloat(node.style.top);
+                if (Number.isFinite(top)) node.style.top = `${top + shift}px`;
+            }
+            for (const row of this.rowPositions) row.top += shift;
+            this.lastOffsets = this.lastOffsets.map(offset => offset + shift);
+        }
+        this._scrollGeometry = { large, firstOrder: records.orderAt(0), lastOrder: records.orderAt(records.length - 1),
+            height: this.spacer.style.height, rows, offsets };
+    }
+
     setMode(mode, { deferRender = false } = {}) {
         if (!['hex', 'ascii', 'number', 'text'].includes(mode)) throw new RangeError('监视台显示格式无效');
-        if (this.mode !== mode) this.numberAlignment = null;
+        if (this.mode !== mode) {
+            this._releaseTextSelection();
+            this.numberAlignment = null;
+        }
         this.mode = mode;
-        if (!deferRender) this.render();
+        if (!deferRender) this.render({ userAction: true });
     }
 
     _displayOptions() { return this.displayOptions ?? monitorDisplayUtils.DEFAULTS; }
@@ -398,7 +843,73 @@ class MonitorView {
 
     _layoutColumns(columns) { return Math.max(2, columns - this._foldColumns(columns)); }
 
-    _usesLargeLayout() { return this.frames.length > this.largeThreshold && this._displayOptions().showRx; }
+    _records() {
+        const sources = [], options = this._displayOptions();
+        const frames = this.frames;
+        if (options.showRx) sources.push({ length: frames.length, orderAt: index => frames.orderAt(index),
+            itemAt: index => ({ ...frames.frameAt(index), frameIndex: index }) });
+        else if (this.revealOrder !== null && frames.length) {
+            const index = frames.indexAtOrAfterOrder(this.revealOrder);
+            if (frames.orderAt(index) === this.revealOrder) sources.push({ length: 1,
+                orderAt: () => this.revealOrder, itemAt: () => ({ ...frames.frameAt(index), frameIndex: index }) });
+        }
+        if (options.showTx && this.txFrames) {
+            const tx = this.txFrames;
+            sources.push({ length: tx.length, orderAt: index => tx.orderAt(index),
+                itemAt: index => ({ ...tx.frameAt(index), kind: 'tx' }) });
+        }
+        if (options.showRx && options.showErrors) {
+            const errors = this.getSourceErrors();
+            sources.push({ length: errors.length, orderAt: index => errors[index].order,
+                itemAt: index => ({ ...errors[index], kind: 'error', bytes: errors[index].bytes ?? new Uint8Array(0) }) });
+        }
+        const extras = this.extras.filter(row => this._rowVisible(row)).sort((a, b) => a.order - b.order);
+        sources.push({ length: extras.length, orderAt: index => extras[index].order, itemAt: index => extras[index] });
+        return new MonitorRecordIndex(sources);
+    }
+
+    _usesLargeLayout() { return this._records().length > this.largeThreshold; }
+
+    /** Wheel movement uses actual nearby line heights; the compressed scrollbar remains a coarse history navigator. */
+    _scrollVirtualBy(delta) {
+        let records = this._records();
+        const geometry = this._scrollSession?.geometry;
+        if (geometry) records = records.between(geometry.firstOrder, geometry.lastOrder);
+        const container = this.container;
+        if (!records.length || !this.rowPositions.length) return false;
+        const target = container.scrollTop + delta;
+        const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
+        const contentHeight = container.clientHeight - (parseFloat(css?.paddingTop) || 0) - (parseFloat(css?.paddingBottom) || 0);
+        const last = this.rowPositions.find(row => row.order === records.orderAt(records.length - 1));
+        if (delta > 0 && !this._selectionHold && last && target >= last.top + last.height - contentHeight) {
+            this.followLatest(); return true;
+        }
+        const row = this.rowPositions.find(row => row.top <= container.scrollTop && row.top + row.height > container.scrollTop)
+            ?? this.rowPositions.find(row => row.top + row.height > container.scrollTop);
+        if (!row) return false;
+        let index = records.indexAtOrAfterOrder(row.order), within = target - row.top;
+        const columns = this._columns(), known = new Map(this.rowPositions.map(row => [row.order, row.height]));
+        const heightAt = index => {
+            const order = records.orderAt(index);
+            if (known.has(order)) return known.get(order);
+            const row = records.itemAt(index);
+            return this._foldLayout(row, this._rowLayout(row, columns, true)).lineCount * this.rowHeight;
+        };
+        while (within < 0 && index > 0) within += heightAt(--index);
+        within = Math.max(0, within);
+        let height = heightAt(index);
+        while (within >= height && index < records.length - 1) {
+            within -= height; height = heightAt(++index);
+        }
+        if (index === records.length - 1 && delta > 0 && !this._selectionHold && within >= Math.max(0, height - contentHeight)) {
+            this.followLatest(); return true;
+        }
+        within = Math.min(within, Math.max(0, height - 1));
+        this.followTail = false;
+        this.anchor = { order: records.orderAt(index), within, fraction: within / height, center: false };
+        this.render({ userAction: true });
+        return true;
+    }
 
     _textDisplayKey(options = this.displayOptions ?? monitorDisplayUtils.DEFAULTS) {
         return `${options.textInvalid}:${options.textNewline}:${options.textTab}`;
@@ -407,7 +918,14 @@ class MonitorView {
     setDisplayOptions(options = {}, { deferRender = false } = {}) {
         monitorDisplayUtils.normalizeDisplayOptions(options);
         const next = monitorDisplayUtils.normalizeDisplayOptions({ ...this.displayOptions, ...options });
-        if (next.numericSignificantDigits !== this._displayOptions().numericSignificantDigits)
+        // Search colors also update on widget activation; preserve the row being selected.
+        const previous = this._displayOptions();
+        const displayChanged = Object.keys(next).some(key =>
+            !['searchMatchColor', 'searchCurrentColor'].includes(key) &&
+            JSON.stringify(next[key]) !== JSON.stringify(previous[key]));
+        if (displayChanged) this._releaseTextSelection();
+        if (next.numericSignificantDigits !== this._displayOptions().numericSignificantDigits ||
+            next.numericHiddenChannels.join(',') !== this._displayOptions().numericHiddenChannels.join(','))
             this.numberAlignment = null;
         if (this._textDisplayKey(next) !== this._textDisplayKey()) {
             this.textLayouts.clear();
@@ -415,9 +933,16 @@ class MonitorView {
             this.textPreparationVersion++;
             this.textPreparation = null;
         }
+        const geometryChanged = ['foldLong', 'foldLines', 'hexBytesPerLine', 'hexGroupBytes', 'hexOffset', 'hexAscii',
+            'textInvalid', 'textNewline', 'textTab', 'timestamp', 'showDirection', 'numericSignificantDigits', 'numericHiddenChannels']
+            .some(key => JSON.stringify(next[key]) !== JSON.stringify(previous[key]));
+        if (geometryChanged && !this.followTail && !this.anchor?.center) {
+            const row = this.rowPositions.find(row => row.top <= this.container.scrollTop && row.top + row.height > this.container.scrollTop);
+            if (row) this.anchor = { order: row.order, within: this.container.scrollTop - row.top, center: false };
+        }
         this.displayOptions = next;
         this._cancelScheduledRender();
-        if (!deferRender) this.render();
+        if (!deferRender) this.render({ userAction: true });
     }
 
     _rowVisible(row) {
@@ -434,14 +959,16 @@ class MonitorView {
     }
 
     setEncoding(encoding, { deferRender = false } = {}) {
-        this.encoding = monitorTextUtils.normalizeTextEncoding(encoding);
+        const next = monitorTextUtils.normalizeTextEncoding(encoding);
+        this._releaseTextSelection();
+        this.encoding = next;
         this.textCache.clear();
         this.textLayouts.clear();
         this.textStates.clear();
         this.textCheckpoints.length = 0;
         this.preparedText = null;
-        this.textPreparationVersion++;
-        if (!deferRender) this.render();
+        this._cancelTextPreparation();
+        if (!deferRender) this.render({ userAction: true });
     }
 
     _columns() {
@@ -453,8 +980,11 @@ class MonitorView {
 
     /** Build text metadata offscreen, leaving the installed display unchanged until commit. */
     async prepareText(frames, encoding, { onProgress = () => {}, isCancelled = () => false,
-        yieldControl = () => new Promise(resolve => setTimeout(resolve, 0)), targetIndex = frames.length - 1,
-        prepareRecord = null } = {}) {
+        yieldControl = () => this._yieldControl(), targetIndex = frames.length - 1,
+        prepareRecord = this.prepareRecord } = {}) {
+        const version = this.textPreparationVersion, callerCancelled = isCancelled;
+        isCancelled = () => this._disposed || version !== this.textPreparationVersion || callerCancelled();
+        if (isCancelled()) return null;
         encoding = monitorTextUtils.normalizeTextEncoding(encoding);
         const displayOptions = { ...this.displayOptions };
         const state = { encoding, displayKey: this._textDisplayKey(displayOptions),
@@ -594,13 +1124,14 @@ class MonitorView {
     }
 
     installPreparedText(state) {
+        if (this._disposed) return;
         this.preparedText = state;
         this.textCache.clear();
         this.textLayouts.clear();
     }
 
     _prepareMissingText(row) {
-        if (this.textPreparation) return;
+        if (this._disposed || !this.isVisible || !this._inViewport || this.textPreparation) return;
         const version = this.textPreparationVersion, encoding = this.encoding, mode = this.mode;
         const promise = this.prepareText(this.frames, encoding, {
             isCancelled: () => version !== this.textPreparationVersion || this.mode !== mode,
@@ -608,14 +1139,32 @@ class MonitorView {
         });
         this.textPreparation = promise;
         promise.then(state => {
-            if (state && version === this.textPreparationVersion && this.mode === mode) {
+            if (state && !this._disposed && version === this.textPreparationVersion && this.mode === mode) {
                 this.installPreparedText(state);
                 this.textPreparation = null;
                 this.render();
             }
+        }, error => {
+            if (!this._disposed && version === this.textPreparationVersion) this.textPreparationError = error;
         }).finally(() => {
             if (this.textPreparation === promise) this.textPreparation = null;
         });
+    }
+
+    _sharedTextCache() {
+        if (!this.decodeCache) return null;
+        let cache = this.decodeCache.get(this.frames);
+        if (!cache) this.decodeCache.set(this.frames, cache = new Map());
+        return cache;
+    }
+
+    _rememberText(key, tokens) {
+        for (const cache of [this.textCache, this._sharedTextCache()]) {
+            if (!cache) continue;
+            if (cache.size >= 256) cache.delete(cache.keys().next().value);
+            cache.set(key, tokens);
+        }
+        return tokens;
     }
 
     _textTokens(row, includeCrossing = false) {
@@ -626,14 +1175,12 @@ class MonitorView {
         }
         const neighbours = [];
         for (let i = 1; i <= 4; i++) neighbours.push(this.frames.orderAt(index + i));
-        const key = `${row.order}:${this.frames.orderAt(0)}:${neighbours.join(',')}:${this.encoding}:${row.streamEnded === true}:${includeCrossing}`;
-        const cached = this.textCache.get(key);
+        const key = `${this.frames.version}:${row.order}:${this.frames.orderAt(0)}:${neighbours.join(',')}:${this.encoding}:${row.streamEnded === true}:${includeCrossing}`;
+        const cached = this.textCache.get(key) ?? this._sharedTextCache()?.get(key);
         if (cached) return cached;
         if (['gbk', 'gb18030', 'big5', 'shift_jis'].includes(this.encoding)) {
             const tokens = this._legacyTextTokens(row, includeCrossing);
-            if (this.textCache.size >= 256) this.textCache.delete(this.textCache.keys().next().value);
-            this.textCache.set(key, tokens);
-            return tokens;
+            return this._rememberText(key, tokens);
         }
         // Every supported encoding has a maximum four-byte character. Decode a tiny
         // neighbourhood rather than walking all retained data to display one row.
@@ -676,9 +1223,7 @@ class MonitorView {
         tokens.push(...decoder.flush());
         const own = tokens.filter(token => token.startFrame === index ||
             includeCrossing && token.startFrame < index && token.endFrame >= index);
-        if (this.textCache.size >= 256) this.textCache.delete(this.textCache.keys().next().value);
-        this.textCache.set(key, own);
-        return own;
+        return this._rememberText(key, own);
     }
 
     _legacyTextTokens(row, includeCrossing = false) {
@@ -854,7 +1399,7 @@ class MonitorView {
             let widths = alignment.widths.get(bodyColumns);
             if (!widths) alignment.widths.set(bodyColumns, widths = []);
             if (cached.widths !== widths) {
-                monitorNumberUtils.measureNumericColumns(cached.fields, bodyColumns, widths);
+                monitorNumberUtils.measureNumericColumns(cached.fields, bodyColumns, widths, this._displayOptions().numericSignificantDigits);
                 cached.widths = widths;
             }
             return { cached, prefix, bodyColumns, widths };
@@ -865,7 +1410,8 @@ class MonitorView {
             const layoutKey = `${item.bodyColumns}:${item.prefix}:${item.widths.join(',')}`;
             if (item.cached.layoutKey !== layoutKey) {
                 item.cached.layout = { prefix: item.prefix, byteMode: 'number',
-                    ...monitorNumberUtils.buildNumericRowLayout(item.cached.fields, item.bodyColumns, item.widths) };
+                    ...monitorNumberUtils.buildNumericRowLayout(item.cached.fields, item.bodyColumns, item.widths,
+                        this._displayOptions().numericSignificantDigits) };
                 item.cached.layoutKey = layoutKey;
             }
             return this._foldLayout(rows[index], item.cached.layout);
@@ -875,15 +1421,16 @@ class MonitorView {
     setSearchResults(matches, current = -1) {
         this.matches = matches;
         this.currentMatch = current;
-        this.render();
+        this.render({ userAction: true });
     }
 
     selectSearchMatch(index) {
         this.currentMatch = index;
-        this.render();
+        this.render({ userAction: true });
     }
 
     _rangesForRow(row) {
+        if (row.kind && row.kind !== 'rx') return [];
         let low = 0, high = this.matches.length;
         while (low < high) {
             const mid = Math.floor((low + high) / 2);
@@ -891,6 +1438,10 @@ class MonitorView {
             else high = mid;
         }
         const ranges = [];
+        if (row.frameIndex !== undefined && this.cursorByteOffset !== null && this.cursorByteOffset !== undefined) {
+            const local = this.cursorByteOffset - this.frames.rawByteOffsetAt(row.frameIndex);
+            if (local >= 0 && local < row.bytes.length) ranges.push({ start: local, end: local + 1, current: true });
+        }
         for (let i = low - 1; i >= 0 && this.matches[i].endOrder >= row.order; i--) {
             const match = this.matches[i];
             ranges.push({
@@ -904,7 +1455,9 @@ class MonitorView {
     }
 
     jumpToFrame(index) {
-        if (!this.frames.length) return;
+        if (this._disposed || !this.frames.length) return;
+        this.cursorByteOffset = null;
+        this._releaseTextSelection();
         index = Math.max(0, Math.min(this.frames.length - 1, Math.round(index)));
         this.revealOrder = this.frames.orderAt(index);
         if (this._displayOptions().foldLong) {
@@ -914,12 +1467,13 @@ class MonitorView {
         this.followTail = false;
         this.anchor = { order: this.frames.orderAt(index), within: 0, center: true };
         if (this._usesLargeLayout()) {
+            const records = this._records(), position = records.indexAtOrAfterOrder(this.anchor.order);
             this.spacer.style.height = `${Math.min(8_000_000,
-                Math.max(this.container.clientHeight, this.frames.length * this.rowHeight))}px`;
+                Math.max(this.container.clientHeight, records.length * this.rowHeight))}px`;
             const maxScroll = Math.max(0, this.container.scrollHeight - this.container.clientHeight);
-            this._setScrollTop(maxScroll * index / Math.max(1, this.frames.length - 1));
+            this._setScrollTop(maxScroll * position / Math.max(1, records.length - 1));
         } else this.centerPadding = Math.ceil(this.container.clientHeight / 2);
-        this.render();
+        this.render({ userAction: true });
     }
 
     appendExtra(entry) {
@@ -929,10 +1483,15 @@ class MonitorView {
     }
 
     clear({ deferRender = false } = {}) {
+        this._resetScrollSession();
+        this._scrollGeometry = null;
+        this._selectionHold = false;
+        this._releaseTextSelection();
         this.extras.length = 0;
         this.followTail = true;
         this.anchor = null;
         this.cursorOrder = null;
+        this.cursorByteOffset = null;
         this.revealOrder = null;
         this.expandedRows.clear();
         this.centerPadding = 0;
@@ -944,7 +1503,7 @@ class MonitorView {
         this.textStates.clear();
         this.textCheckpoints.length = 0;
         this.preparedText = null;
-        this.textPreparationVersion++;
+        this._cancelTextPreparation();
         if (!deferRender) this.render();
     }
 
@@ -957,6 +1516,7 @@ class MonitorView {
 
     /** Coalesce receive bursts into the next browser paint, without a fixed refresh cap. */
     schedule() {
+        if (this._disposed || !this.isVisible || !this._inViewport) return;
         if (this.pending !== null) return;
         const update = () => { this.pending = null; this.render(); };
         this.pendingAnimationFrame = typeof requestAnimationFrame === 'function' &&
@@ -964,25 +1524,40 @@ class MonitorView {
         this.pending = this.pendingAnimationFrame ? requestAnimationFrame(update) : setTimeout(update, 0);
     }
 
-    render() {
+    render({ userAction = false } = {}) {
         this._cancelScheduledRender();
-        if (this.followTail) this.centerPadding = 0;
-        if (this._usesLargeLayout()) {
-            this._renderLarge();
+        if (this._disposed || !this.isVisible || !this._inViewport) return;
+        // Replacing virtual rows destroys native selections, including on the click
+        // ending a drag. Clearing a selection leaves row repainting on hold;
+        // explicit navigation can still repaint history without restarting following.
+        const selection = this._logSelection();
+        if (selection) this._holdSelectionView();
+        if (this._selectingText || selection || (this._selectionHold && !userAction)) {
+            this._renderDeferred = true;
+            this._updateHeldScrollRange();
             return;
         }
-        let rows;
-        if (this._displayOptions().showRx) rows = mergeMonitorRows(this.frames, this.extras);
-        else {
-            rows = [...this.extras];
-            if (this.revealOrder !== null && this.frames.length) {
-                const index = this.frames.indexAtOrAfterOrder(this.revealOrder);
-                if (this.frames.orderAt(index) === this.revealOrder)
-                    rows.push({ ...this.frames.frameAt(index), frameIndex: index });
+        this._renderDeferred = false;
+        this._clearRowListeners();
+        if (this.followTail) this.centerPadding = 0;
+        let records = this._records();
+        let geometry = this._scrollSession?.geometry;
+        if (geometry) {
+            const retained = records.between(geometry.firstOrder, geometry.lastOrder);
+            if (retained.length) records = retained;
+            else {
+                // A drag cannot pin records that have already left the bounded buffer.
+                this._resetScrollSession();
+                geometry = null;
+                this.anchor = records.length ? { order: records.orderAt(0), within: 0 } : null;
             }
-            rows.sort((a, b) => a.order - b.order);
         }
-        rows = rows.filter(row => this._rowVisible(row));
+        if (geometry ? geometry.large : records.length > this.largeThreshold) {
+            this._renderLarge(records);
+            this._captureScrollGeometry(records, true);
+            return;
+        }
+        const rows = records.slice(0, records.length);
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(this.container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
         const columns = this._layoutColumns(Math.max(2, Math.floor((this.container.clientWidth - padding) / this.charWidth)));
@@ -992,13 +1567,19 @@ class MonitorView {
         for (let i = 0; i < rows.length; i++)
             offsets[i + 1] = offsets[i] + layouts[i].lineCount * this.rowHeight;
         const totalHeight = offsets[rows.length] + this.centerPadding;
-        this.spacer.style.height = `${totalHeight}px`;
+        this.spacer.style.height = geometry?.height ?? `${totalHeight}px`;
         if (this.followTail) {
             this._setScrollTop(Math.max(0, this.container.scrollHeight - this.container.clientHeight));
         } else if (this.anchor && rows.length) {
             let index = rows.findIndex(row => row.order >= this.anchor.order);
             if (index < 0) index = rows.length - 1;
-            const within = this.anchor.center
+            const byteAnchor = Number.isFinite(this.anchor.byteOffset) && rows[index].frameIndex !== undefined;
+            const targetLayout = byteAnchor ? this._rowLayout(rows[index], columns) : layouts[index];
+            const within = byteAnchor
+                ? (this._lineAtByte(rows[index], targetLayout,
+                    this.anchor.byteOffset - this.frames.rawByteOffsetAt(rows[index].frameIndex)) + 0.5) *
+                    this.rowHeight - this.container.clientHeight / 2
+                : this.anchor.center
                 ? (layouts[index].lineCount * this.rowHeight - this.container.clientHeight) / 2
                 : rows[index].order === this.anchor.order
                     ? Math.min(this.anchor.within ?? 0, layouts[index].lineCount * this.rowHeight - 1) : 0;
@@ -1011,11 +1592,12 @@ class MonitorView {
             top: offsets[index], height: layouts[index].lineCount * this.rowHeight }));
         const first = rows.length ? Math.max(0, firstRowAt(offsets, this.container.scrollTop) - 3) : 0;
         const bottom = this.container.scrollTop + this.container.clientHeight;
-        const fragment = document.createDocumentFragment();
+        const fragment = (this.document ?? document).createDocumentFragment();
         for (let i = first; i < rows.length && (offsets[i] < bottom || i < first + 3); i++) {
             fragment.appendChild(this._makeRow(rows[i], layouts[i], offsets[i]));
         }
         this.spacer.replaceChildren(fragment);
+        this._captureScrollGeometry(records, false);
     }
 
     _makeRow(row, layout, top) {
@@ -1055,24 +1637,24 @@ class MonitorView {
             }
             layout = { ...layout, numberSegments, numberText: numberSegments.map(segment => segment.text).join('') };
         }
-        const div = document.createElement('div');
+        const div = (this.document ?? document).createElement('div');
         div.className = `monitor-row ${row.kind === 'rx' ? 'log-rx-ok' : row.kind === 'error' ? 'log-rx-error' : row.kind === 'tx-error' ? 'log-tx-error' : 'log-tx-ok'}`;
-        const colorKey = row.kind === 'rx' ? 'rxColor' : row.kind === 'error' ? 'rxErrorColor'
+        const colorKey = row.kind === 'rx' ? row.endReason === 'limit' ? 'rxLimitColor' : 'rxColor' : row.kind === 'error' ? 'rxErrorColor'
             : row.kind === 'tx-error' ? 'txErrorColor' : 'txColor';
         div.style.color = this._displayOptions()[colorKey];
         if (Number.isFinite(row.timestamp)) div.title = new Date(row.timestamp).toLocaleString();
         if (row.order === this.cursorOrder) div.className += ' monitor-cursor';
-        if (div.addEventListener) div.addEventListener('click', () => {
+        this._listen(div, 'click', () => {
             this.cursorOrder = row.order;
-            this.render();
-        });
+            this.render({ userAction: true });
+        }, undefined, true);
         div.style.top = `${top}px`;
         div.style.height = `${rowLineCount * this.rowHeight}px`;
-        const prefix = document.createElement('span');
+        const prefix = (this.document ?? document).createElement('span');
         prefix.className = 'monitor-prefix';
         prefix.textContent = layout.prefix;
         if (firstLine) prefix.style.visibility = 'hidden';
-        const body = document.createElement('span');
+        const body = (this.document ?? document).createElement('span');
         body.className = 'monitor-data';
         const bodyLine = layout.unprepared && this.container
             ? Math.min(fullLineCount - 1, Math.max(0,
@@ -1082,11 +1664,12 @@ class MonitorView {
         const relevant = ranges?.some(range => layout.byteMode === 'number'
             ? range.channel !== undefined : range.channel === undefined);
         const replacements = layout.byteMode === 'text' && layout.parts.some(part => part.token?.failed);
-        if (relevant || replacements || this._displayOptions().keyword) this._appendHighlightedBody(body, row, layout, ranges ?? []);
+        if (relevant || replacements || this._displayOptions().keyword || layout.byteMode === 'number' && this.channelColors?.length)
+            this._appendHighlightedBody(body, row, layout, ranges ?? []);
         else body.textContent = monitorBodyText(row, layout);
         div.append(prefix, body);
         if (layout.foldControl) {
-            const toggle = document.createElement('button');
+            const toggle = (this.document ?? document).createElement('button');
             toggle.className = 'monitor-fold-toggle';
             toggle.textContent = layout.folded ? `展开（共 ${layout.fullLineCount} 行）` : '收起长帧';
             toggle.title = toggle.textContent;
@@ -1103,8 +1686,9 @@ class MonitorView {
                 }
                 this.followTail = false;
                 this.anchor = { order: row.order, within: 0 };
-                this.render();
+                this.render({ userAction: true });
             };
+            this._rowListeners?.push(() => { toggle.onclick = null; });
             div.appendChild(toggle);
         }
         return div;
@@ -1231,10 +1815,10 @@ class MonitorView {
         const hexParts = layout.hex ? monitorDisplayUtils.hexVisibleParts(row.bytes, layout) : null;
         const byteKeywords = this._keywordByteRanges(row, layout, hexParts);
         const byteKeyword = (start, end) => byteKeywords.some(range => start < range.end && end > range.start);
-        const add = (text, state = '', failed = false, softBreak = false, keyword = false) => {
+        const add = (text, state = '', failed = false, softBreak = false, keyword = false, color = '') => {
             const last = segments.at(-1);
-            if (last && last.state === state && last.failed === failed && last.softBreak === softBreak && last.keyword === keyword) last.text += text;
-            else segments.push({ text, state, failed, softBreak, keyword });
+            if (last && last.state === state && last.failed === failed && last.softBreak === softBreak && last.keyword === keyword && last.color === color) last.text += text;
+            else segments.push({ text, state, failed, softBreak, keyword, color });
         };
         if (layout.byteMode === 'text') {
             for (const part of layout.parts) {
@@ -1255,7 +1839,8 @@ class MonitorView {
                 parts.forEach((text, index) => {
                     if (index) add('\n', '', false, true);
                     add(text, match ? (match.current ? 'current' : 'match') : '', false, false,
-                        this._displayOptions().keywordFormat === 'hex' && byteKeywords.length > 0);
+                        this._displayOptions().keywordFormat === 'hex' && byteKeywords.length > 0,
+                        this.channelColors?.[segment.channel] ?? '');
                 });
             }
         } else if (layout.hex) {
@@ -1306,21 +1891,22 @@ class MonitorView {
                 if (cuts[i] === cuts[i - 1]) continue;
                 const keyword = !segment.state && !segment.softBreak &&
                     (segment.keyword || keywords.some(range => range.start <= cuts[i - 1] && range.end >= cuts[i]));
-                const span = document.createElement('span');
+                const span = (this.document ?? document).createElement('span');
                 span.textContent = segment.text.slice(cuts[i - 1] - position, cuts[i] - position);
+                if (segment.color) span.style.color = segment.color;
                 if (segment.state) {
                     span.className = `monitor-search-${segment.state}`;
                     span.style.backgroundColor = segment.state === 'current' ? options.searchCurrentColor : options.searchMatchColor;
                 }
                 else if (keyword) { span.className = 'monitor-keyword'; span.style.color = options.keywordColor; }
-                if (segment.failed) span.style.color = '#fff';
+                if (segment.failed) span.style.color = row.kind === 'rx' || row.kind === 'error' ? options.rxInvalidColor : '#fff';
                 body.appendChild(span);
             }
             position = end;
         }
     }
 
-    _renderLarge() {
+    _renderLarge(records = this._records()) {
         const { frames, container } = this;
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
@@ -1328,54 +1914,62 @@ class MonitorView {
             (parseFloat(css.paddingBottom) || 0) : 0;
         const contentHeight = Math.max(0, container.clientHeight - verticalPadding);
         const columns = this._layoutColumns(Math.max(2, Math.floor((container.clientWidth - padding) / this.charWidth)));
-        const sample = { ...frames.frameAt(0), frameIndex: 0 };
+        const sample = records.itemAt(0);
         const rowHeight = this._foldLayout(sample, this._rowLayout(sample, columns)).lineCount * this.rowHeight;
-        this.spacer.style.height = `${Math.min(8_000_000,
-            Math.max(container.clientHeight, frames.length * rowHeight))}px`;
+        this.spacer.style.height = this._scrollSession?.geometry.height ?? `${Math.min(8_000_000,
+            Math.max(container.clientHeight, records.length * rowHeight))}px`;
         const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        let position;
         if (this.followTail) {
             this._setScrollTop(maxScroll);
+            position = records.length - 1;
         } else if (this.anchor) {
-            const index = frames.indexAtOrAfterOrder(this.anchor.order);
-            const position = Math.min(frames.length - 1, index + (this.anchor.fraction ?? 0));
-            this._setScrollTop(maxScroll * position / Math.max(1, frames.length - 1));
+            const index = records.indexAtOrAfterOrder(this.anchor.order);
+            if (!this.anchor.center && Number.isFinite(this.anchor.within) && index < records.length) {
+                const row = records.itemAt(index);
+                const height = this._foldLayout(row, this._rowLayout(row, columns, true)).lineCount * this.rowHeight;
+                this.anchor.within = Math.max(0, Math.min(this.anchor.within, height - 1));
+                this.anchor.fraction = this.anchor.within / height;
+            }
+            position = Math.min(records.length - 1, index + (this.anchor.fraction ?? 0));
+            this._setScrollTop(maxScroll * position / Math.max(1, records.length - 1));
         }
-        const position = this.followTail ? frames.length - 1
-            : Math.max(0, Math.min(frames.length - 1, container.scrollTop /
-                Math.max(1, maxScroll) * (frames.length - 1)));
+        // Browser scroll offsets are rounded. Keep the recorded history position instead
+        // of converting the rounded offset back to a different fractional record on every update.
+        position ??= Math.max(0, Math.min(records.length - 1, container.scrollTop /
+            Math.max(1, maxScroll) * (records.length - 1)));
         const anchorIndex = Math.floor(position);
         const visible = Math.ceil(contentHeight / this.rowHeight) + 12;
-        const first = this.followTail ? Math.max(0, frames.length - visible)
-            : Math.min(Math.max(0, frames.length - visible),
+        const first = this.followTail ? Math.max(0, records.length - visible)
+            : Math.min(Math.max(0, records.length - visible),
                 Math.max(0, anchorIndex - Math.floor(visible / 2)));
-        const last = Math.min(frames.length, first + visible);
-        const rows = [];
-        for (let i = first; i < last; i++) rows.push({ ...frames.frameAt(i), frameIndex: i });
-        const firstOrder = rows[0]?.order ?? Infinity;
-        const lastOrder = rows.at(-1)?.order ?? -Infinity;
-        for (const extra of this.extras)
-            if (extra.order >= firstOrder && (extra.order <= lastOrder || this.followTail)) rows.push(extra);
-        rows.sort((a, b) => a.order - b.order);
-        const visibleRows = rows.filter(row => this._rowVisible(row));
-        rows.length = 0;
-        rows.push(...visibleRows);
+        const last = Math.min(records.length, first + visible);
+        const rows = records.slice(first, last);
         const layouts = this._rowLayouts(rows, columns);
-        const anchorRow = rows.findIndex(row => row.frameIndex === anchorIndex);
+        const anchorRow = anchorIndex - first;
         const beforeAnchor = layouts.slice(0, Math.max(0, anchorRow))
             .reduce((sum, layout) => sum + layout.lineCount * this.rowHeight, 0);
         const anchorHeight = (layouts[anchorRow]?.lineCount ?? 1) * this.rowHeight;
         const nextHeight = (layouts[anchorRow + 1]?.lineCount ?? 1) * this.rowHeight;
         const fraction = position - anchorIndex;
         const centered = !this.followTail && this.anchor?.center;
+        const byteAnchor = centered && Number.isFinite(this.anchor?.byteOffset) && anchorRow >= 0;
+        const anchorCenter = byteAnchor
+            ? (this._lineAtByte(rows[anchorRow], this._rowLayout(rows[anchorRow], columns),
+                this.anchor.byteOffset - frames.rawByteOffsetAt(rows[anchorRow].frameIndex)) + 0.5) * this.rowHeight
+            : anchorHeight / 2;
         let top = this.followTail
             ? container.scrollTop + contentHeight - layouts.reduce((sum, layout) =>
                 sum + layout.lineCount * this.rowHeight, 0)
             : container.scrollTop + (centered ? contentHeight / 2 : contentHeight) -
-                beforeAnchor - (centered ? anchorHeight / 2 : anchorHeight) -
+                beforeAnchor - (centered ? anchorCenter : anchorHeight) -
                 fraction * (centered ? (anchorHeight + nextHeight) / 2 : nextHeight);
+        // Preserve the pixel offset captured before a small history becomes virtual.
+        if (!this.followTail && !centered && Number.isFinite(this.anchor?.within) && rows[anchorRow]?.order === this.anchor.order)
+            top = container.scrollTop - beforeAnchor - this.anchor.within;
         if (!this.followTail && !this.anchor?.center && first === 0)
-            top = Math.min(top, container.scrollTop);
-        const fragment = document.createDocumentFragment();
+            top = position === 0 ? container.scrollTop : Math.min(top, container.scrollTop);
+        const fragment = (this.document ?? document).createDocumentFragment();
         this.rowPositions = [];
         for (let i = 0; i < rows.length; i++) {
             const height = layouts[i].lineCount * this.rowHeight;

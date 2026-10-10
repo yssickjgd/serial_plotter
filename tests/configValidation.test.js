@@ -9,7 +9,8 @@ test('capture configuration validates modes, encodings, boundaries and finite id
     for (const idleGapSeconds of ['', 'NaN', '0', '-1', '0.0001', 'Infinity'])
         assert.throws(() => validateConfig({ idleGapSeconds }), /间隔/);
     assert.equal(validateConfig({ captureMode: 'hex', idleGapSeconds: '0.01',
-        enableHeader: true, headerHex: 'not used' }).captureMode, 'hex');
+        enableHeader: true, headerHex: 'AB' }).captureMode, 'hex');
+    assert.throws(() => validateConfig({ captureMode: 'hex', enableHeader: true, headerHex: 'not used' }), /帧头/);
     assert.throws(() => validateConfig({ serialData: '6' }), /数据位/);
     assert.throws(() => validateConfig({ serialParity: 'invalid' }), /奇偶校验/);
 });
@@ -108,4 +109,16 @@ test('validates nested monitor display settings without modifying imported confi
         assert.throws(() => validateConfig({ monitorDisplay }));
     }
     assert.equal(validateConfig({ captureMode: 'text' }).monitorDisplay, undefined);
+});
+
+test('response and phase settings validate independently from amplitude logarithmic bounds', () => {
+    assert.equal(validateConfig({ plotContent: 'response', plotViewMode: 'phase', plotResponsePoints: '65536',
+        plotResponseSampleRate: '0', plotPhaseUnwrap: true, plotDbFactor: '10',
+        plotYScaleModePhase: 'manual', plotYMinPhase: '-360', plotYMaxPhase: '360',
+        plotYScaleModeDb: 'manual', plotYMinDb: '-100', plotYMaxDb: '10' }).plotViewMode, 'phase');
+    for (const bad of [{ plotContent: 'constant' }, { plotMagnitudeUnit: 'power' }, { plotDbFactor: '30' },
+        { plotPhaseUnwrap: 'true' }, { plotResponsePoints: '65537' }, { plotResponsePoints: '1' },
+        { plotResponseSampleRate: '-1' }, { plotResponseSampleRate: 'Infinity' }, { plotResponseSampleRate: '' },
+        { plotYScaleModePhase: 'manual', plotYMinPhase: '180', plotYMaxPhase: '-180' },
+        { plotYScaleModeDb: 'manual', plotYMinDb: '0', plotYMaxDb: '0' }]) assert.throws(() => validateConfig(bad));
 });

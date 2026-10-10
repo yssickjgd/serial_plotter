@@ -70,7 +70,13 @@ function validateConfig(config) {
         serialParity: [['none', 'even', 'odd'], '奇偶校验'],
         dataType: [['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'float32', 'float64'], '数据类型'],
         endianness: [['little', 'big'], '字节序'],
-        plotViewMode: [['time', 'frequency'], '绘图模式'],
+        plotViewMode: [['time', 'frequency', 'phase'], '绘图模式'],
+        plotContent: [['samples', 'response'], '显示对象'],
+        plotMagnitudeUnit: [['auto', 'amplitude', 'db'], '幅值单位'],
+        plotDbFactor: [['10', '20'], 'dB 系数'],
+        plotPhaseUnit: [['degrees', 'radians'], '相位单位'],
+        plotYScaleModePhase: [['auto', 'manual'], '相频 Y 轴策略'],
+        plotYScaleModeDb: [['auto', 'manual'], 'dB Y 轴策略'],
         plotYScaleMode: [['auto', 'manual'], 'Y 轴策略'],
         plotYScaleModeTime: [['auto', 'manual'], '时域 Y 轴策略'],
         plotYScaleModeFreq: [['auto', 'manual'], '频域 Y 轴策略'],
@@ -93,22 +99,25 @@ function validateConfig(config) {
         if (config.maxPoints !== undefined && count > Number(config.maxPoints))
             throw new RangeError('波形监视台内采样点数不能大于最大采样点数');
     }
+    if (config.plotResponsePoints !== undefined)
+        parseIntInRange(config.plotResponsePoints, 2, 65536, '系统响应采样点数');
+    if (config.plotResponseSampleRate !== undefined && (String(config.plotResponseSampleRate).trim() === '' ||
+        !Number.isFinite(Number(config.plotResponseSampleRate)) || Number(config.plotResponseSampleRate) < 0))
+        throw new RangeError('系统响应采样率需为非负有限数值；0 表示未设置');
     if (config.serialBaud !== undefined)
         parseIntInRange(config.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率');
     if (config.idleGapSeconds !== undefined &&
         (String(config.idleGapSeconds).trim() === '' || !Number.isFinite(Number(config.idleGapSeconds)) ||
             Number(config.idleGapSeconds) < 0.001 || Number(config.idleGapSeconds) * 1000 > 2147483647))
         throw new RangeError('空闲断帧间隔需为至少 0.001 s 的有限数值，且不超过计时器范围');
-    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc', 'rebuildHistory']) {
+    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc', 'plotPhaseUnwrap', 'rebuildHistory']) {
         if (config[key] !== undefined && typeof config[key] !== 'boolean')
             throw new Error(`${key} 必须是布尔值`);
     }
     if (config.netPort !== undefined && config.netPort !== '') parsePort(config.netPort);
     if (config.netLocalPort !== undefined && config.netLocalPort !== '') parsePort(config.netLocalPort);
-    if (!config.captureMode || config.captureMode === 'number') {
-        if (config.enableHeader === true && !validHex(config.headerHex)) throw new Error('帧头 Hex 无效');
-        if (config.enableFooter === true && !validHex(config.footerHex)) throw new Error('帧尾 Hex 无效');
-    }
+    if (config.enableHeader === true && !validHex(config.headerHex)) throw new Error('帧头 Hex 无效');
+    if (config.enableFooter === true && !validHex(config.footerHex)) throw new Error('帧尾 Hex 无效');
     const validCalibration = value => value === undefined ||
         ((typeof value === 'number' || typeof value === 'string') &&
             String(value).trim() !== '' && Number.isFinite(Number(value)));
@@ -121,9 +130,14 @@ function validateConfig(config) {
             (ch.offsetEnabled !== undefined && typeof ch.offsetEnabled !== 'boolean') ||
             !validCalibration(ch.gain) || !validCalibration(ch.offset))))
         throw new Error('通道配置无效');
-    for (const key of ['plotYMin', 'plotYMax', 'plotYMinTime', 'plotYMaxTime', 'plotYMinFreq', 'plotYMaxFreq']) {
+    for (const key of ['plotYMin', 'plotYMax', 'plotYMinTime', 'plotYMaxTime', 'plotYMinFreq', 'plotYMaxFreq',
+        'plotYMinPhase', 'plotYMaxPhase', 'plotYMinDb', 'plotYMaxDb']) {
         if (config[key] !== undefined && config[key] !== '' && !Number.isFinite(Number(config[key])))
             throw new Error(`${key} 必须是有效数值`);
+    }
+    for (const suffix of ['Phase', 'Db']) if (config[`plotYScaleMode${suffix}`] === 'manual') {
+        const error = yRangeError(config[`plotYMin${suffix}`], config[`plotYMax${suffix}`]);
+        if (error) throw new Error(error);
     }
     const yConfig = normalizeYConfig(config);
     for (const [mode, strategy, min, max] of [

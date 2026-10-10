@@ -34,14 +34,19 @@ function wrapNumericField(text, columns, labelPadding) {
     return lines;
 }
 
-function numericGrid(fields, bodyColumns) {
+function numericGrid(fields, bodyColumns, significantDigits = null) {
     const columns = Number.isFinite(bodyColumns) ? Math.max(2, Math.floor(bodyColumns)) : 2;
-    const gap = 2, minimumCellWidth = 36;
+    const labelDigits = Math.max(2, String(fields.length).length, ...fields.map(field => numericFieldParts(field)?.id.length ?? 0));
+    const scientific = Number.isInteger(significantDigits) && significantDigits >= 1 && significantDigits <= 17;
+    // Reserve a sign, every significant digit, e± and a three-digit exponent.
+    // The same grid also fits -Infinity, so invalid samples cannot change row heights.
+    const gap = 2, minimumCellWidth = scientific ? labelDigits + 3 + Math.max(9,
+        1 + significantDigits + (significantDigits > 1 ? 1 : 0) + 2 + 3) : 36;
     const fieldsPerRow = Math.min(fields.length,
-        Math.max(1, Math.floor(columns / (minimumCellWidth + gap))));
-    const slotWidth = Math.floor(columns / fieldsPerRow);
+        Math.max(1, Math.floor((columns + (scientific ? gap : 0)) / (minimumCellWidth + gap))));
+    const slotWidth = Math.floor((columns + (scientific && fieldsPerRow > 1 ? gap : 0)) / fieldsPerRow);
     const cellWidth = fieldsPerRow > 1 ? slotWidth - gap : slotWidth;
-    return { fieldsPerRow, slotWidth, cellWidth, labelDigits: Math.max(2, String(fields.length).length) };
+    return { fieldsPerRow, slotWidth, cellWidth, labelDigits };
 }
 
 function numericFieldParts(field) {
@@ -53,9 +58,9 @@ function numericFieldParts(field) {
 }
 
 /** Share widths across records without rescanning the full acquisition history. */
-function measureNumericColumns(fields, bodyColumns, widths = []) {
+function measureNumericColumns(fields, bodyColumns, widths = [], significantDigits = null) {
     if (!fields.length) return widths;
-    const { fieldsPerRow } = numericGrid(fields, bodyColumns);
+    const { fieldsPerRow } = numericGrid(fields, bodyColumns, significantDigits);
     for (let i = 0; i < fields.length; i++) {
         const parts = numericFieldParts(fields[i]);
         if (parts?.integer) {
@@ -78,10 +83,10 @@ function alignedNumericField(field, labelDigits, integerWidth, cellWidth) {
     return label + ' '.repeat(padding) + parts.value;
 }
 
-function buildNumericRowLayout(fields, bodyColumns, integerWidths = null) {
+function buildNumericRowLayout(fields, bodyColumns, integerWidths = null, significantDigits = null) {
     if (!fields.length) return { numberText: '', lineCount: 1, numberSegments: [] };
-    const { fieldsPerRow, slotWidth, cellWidth, labelDigits } = numericGrid(fields, bodyColumns);
-    integerWidths ??= measureNumericColumns(fields, bodyColumns);
+    const { fieldsPerRow, slotWidth, cellWidth, labelDigits } = numericGrid(fields, bodyColumns, significantDigits);
+    integerWidths ??= measureNumericColumns(fields, bodyColumns, [], significantDigits);
     const numberSegments = [];
     let lineCount = 0;
     const append = (text, channel) => {

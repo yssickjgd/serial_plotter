@@ -6,7 +6,8 @@ function element(value = '') {
     return {
         value, textContent: '', className: '', files: [],
         addEventListener(name, callback) { listeners.set(name, callback); },
-        fire(name, event = {}) { return listeners.get(name)({ target: this, ...event }); },
+        removeEventListener(name, callback) { if (listeners.get(name) === callback) listeners.delete(name); },
+        fire(name, event = {}) { return listeners.get(name)?.({ target: this, ...event }); },
         click() { return this.fire('click'); }
     };
 }
@@ -26,6 +27,26 @@ test('seconds and hertz inputs produce millisecond timer periods', () => {
     assert.equal(controller.periodMs(), 50);
     interval.value = '0';
     assert.equal(controller.periodMs(), 0);
+});
+
+test('disposing global sender removes handlers and ignores a late file read and write callback', async () => {
+    const { SendController } = require('../sendController');
+    let finishRead, finishWrite, sent = 0;
+    const fileInput = element(), button = element(), input = element('AA');
+    const controller = new SendController({ mode: element('hex'), input, fileInput,
+        interval: element('0'), intervalUnit: element('s'), button, loadButton: element(),
+        getEngine: () => ({ send: () => new Promise(resolve => { finishWrite = resolve; }) }),
+        onSent() { sent++; }
+    });
+    const write = controller.sendOnce();
+    fileInput.files = [{ arrayBuffer: () => new Promise(resolve => { finishRead = resolve; }) }];
+    const read = fileInput.fire('change');
+    controller.dispose();
+    finishRead(Uint8Array.of(255).buffer); finishWrite(); await Promise.all([read, write]);
+    assert.equal(sent, 0);
+    assert.equal(controller.loadedBytes, null);
+    assert.equal(await button.fire('click'), undefined);
+    assert.equal(controller.timer, null);
 });
 
 test('file preview mode does not change bytes sent to an active engine', async () => {

@@ -4,12 +4,539 @@ const { FrameBuffer } = require('../frameBuffer');
 const { MonitorView, mergeMonitorRows, bytesToHex } = require('../monitorView');
 const { parseMonitorSearch, MonitorSearchSession } = require('../monitorSearch');
 
-function monitorFixture(frames, width = 800, height = 100) {
-    const container = { clientWidth: width, clientHeight: height, scrollTop: 0, children: [],
-        replaceChildren(child) { this.children = [child]; }, addEventListener() {},
-        get scrollHeight() { return Math.max(height, parseInt(this.children[0]?.style.height || '0', 10)); } };
+function monitorFixture(frames, width = 800, height = 100, extra = {}) {
+    const container = { clientWidth: width, clientHeight: height, scrollTop: 0, children: [], listeners: {},
+        replaceChildren(child) { this.children = [child]; },
+        addEventListener(name, callback) { this.listeners[name] = callback; },
+        get scrollHeight() { return Math.max(height, parseInt(this.children[0]?.style.height || '0', 10)); }, ...extra };
     return new MonitorView(container, frames);
 }
+
+test('numeric history stays at the same screen position despite rounded scrolling and ongoing capture', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(23, 4300);
+        for (let i = 0; i < 4000; i++) frames.append(Array(23).fill(i), Uint8Array.of(i & 255), 't', i);
+        let scroll = 0;
+        const view = monitorFixture(frames, 450, 180);
+        Object.defineProperty(view.container, 'scrollTop', {
+            get() { return scroll; }, set(value) { scroll = Math.round(value); }
+        });
+        view.setMode('number');
+        view.container.scrollTop = (view.container.scrollHeight - view.container.clientHeight) * .43123;
+        view.container.listeners.scroll();
+        const tracked = view.rowPositions.find(row => row.top > view.container.scrollTop).order;
+        const relativeTop = () => view.rowPositions.find(row => row.order === tracked).top - view.container.scrollTop;
+        const originalTop = relativeTop(), anchorOrder = view.anchor.order;
+        for (let i = 4000; i < 4500; i++) {
+            frames.append(Array(23).fill(i), Uint8Array.of(i & 255), 't', i);
+            view.render();
+            assert.ok(Math.abs(relativeTop() - originalTop) < .01, `historical row moved from ${originalTop} to ${relativeTop()}`);
+            assert.equal(view.anchor.order, anchorOrder);
+            assert.equal(view.followTail, false);
+        }
+        view.followLatest(); assert.equal(view.followTail, true);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('numeric rows use two columns when their scientific values fit in the available body', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(4, 10);
+        frames.append([1, -2, Number.MAX_VALUE, Number.MIN_VALUE], Uint8Array.of(1), '', 1);
+        const view = monitorFixture(frames, 350, 100);
+        view.setDisplayOptions({ timestamp: 'none', showDirection: false });
+        view.setMode('number');
+        const layout = view._rowLayouts([{ ...frames.frameAt(0), frameIndex: 0 }], view._columns())[0];
+        assert.equal(layout.lineCount, 2);
+        assert.match(layout.numberText.split('\n')[0], /CH01=.*CH02=/);
+        assert.match(layout.numberText.split('\n')[1], /CH03=.*CH04=/);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('virtual Hex and text histories expose the start of the oldest long record', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        for (const mode of ['hex', 'text']) {
+            const frames = new FrameBuffer(1, 2100);
+            for (let i = 0; i < 2100; i++) frames.appendRaw(new Uint8Array(512).fill(65), 't', i);
+            const view = monitorFixture(frames, 300, 100); view.setMode(mode);
+            view.container.scrollTop = 0; view.container.listeners.scroll();
+            const first = view.rowPositions.find(row => row.order === 0);
+            assert.equal(first.top, 0, 'the scrollbar top must expose the first line, not the end of the oldest frame');
+            assert.ok(view.spacer.children[0].children[1].textContent.length);
+            view.dispose();
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('virtual raw histories scroll through long frame contents in pixel steps and survive fold changes', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        for (const mode of ['hex', 'text']) {
+            const frames = new FrameBuffer(1, 2100);
+            frames.appendRaw(Uint8Array.of(65), 'first', 0);
+            frames.appendRaw(new Uint8Array(32768).fill(66), 'long', 1);
+            for (let i = 2; i < 2100; i++) frames.appendRaw(Uint8Array.of(67), 't', i);
+            const view = monitorFixture(frames, 300, 100); view.setMode(mode);
+            view.container.scrollTop = 0; view.container.listeners.scroll();
+            const wheel = deltaY => view.container.listeners.wheel({ deltaY, deltaMode: 0, preventDefault() {}, stopPropagation() {} });
+            wheel(120);
+            assert.equal(view.anchor.order, 1);
+            const within = view.anchor.within;
+            wheel(120); assert.equal(view.anchor.order, 1); assert.equal(view.anchor.within, within + 120);
+            wheel(-60); assert.equal(view.anchor.order, 1); assert.equal(view.anchor.within, within + 60);
+            for (let i = 0; i < 20; i++) wheel(120);
+            const bytes = frames.retainedByteLength;
+            view.setDisplayOptions({ foldLong: true, foldLines: 4 });
+            assert.equal(view.anchor.order, 1);
+            assert.ok(view.anchor.within < 80);
+            assert.ok(view.spacer.children.length, 'folding a long frame must not leave a blank viewport');
+            view.setDisplayOptions({ foldLong: false });
+            assert.equal(view.anchor.order, 1); assert.ok(view.spacer.children.length);
+            assert.equal(frames.retainedByteLength, bytes);
+            view.followLatest();
+            wheel(-40); assert.equal(view.followTail, false);
+            wheel(200); assert.equal(view.followTail, true);
+            view.dispose();
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('a numeric history anchor retains its pixel offset when capture enters virtual layout', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(23, 150);
+        for (let i = 0; i < 80; i++) frames.append(Array(23).fill(i), Uint8Array.of(i), 't', i);
+        const view = monitorFixture(frames, 450, 180); view.largeThreshold = 100; view.setMode('number');
+        view.container.scrollTop = (view.container.scrollHeight - view.container.clientHeight) * .43;
+        view.container.listeners.scroll();
+        const tracked = view.anchor.order;
+        const relativeTop = () => view.rowPositions.find(row => row.order === tracked).top - view.container.scrollTop;
+        const original = relativeTop();
+        for (let i = 80; i < 110; i++) {
+            frames.append(Array(23).fill(i), Uint8Array.of(i), 't', i); view.render();
+            assert.ok(Math.abs(relativeTop() - original) < .01);
+        }
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('a byte widget added to a zoomed workspace measures logical text width for wrapping', () => {
+    const oldDocument = global.document;
+    const base = monitorDocument();
+    global.document = { ...base, createElement() {
+        const node = base.createElement();
+        node.getBoundingClientRect = () => ({ width: 160 });
+        return node;
+    } };
+    try {
+        const view = monitorFixture(new FrameBuffer(1, 10), 800, 100,
+            { closest: () => ({ dataset: { workspaceZoom: '2' } }) });
+        assert.equal(view.charWidth, 8);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('right-click returns empty, small and virtual histories to the latest record without clearing data or search', () => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    try {
+        for (const count of [0, 30, 2100]) {
+            const frames = new FrameBuffer(1, count + 5);
+            for (let i = 0; i < count; i++) frames.append([i], Uint8Array.of(i % 256), 't', i + 1);
+            const view = monitorFixture(frames);
+            view.render();
+            if (count) view.jumpToFrame(0);
+            const matches = count ? [{ startOrder: 1, endOrder: 1, startByte: 0, endByte: 1 }] : [];
+            view.setSearchResults(matches, count ? 0 : -1);
+            view.cursorOrder = count ? 1 : null;
+            view.extras.push({ kind: 'tx', bytes: Uint8Array.of(65), time: 't', order: count + 1 });
+            const version = frames.version;
+            let prevented = false;
+            assert.equal(typeof view.container.listeners.contextmenu, 'function');
+            view.container.listeners.contextmenu({ preventDefault() { prevented = true; } });
+            assert.ok(prevented, 'the native context menu is suppressed');
+            assert.equal(view.followTail, true);
+            assert.equal(view.container.scrollTop, view.container.scrollHeight - view.container.clientHeight);
+            assert.equal(view.currentFrameIndex(), count - 1);
+            assert.equal(view.anchor, null);
+            assert.equal(view.revealOrder, null);
+            assert.equal(view.centerPadding, 0);
+            assert.equal(view.cursorOrder, null);
+            assert.equal(frames.version, version);
+            assert.equal(view.extras.length, 1);
+            assert.equal(view.matches, matches);
+            assert.equal(view.currentMatch, count ? 0 : -1);
+            frames.append([9999], Uint8Array.of(255), 'u', count + 2);
+            view.render();
+            assert.equal(view.container.scrollTop, view.container.scrollHeight - view.container.clientHeight);
+            assert.equal(view.currentFrameIndex(), frames.length - 1);
+            assert.deepEqual(frames.rawBytesAt(frames.length - 1), Uint8Array.of(255));
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('clearing a log selection keeps automatic rendering stopped until right-click while reception continues', () => {
+    const oldDocument = global.document;
+    const listeners = {};
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        for (const count of [30, 2100]) {
+            const frames = new FrameBuffer(1, count + 5);
+            for (let i = 0; i < count; i++) frames.append([i], Uint8Array.of(65), 't', i + 1);
+            const view = monitorFixture(frames);
+            view.render();
+            const row = view.spacer.children.at(-1);
+            const scrollTop = view.container.scrollTop;
+            const selectedTop = parseFloat(row.style.top) - scrollTop;
+            const body = row.children[1];
+            view.container.contains = node => node === body;
+            Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+            frames.append([9999], Uint8Array.of(255), 'u', count + 1);
+            view.render();
+            assert.equal(view.spacer.children.at(-1), row, 'selection endpoints remain in the same DOM nodes');
+            assert.equal(frames.getValue(0, frames.length - 1), 9999, 'reception is not paused');
+            selection.isCollapsed = true;
+            assert.equal(typeof listeners.selectionchange, 'function');
+            listeners.selectionchange();
+            assert.equal(view.pending, null, 'clearing a selection must not schedule automatic rendering');
+            view.render();
+            assert.equal(view.spacer.children.at(-1), row);
+            assert.ok(Math.abs(parseFloat(row.style.top) - view.container.scrollTop - selectedTop) < .01);
+            assert.equal(view.followTail, false);
+            frames.append([9998], Uint8Array.of(254), 'v', count + 2);
+            view.render();
+            assert.equal(view.spacer.children.at(-1), row, 'later arrivals must not resume rendering either');
+            assert.equal(frames.getValue(0, frames.length - 1), 9998);
+            view.container.listeners.contextmenu({ preventDefault() {} });
+            assert.notEqual(view.spacer.children.at(-1), row);
+            assert.equal(view.followTail, true);
+            assert.equal(view.container.scrollTop, view.container.scrollHeight - view.container.clientHeight);
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('selection-held history updates scroll geometry without replacing text when reception crosses the virtual threshold', () => {
+    const oldDocument = global.document, listeners = {};
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null,
+        removeAllRanges() { this.isCollapsed = true; } };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        const frames = new FrameBuffer(1, 4000, { raw: true });
+        for (let i = 0; i < 1500; i++) frames.appendRaw(new Uint8Array(288).fill(65), 't', i + 1);
+        const view = monitorFixture(frames, 650, 200); view.setMode('text'); view.setEncoding('ascii');
+        const body = view.spacer.children.at(-1).children[1]; view.container.contains = node => node === body;
+        const selectedRow = view.spacer.children.at(-1);
+        Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+        listeners.selectionchange();
+        const scrollHeight = view.container.scrollHeight;
+        for (let i = 1500; i < 2500; i++) frames.appendRaw(new Uint8Array(288).fill(65), 't', i + 1);
+        view.render();
+        assert.ok(view.container.scrollHeight > scrollHeight);
+        assert.equal(view.spacer.children.at(-1), selectedRow, 'scroll range changes preserve the native selection');
+        assert.equal(view._scrollGeometry.large, true);
+        view.container.scrollTop = (view.container.scrollHeight - view.container.clientHeight) * .4;
+        const expected = frames.orderAt(Math.floor((frames.length - 1) * .4));
+        view.container.listeners.scroll();
+        assert.equal(view.anchor.order, expected, 'scrolling maps the updated track to all retained records');
+        assert.equal(selection.isCollapsed, true, 'explicit navigation ends the selection so history can be rendered');
+        assert.ok(view.spacer.children.length);
+        assert.equal(view.followTail, false);
+        assert.equal(view._selectionHold, true);
+        view.container.listeners.scrollend();
+        assert.equal(view.anchor.order, expected);
+        assert.equal(frames.length, 2500); assert.equal(frames.retainedByteLength, 2500 * 288);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('selection holds text in place while both small and virtual scroll ranges grow and reach new records', () => {
+    const oldDocument = global.document, listeners = {};
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null,
+        removeAllRanges() { this.isCollapsed = true; } };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        for (const count of [30, 2100]) {
+            const frames = new FrameBuffer(1, 4000, { raw: true });
+            for (let i = 0; i < count; i++) frames.appendRaw(new Uint8Array(120).fill(65), 't', i + 1);
+            const view = monitorFixture(frames, 600, 200); view.setMode('text'); view.setEncoding('ascii');
+            const container = view.container, row = view.spacer.children.at(-1), body = row.children[1];
+            container.contains = node => node === body;
+            Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+            listeners.selectionchange();
+            const height = container.scrollHeight, selectedTop = parseFloat(row.style.top) - container.scrollTop;
+            for (let i = count; i < count + 100; i++) frames.appendRaw(new Uint8Array(120).fill(66), 'u', i + 1);
+            view.render();
+            assert.ok(container.scrollHeight > height, `history grows at ${count} records`);
+            assert.equal(view.spacer.children.at(-1), row);
+            assert.ok(Math.abs(parseFloat(row.style.top) - container.scrollTop - selectedTop) < .01);
+            assert.equal(selection.isCollapsed, false);
+            assert.equal(view.followTail, false);
+            assert.equal(view._scrollGeometry.lastOrder, count + 100);
+            selection.isCollapsed = true; listeners.selectionchange();
+            frames.appendRaw(Uint8Array.of(67), 'v', count + 101); view.render();
+            assert.equal(view.spacer.children.at(-1), row, 'clearing selection does not resume repainting');
+            assert.equal(view._scrollGeometry.lastOrder, count + 101);
+            container.scrollTop = container.scrollHeight - container.clientHeight; container.listeners.scroll();
+            container.listeners.scrollend();
+            assert.ok(view.lastRows.some(record => record.order === count + 101));
+            assert.equal(view.followTail, false, 'only right-click resumes following');
+            view.dispose();
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('native scrollbar dragging freezes record mapping and track height until pointer release', () => {
+    const oldDocument = global.document, listeners = {};
+    global.document = { ...monitorDocument(), addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        for (const count of [1500, 3000]) {
+            const frames = new FrameBuffer(1, 5000, { raw: true });
+            for (let i = 0; i < count; i++) frames.appendRaw(new Uint8Array(288).fill(65), 't', i + 1);
+            const view = monitorFixture(frames, 600, 200, { offsetWidth: 620, clientLeft: 0,
+                getBoundingClientRect: () => ({ left: 0, right: 620, width: 620 }) });
+            view.setMode('text'); view.setEncoding('ascii');
+            const container = view.container, height = container.scrollHeight;
+            container.listeners.pointerdown({ button: 0, target: container, clientX: 615 });
+            container.scrollTop = (height - container.clientHeight) * .4; container.listeners.scroll();
+            const firstAnchor = view.anchor.order;
+            for (let i = count; i < count + 700; i++) frames.appendRaw(new Uint8Array(288).fill(65), 't', i + 1);
+            view.render();
+            assert.equal(container.scrollHeight, height, 'the native thumb must not resize under the pressed pointer');
+            assert.equal(view.anchor.order, firstAnchor);
+            container.scrollTop = (height - container.clientHeight) * .6; container.listeners.scroll();
+            assert.ok(view.anchor.order > firstAnchor && view.anchor.order < count * .65);
+            const anchor = view.anchor.order;
+            const relativeTop = () => view.rowPositions.find(row => row.order === anchor).top - container.scrollTop;
+            const top = relativeTop();
+            listeners.pointerup();
+            assert.ok(container.scrollHeight > height);
+            assert.equal(view.anchor.order, anchor);
+            assert.ok(Math.abs(relativeTop() - top) < 1, 'release updates the track without moving the viewed text');
+            assert.equal(view.followTail, false);
+            view.dispose();
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('live arrivals schedule scroll-range updates during selection without replacing selected nodes', () => {
+    const oldDocument = global.document, oldRaf = global.requestAnimationFrame, oldCancel = global.cancelAnimationFrame;
+    const listeners = {}, tasks = new Map(); let next = 0;
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    global.requestAnimationFrame = callback => { tasks.set(++next, callback); return next; };
+    global.cancelAnimationFrame = id => tasks.delete(id);
+    try {
+        const frames = new FrameBuffer(1, 100, { raw: true });
+        for (let i = 0; i < 30; i++) frames.appendRaw(Uint8Array.of(65), 't', i + 1);
+        const view = monitorFixture(frames); view.render();
+        const row = view.spacer.children.at(-1), body = row.children[1];
+        view.container.contains = node => node === body;
+        Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+        listeners.selectionchange();
+        const height = view.container.scrollHeight;
+        for (let i = 30; i < 50; i++) {
+            frames.appendRaw(Uint8Array.of(66), 'u', i + 1); view.onDataChanged();
+        }
+        assert.equal(tasks.size, 1, 'receive bursts share one animation frame even during selection');
+        const update = tasks.get(view.pending); tasks.delete(view.pending); update();
+        assert.ok(view.container.scrollHeight > height);
+        assert.equal(view.spacer.children.at(-1), row);
+        assert.equal(selection.isCollapsed, false);
+        view.dispose();
+    } finally {
+        global.document = oldDocument;
+        global.requestAnimationFrame = oldRaf; global.cancelAnimationFrame = oldCancel;
+    }
+});
+
+test('expired scrollbar snapshots release safely when the entire dragged range is evicted', () => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(1, 2100, { raw: true });
+        for (let i = 0; i < 2100; i++) frames.appendRaw(Uint8Array.of(65), 't', i + 1);
+        const view = monitorFixture(frames, 600, 200, { offsetWidth: 620, clientLeft: 0,
+            getBoundingClientRect: () => ({ left: 0, right: 620, width: 620 }) });
+        view.render();
+        const container = view.container;
+        container.listeners.pointerdown({ button: 0, target: container, clientX: 615 });
+        container.scrollTop = (container.scrollHeight - container.clientHeight) * .4;
+        container.listeners.scroll();
+        for (let i = 2100; i < 4300; i++) frames.appendRaw(Uint8Array.of(66), 't', i + 1);
+        assert.doesNotThrow(() => view.render());
+        assert.equal(view._scrollSession, null);
+        assert.ok(view.spacer.children.length);
+        assert.ok(view.anchor.order >= frames.orderAt(0));
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('selection alone stops following and manual scrolling cannot restart it before right-click', () => {
+    const oldDocument = global.document;
+    const listeners = {};
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        for (const count of [30, 2100]) {
+            const frames = new FrameBuffer(1, count + 5);
+            for (let i = 0; i < count; i++) frames.append([i], Uint8Array.of(65), 't', i + 1);
+            const view = monitorFixture(frames);
+            view.render();
+            const body = view.spacer.children.at(-1).children[1];
+            view.container.contains = node => node === body;
+            Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+            listeners.selectionchange();
+            selection.isCollapsed = true;
+            listeners.selectionchange();
+            assert.equal(view.followTail, false, 'selection locks the view even when no data arrived during selection');
+            view.container.scrollTop -= 60;
+            const rows = view.spacer.children;
+            view.container.listeners.scroll();
+            assert.notEqual(view.spacer.children, rows, 'manual scrolling still renders historical records');
+            view.container.scrollTop = view.container.scrollHeight - view.container.clientHeight;
+            view.container.listeners.scroll();
+            assert.equal(view.followTail, false, 'scrolling back to the bottom must not release the selection hold');
+            const lastRow = view.spacer.children.at(-1);
+            frames.append([9999], Uint8Array.of(255), 'u', count + 1);
+            view.render();
+            assert.equal(view.spacer.children.at(-1), lastRow);
+            view.container.listeners.contextmenu({ preventDefault() {} });
+            assert.equal(view.followTail, true);
+            assert.equal(view.currentFrameIndex(), frames.length - 1);
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('a text drag protects rows before the browser creates a nonempty selection', () => {
+    const oldDocument = global.document;
+    const listeners = {};
+    global.document = { ...monitorDocument(), getSelection: () => ({ isCollapsed: true }),
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        const frames = new FrameBuffer(1, 10);
+        frames.append([1], Uint8Array.of(65), 't', 1);
+        const view = monitorFixture(frames);
+        view.render();
+        const row = view.spacer.children[0];
+        assert.equal(typeof view.container.listeners.pointerdown, 'function');
+        view.container.listeners.pointerdown({ button: 0, target: { closest: () => row.children[1] } });
+        frames.append([2], Uint8Array.of(66), 'u', 2);
+        view.render();
+        assert.equal(view.spacer.children[0], row);
+        assert.equal(typeof listeners.pointerup, 'function');
+        listeners.pointerup();
+        view.render();
+        assert.equal(view.lastRows.length, 2);
+        assert.notEqual(view.spacer.children[0], row);
+        assert.equal(view.followTail, true, 'a click without selected characters must not stop following');
+    } finally { global.document = oldDocument; }
+});
+
+test('activating a byte widget and updating search colors preserve an in-progress text drag', () => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(1, 10);
+        frames.append([1], Uint8Array.of(65), 't', 1);
+        const view = monitorFixture(frames);
+        view.render();
+        const row = view.spacer.children[0];
+        view.container.listeners.pointerdown({ button: 0, target: { closest: () => row.children[1] } });
+        view.setDisplayOptions({ searchMatchColor: '#112233', searchCurrentColor: '#445566' }, { deferRender: true });
+        view.setSearchResults([], -1);
+        assert.equal(view.spacer.children[0], row, 'activation must not replace the row under the pressed pointer');
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('right-click releases a log selection and immediately follows new data', () => {
+    const oldDocument = global.document;
+    const selection = { isCollapsed: false, anchorNode: null, focusNode: null,
+        removeAllRanges() { this.isCollapsed = true; } };
+    global.document = { ...monitorDocument(), getSelection: () => selection };
+    try {
+        const frames = new FrameBuffer(1, 10);
+        frames.append([1], Uint8Array.of(65), 't', 1);
+        const view = monitorFixture(frames);
+        view.render();
+        const row = view.spacer.children[0];
+        const body = row.children[1];
+        view.container.contains = node => node === body;
+        Object.assign(selection, { anchorNode: body, focusNode: body });
+        frames.append([2], Uint8Array.of(66), 'u', 2);
+        view.render();
+        assert.equal(view.spacer.children[0], row);
+        assert.equal(typeof view.container.listeners.contextmenu, 'function');
+        view.container.listeners.contextmenu({ preventDefault() {} });
+        assert.equal(selection.isCollapsed, true);
+        assert.equal(view.lastRows.length, 2);
+        assert.equal(view.followTail, true);
+    } finally { global.document = oldDocument; }
+});
+
+test('time jumps, display changes and clearing release a log selection so explicit actions take effect', () => {
+    const oldDocument = global.document;
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null,
+        removeAllRanges() { this.isCollapsed = true; } };
+    global.document = { ...monitorDocument(), getSelection: () => selection };
+    try {
+        const frames = new FrameBuffer(1, 100);
+        for (let i = 0; i < 30; i++) frames.append([i], Uint8Array.of(65), 't', i + 1);
+        const view = monitorFixture(frames);
+        view.render();
+        const selectBody = () => {
+            const body = view.spacer.children.at(-1).children[1];
+            view.container.contains = node => node === body;
+            Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+        };
+        selectBody();
+        view.jumpToFrame(0);
+        assert.equal(selection.isCollapsed, true);
+        assert.equal(view.followTail, false);
+        assert.equal(view.currentFrameIndex(), 0);
+        selectBody();
+        view.setMode('number');
+        assert.equal(selection.isCollapsed, true);
+        assert.match(view.spacer.children.at(-1).children[1].textContent, /CH01=/);
+        selectBody();
+        view.setDisplayOptions({ showRx: false });
+        assert.equal(selection.isCollapsed, true);
+        assert.equal(view.lastRows.length, 1, 'the time jump still reveals its selected record');
+        selectBody();
+        frames.clear();
+        view.clear();
+        assert.equal(selection.isCollapsed, true);
+        assert.equal(view.spacer.children.length, 0);
+    } finally { global.document = oldDocument; }
+});
+
+test('a selection outside the monitor does not stop its rendering or get cleared by right-click', () => {
+    const oldDocument = global.document;
+    const selection = { isCollapsed: false, anchorNode: {}, focusNode: {},
+        removeAllRanges() { throw new Error('an unrelated selection must be preserved'); } };
+    global.document = { ...monitorDocument(), getSelection: () => selection };
+    try {
+        const frames = new FrameBuffer(1, 10);
+        const view = monitorFixture(frames);
+        view.container.contains = () => false;
+        frames.append([1], Uint8Array.of(65), 't', 1);
+        view.render();
+        assert.equal(view.lastRows.length, 1);
+        view.container.listeners.contextmenu({ preventDefault() {} });
+        assert.equal(view.followTail, true);
+        assert.equal(selection.isCollapsed, false);
+    } finally { global.document = oldDocument; }
+});
 
 function monitorDocument() {
     return {
@@ -65,7 +592,7 @@ test('Hex keywords highlight corresponding bytes in text and both Hex representa
         const highlights = view.spacer.children[0].children[1].children
             .filter(span => span.className === 'monitor-keyword');
         assert.equal(highlights.map(span => span.textContent).join(''), 'AB�');
-        assert.equal(highlights.at(-1).style.color, '#fff');
+        assert.equal(highlights.at(-1).style.color, '#ffffff');
         assert.deepEqual(frames.rawBytesAt(0), Uint8Array.of(65, 66, 255, 67));
     } finally { global.document = oldDocument; }
 });
@@ -250,11 +777,34 @@ test('text display escapes failed characters, merges CRLF breaks and expands tab
         const body = view.spacer.children[0].children[1];
         assert.equal(body.children.map(span => span.textContent).join(''), 'A\\x00\\xFF    \nB');
         assert.equal(view.rowPositions[0].height, 40);
-        assert.ok(body.children.some(span => span.style.color === '#fff' && span.textContent === '\\x00\\xFF'));
+        assert.ok(body.children.some(span => span.style.color === '#ffffff' && span.textContent === '\\x00\\xFF'));
         view.setSearchResults([{ startOrder: 1, endOrder: 1, startByte: 2, endByte: 3 }], 0);
         assert.ok(view.spacer.children[0].children[1].children.some(span =>
-            span.className === 'monitor-search-current' && span.textContent === '\\xFF' && span.style.color === '#fff'));
+            span.className === 'monitor-search-current' && span.textContent === '\\xFF' && span.style.color === '#ffffff'));
         assert.equal(frames.version, version);
+    } finally { global.document = oldDocument; }
+});
+
+test('RX invalid text and limit-segment records have independently configurable colors', () => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(1, 5, { raw: true });
+        frames.appendRaw(Uint8Array.of(65, 0, 255), 't', 1, 1700000000000,
+            { endReason: 'limit', segmented: true });
+        frames.appendRaw(Uint8Array.of(66), 't', 2);
+        const view = monitorFixture(frames, 800, 600);
+        view.setMode('text');
+        view.setDisplayOptions({ rxColor: '#112233', rxInvalidColor: '#abcdef', rxLimitColor: '#fedcba' });
+        assert.equal(view.spacer.children[0].style.color, '#fedcba');
+        assert.equal(view.spacer.children[1].style.color, '#112233');
+        assert.ok(view.spacer.children[0].children[1].children.some(span => span.style.color === '#abcdef'));
+        view.setSearchResults([{ startOrder: 1, endOrder: 1, startByte: 1, endByte: 2 }], 0);
+        assert.ok(view.spacer.children[0].children[1].children.some(span =>
+            span.className === 'monitor-search-current' && span.style.color === '#abcdef'));
+        view.setMode('hex');
+        assert.equal(view.spacer.children[0].style.color, '#fedcba');
+        assert.deepEqual(frames.rawBytesAt(0), Uint8Array.of(65, 0, 255));
+        view.dispose();
     } finally { global.document = oldDocument; }
 });
 
@@ -583,9 +1133,9 @@ test('numeric log alignment resizes and preserves search highlighting by channel
         const view = monitorFixture(frames, 620, 600);
         view.setMode('number');
         const layout = view._rowLayout({ ...frames.frameAt(0), frameIndex: 0 }, 90);
-        assert.equal(layout.numberText.split('\n').length, 6);
+        assert.equal(layout.numberText.split('\n').length, 3);
         assert.equal(layout.numberText.split('\n')[0].indexOf('CH02=') + 'CH02='.length,
-            layout.numberText.split('\n')[4].indexOf('CH10=') + 'CH10='.length);
+            layout.numberText.split('\n')[2].indexOf('CH10=') + 'CH10='.length);
         view.setSearchResults([{ startOrder: 1, endOrder: 1, channel: 9 }], 0);
         const body = view.spacer.children[0].children[1];
         assert.ok(body.children.some(span => span.className === 'monitor-search-current' &&
@@ -594,6 +1144,31 @@ test('numeric log alignment resizes and preserves search highlighting by channel
         view.container.clientWidth = 1200;
         view.render();
         assert.ok(view.rowPositions[0].height < oldHeight);
+    } finally { global.document = oldDocument; }
+});
+
+test('numeric channel visibility updates cached rows without changing samples or search matches', () => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    try {
+        const frames = new FrameBuffer(3, 5);
+        frames.append([1, -2, 3], Uint8Array.of(1, 2, 3), 't', 1);
+        const view = monitorFixture(frames, 800, 600);
+        view.setMode('number');
+        view.setSearchResults([{ startOrder: 1, endOrder: 1, channel: 1 }], 0);
+        const matches = view.matches;
+        view.setDisplayOptions({ numericHiddenChannels: [1] });
+        const row = { ...frames.frameAt(0), frameIndex: 0 };
+        const layout = view._rowLayouts([row], 90)[0];
+        assert.match(layout.numberText, /CH01=/);
+        assert.doesNotMatch(layout.numberText, /CH02=/);
+        assert.match(layout.numberText, /CH03=/);
+        assert.equal(frames.getValue(1, 0), -2);
+        assert.equal(view.matches, matches);
+        view.setDisplayOptions({ numericHiddenChannels: [0, 1, 2] });
+        assert.equal(view._rowLayouts([row], 90)[0].numberText, '');
+        view.setDisplayOptions({ numericHiddenChannels: [] });
+        assert.match(view._rowLayouts([row], 90)[0].numberText, /CH02=/);
     } finally { global.document = oldDocument; }
 });
 
@@ -771,7 +1346,7 @@ test('asynchronous text preparation yields, clips long records and reuses decode
         assert.ok(contents().length < 3000);
         assert.match(contents(), /中/);
         assert.match(contents(), /\uFFFD\uFFFDZ/);
-        const white = view.spacer.children.at(-1).children[1].children.find(span => span.style.color === '#fff');
+        const white = view.spacer.children.at(-1).children[1].children.find(span => span.style.color === '#ffffff');
         assert.equal(white.textContent, '\uFFFD\uFFFD');
         const height = view.spacer.style.height;
         view.container.clientWidth = 400;
@@ -1003,7 +1578,7 @@ test('text replacement characters stay white with and without search highlights'
             const replacements = body.children.filter(span => span.textContent.includes('\uFFFD'));
             assert.equal(replacements.length, 1);
             assert.equal(replacements[0].textContent, '\uFFFD\uFFFD');
-            assert.equal(replacements[0].style.color, '#fff');
+            assert.equal(replacements[0].style.color, '#ffffff');
             if (highlighted) assert.match(replacements[0].className, /monitor-search-current/);
             const normal = body.children.filter(span => !span.textContent.includes('\uFFFD'));
             assert.ok(normal.every(span => !span.style.color));
@@ -1492,4 +2067,5 @@ test('an incomplete text tail is visibly marked without losing RX indentation', 
     const layout = view._rowLayout(row, 80);
     assert.equal(layout.prefix, '[t] RX[帧未完整] ');
     assert.equal(view._rowLayout({ ...row, incomplete: false }, 80).prefix, '[t] RX ');
+    assert.equal(view._rowLayout({ ...row, endReason: 'limit' }, 80).prefix, '[t] RX[超限] ');
 });

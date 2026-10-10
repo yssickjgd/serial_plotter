@@ -22,7 +22,8 @@
             <div class="sidebar-top tab-group" id="sidebar-top">
                 <div class="tab-bar">
                     <button class="tab-btn active" data-tab="tab-connection">通讯</button>
-                    <button class="tab-btn" data-tab="tab-frame">帧格式</button>
+                    <button class="tab-btn" data-tab="tab-widget-library">控件</button>
+                    <button class="tab-btn" data-tab="tab-export">导出数据</button>
                 </div>
 
                 <!-- ── Tab: 通讯 ── -->
@@ -89,6 +90,19 @@
                         <div class="status-text" id="connection-status">Ready.</div>
                     </div>
 
+                    <div class="control-group" id="board-toolbar" aria-label="缓冲区设置">
+                        <div class="section-title">缓冲区设置</div>
+                        <div class="input-group">
+                            <label id="max-points-label" for="max-points">最大采样点数</label>
+                            <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
+                        </div>
+                        <div class="input-group"><label for="max-raw-frame-bytes">原始帧分段上限（字节）</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1024" value="1048576" /><span class="hint-text">超限分段保留全部字节，默认 1 MiB。</span></div>
+                        <div class="row buffer-actions">
+                            <button id="btn-pause" class="btn btn-secondary" title="快捷键：P（输入时不触发）">暂停捕捉</button>
+                            <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
+                        </div>
+                    </div>
+
                     <div class="control-group">
                         <div class="section-title">配置文件</div>
                         <div class="row">
@@ -100,119 +114,137 @@
                     </div>
                 </div>
 
-                <!-- ── Tab: 帧格式 ── -->
-                <div class="tab-content" id="tab-frame">
-                    <div class="control-group">
-                        <div class="section-title">数据格式</div>
+                <div class="tab-content" id="tab-widget-library">
+                    <div class="control-group"><div class="section-title">控件库</div>
+                        <div class="widget-library-item" data-widget-type="wave" draggable="false"><span>波形</span><small>时域、频域与多通道分析</small><button type="button" data-add-widget="wave">添加</button></div>
+                        <div class="widget-library-item" data-widget-type="byte" draggable="false"><span>字节流</span><small>Hex、文本与数值记录</small><button type="button" data-add-widget="byte">添加</button></div>
+                        <span class="hint-text">拖动条目到工作区。标题可移动控件，边缘可调整大小。</span>
+                    </div>
+                </div>
+                <div class="tab-content" id="tab-export">
+                    <div class="control-group export-panel" id="export-panel">
+                        <div class="section-title">导出数据</div>
                         <div class="input-group">
-                            <label for="capture-mode">采集方式</label>
-                            <select id="capture-mode">
-                                <option value="hex">Hex</option>
-                                <option value="text">文本</option>
-                                <option value="number" selected>通道数值</option>
-                                <option value="custom" disabled>自定义帧（暂未开放）</option>
+                            <label for="export-format">导出格式</label>
+                            <select id="export-format">
+                                <option value="binary">原始字节（.bin）</option>
+                                <option value="hex-text">Hex 文本（.hex）</option>
+                                <option value="text">文本（.txt）</option>
+                                <option value="csv" selected>通道表格（.csv）</option>
                             </select>
                         </div>
-                    </div>
-                    <div class="control-group" id="frame-history-settings">
-                        <div class="section-title">重建历史数据</div>
-                        <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
-                        <span class="hint-text">未勾选时，格式变更会清理 RX/TX 缓冲区。</span>
-                    </div>
-                    <div class="control-group" id="frame-raw-settings" hidden>
-                        <div class="section-title">原始数据断帧</div>
-                        <div id="frame-text-settings" hidden>
-                            <div class="input-group">
-                                <label for="text-encoding">文本字符集</label>
-                                <select id="text-encoding">
-                                    <option value="utf-8" selected>UTF-8</option>
-                                    <option value="ascii">ASCII</option>
-                                    <option value="gbk">GBK（兼容 GB2312）</option>
-                                    <option value="gb18030">GB18030</option>
-                                    <option value="big5">Big5</option>
-                                    <option value="utf-16le">UTF-16LE</option>
-                                    <option value="utf-16be">UTF-16BE</option>
-                                    <option value="shift_jis">Shift-JIS</option>
-                                    <option value="windows-1252">Windows-1252</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label for="text-boundary">断帧方式</label>
-                                <select id="text-boundary">
-                                    <option value="idle" selected>空闲间隔</option>
-                                    <option value="cr">\r</option>
-                                    <option value="lf">\n</option>
-                                    <option value="crlf">\r\n</option>
-                                    <option value="lfcr">\n\r</option>
-                                </select>
-                            </div>
+                        <div class="input-group" id="wrap-export-direction" hidden>
+                            <label for="export-direction">数据方向</label>
+                            <select id="export-direction">
+                                <option value="rx" selected>RX 接收帧</option>
+                                <option value="tx">TX 发送帧</option>
+                                <option value="both">RX＋TX（按时间顺序）</option>
+                            </select>
                         </div>
-                        <div class="input-group" id="frame-idle-settings">
-                            <label for="idle-gap-seconds">空闲断帧间隔（s）</label>
-                            <input type="number" id="idle-gap-seconds" value="0.001" min="0.001" step="0.001" />
+                        <div class="input-group" id="wrap-export-source">
+                            <label for="export-source">记录范围</label>
+                            <select id="export-source" aria-label="导出记录范围"></select>
                         </div>
-                    </div>
-                    <div class="control-group" id="frame-header-settings">
-                        <div class="section-title">帧首</div>
-                        <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
-                        <div class="input-group" id="header-config">
-                            <label>帧首字节序列 (Hex, 空格分隔)</label>
-                            <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
-                            <span class="hint-text">支持多字节，如: AA BB CC</span>
-                        </div>
-                    </div>
-                    <div class="control-group" id="frame-footer-settings">
-                        <div class="section-title">帧尾</div>
-                        <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
-                        <div class="input-group" id="footer-config">
-                            <label>帧尾字节序列 (Hex, 空格分隔)</label>
-                            <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
-                        </div>
-                    </div>
-                    <div class="control-group" id="frame-checksum-settings">
-                        <div class="section-title">校验位</div>
-                        <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
-                        <span class="hint-text" style="margin-top:-4px;">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
-                    </div>
-                    <div class="control-group" id="frame-numeric-settings">
-                        <div class="section-title">数值解码</div>
-                        <div class="row">
-                            <div class="input-group">
-                                <label>数据类型</label>
-                                <select id="data-type">
-                                    <option value="int8">Int8</option>
-                                    <option value="uint8">UInt8</option>
-                                    <option value="int16">Int16</option>
-                                    <option value="uint16">UInt16</option>
-                                    <option value="int32">Int32</option>
-                                    <option value="uint32">UInt32</option>
-                                    <option value="int64">Int64</option>
-                                    <option value="uint64">UInt64</option>
-                                    <option value="float32" selected>Float32</option>
-                                    <option value="float64">Float64</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label>字节端序</label>
-                                <select id="endianness">
-                                    <option value="little" selected>小端 (LE)</option>
-                                    <option value="big">大端 (BE)</option>
-                                </select>
-                            </div>
+                        <span id="export-source-status" class="hint-text" role="status"></span>
+                        <span class="hint-text" id="export-scope-hint">导出所选数据来源的完整保留缓冲区。</span>
+                        <div id="wrap-export-text-parsing" hidden>
+                        <div class="section-title">文本帧解析（仅用于导出）</div>
+                        <label class="chk-label"><input type="checkbox" id="export-follow-text" checked />跟随当前监视台帧配置</label>
+                        <div class="input-group" id="wrap-export-encoding" hidden>
+                            <label for="export-encoding">源数据字符集</label>
+                            <select id="export-encoding">
+                                <option value="utf-8" selected>UTF-8</option>
+                                <option value="ascii">ASCII</option>
+                                <option value="gbk">GBK（兼容 GB2312）</option>
+                                <option value="gb18030">GB18030</option>
+                                <option value="big5">Big5</option>
+                                <option value="utf-16le">UTF-16LE</option>
+                                <option value="utf-16be">UTF-16BE</option>
+                                <option value="shift_jis">Shift-JIS</option>
+                                <option value="windows-1252">Windows-1252</option>
+                            </select>
+                            <span class="hint-text">用于解码原始字节，与输出文件编码独立。</span>
                         </div>
                         <div class="input-group">
-                            <label>采样通道数 (Channels)</label>
-                            <input type="number" id="channels-count" value="1" min="1" max="50" />
+                            <label for="export-text-boundary">断帧方式</label>
+                            <select id="export-text-boundary">
+                                <option value="records" selected>沿用记录边界</option>
+                                <option value="idle">空闲间隔（0.001 s）</option>
+                                <option value="cr">\r</option><option value="lf">\n</option>
+                                <option value="crlf">\r\n</option><option value="lfcr">\n\r</option>
+                            </select>
                         </div>
+                        <div class="input-group">
+                            <label for="export-output-encoding">输出文件编码</label>
+                            <select id="export-output-encoding">
+                                <option value="utf-8" selected>UTF-8</option><option value="ascii">ASCII</option>
+                                <option value="gbk">GBK（兼容 GB2312）</option><option value="gb18030">GB18030</option>
+                                <option value="big5">Big5</option><option value="utf-16le">UTF-16LE</option>
+                                <option value="utf-16be">UTF-16BE</option><option value="shift_jis">Shift-JIS</option>
+                                <option value="windows-1252">Windows-1252</option>
+                            </select>
+                            <span class="hint-text">无法用所选编码表示的字符会报错，不会静默替换。</span>
+                        </div>
+                        </div>
+                        <div id="wrap-export-numeric-parsing" hidden>
+                            <div class="section-title">数值帧解析（仅用于导出）</div>
+                            <label class="chk-label"><input type="checkbox" id="export-follow-numeric" checked />跟随当前监视台帧配置</label>
+                            <div class="row">
+                                <div class="input-group"><label for="export-data-type">数据类型</label>
+                                    <select id="export-data-type">
+                                        <option value="int8">Int8</option><option value="uint8">UInt8</option>
+                                        <option value="int16">Int16</option><option value="uint16">UInt16</option>
+                                        <option value="int32">Int32</option><option value="uint32">UInt32</option>
+                                        <option value="int64">Int64</option><option value="uint64">UInt64</option>
+                                        <option value="float32">Float32</option><option value="float64">Float64</option>
+                                    </select>
+                                </div>
+                                <div class="input-group"><label for="export-endianness">字节端序</label>
+                                    <select id="export-endianness"><option value="little">小端 (LE)</option><option value="big">大端 (BE)</option></select>
+                                </div>
+                            </div>
+                            <div class="input-group"><label for="export-channels-count">采样通道数</label>
+                                <input type="number" id="export-channels-count" min="1" max="50" value="1" />
+                            </div>
+                            <label class="chk-label"><input type="checkbox" id="export-chk-header" />启用帧首特征匹配</label>
+                            <div class="input-group" id="export-header-config"><label for="export-frame-header">帧首字节序列（Hex）</label>
+                                <input type="text" id="export-frame-header" placeholder="如：AB CD" />
+                            </div>
+                            <label class="chk-label"><input type="checkbox" id="export-chk-footer" />启用帧尾特征匹配</label>
+                            <div class="input-group" id="export-footer-config"><label for="export-frame-footer">帧尾字节序列（Hex）</label>
+                                <input type="text" id="export-frame-footer" placeholder="如：0D 0A" />
+                            </div>
+                            <label class="chk-label"><input type="checkbox" id="export-chk-checksum" />启用末尾 8-bit 和校验</label>
+                            <span class="hint-text">校验只针对数据段，位于帧尾之后。更改通道数后仅导出原始解码通道；通道数一致时包含运算通道。</span>
+                        </div>
+                        <span id="export-parse-status" class="hint-text" role="status" hidden></span>
+                        <div id="export-channels-wrap" class="export-channels" hidden>
+                            <div id="export-channel-summary" class="export-channel-heading">导出通道</div>
+                            <div class="row">
+                                <button id="btn-export-channels-all-on" type="button" class="btn btn-secondary">全部选择</button>
+                                <button id="btn-export-channels-all-off" type="button" class="btn btn-secondary">全部取消</button>
+                            </div>
+                            <div id="export-channel-list" class="export-channel-list" role="group" aria-label="导出通道"></div>
+                            <span class="hint-text">独立选择 CSV 列，不受波形或字节流通道可见性影响。</span>
+                        </div>
+                        <div class="export-metadata" id="export-text-metadata" hidden>
+                            <label class="chk-label"><input type="checkbox" id="export-timestamps" />带时间戳</label>
+                            <label class="chk-label" id="wrap-export-markers"><input type="checkbox" id="export-markers" />带 RX/TX 标记</label>
+                        </div>
+                        <span class="hint-text" id="export-binary-hint" hidden>仅保存原始字节，不保存断帧边界、时间戳或 RX/TX 标记。</span>
+                        <span class="hint-text" id="export-retention-hint" hidden>RX/TX 各自最多保留“最大帧数量”的记录；仅导出成功发送的 TX 数据。</span>
+                        <span class="hint-text" id="export-availability" role="status" hidden></span>
+                        <p class="hint-text export-range-summary" id="export-range-summary" role="status"></p>
+                        <button id="btn-export" class="btn btn-success">导出数据</button>
                     </div>
-                    <span id="format-apply-status" class="hint-text format-status" role="status" aria-live="polite" hidden></span>
                 </div>
+                <!-- ── Tab: 导出数据 ── -->
 
             </div>
         </aside>
 
-        <!-- 水平分隔条：拖拽调整侧栏宽度，与垂直分隔条 v-resizer 共用交互模式 -->
-        <div class="h-resizer" id="h-resizer"></div>
+        <!-- 水平分隔条：拖拽调整侧栏宽度 -->
+        <div class="h-resizer" id="h-resizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度"></div>
 
         <!-- ══ 中央：波形 + 字节流 + 定位搜索 ══ -->
         <main class="main-display" id="main-display">
@@ -220,92 +252,32 @@
 
             <div id="history-rebuild-progress" class="history-rebuild-progress" role="status" aria-live="polite" hidden></div>
 
-            <!-- ── 波形绘图区 ── -->
-            <div class="canvas-wrapper box-border" id="canvas-wrapper">
-                <div class="plot-header" id="plot-header">
-                    <div class="plot-title-row monitor-title-row">
-                        <span class="plot-title">波形监视台</span>
-                        <span id="stat-plot-fps">绘图帧率: 0 FPS</span>
-                    </div>
-                    <!-- 单通道统计由 app.js 动态更新 -->
-                    <div class="plot-info-row monitor-stats-row" id="plot-info-row" hidden>
-                        <div id="plot-channel-stats" class="plot-channel-stats monitor-stat-grid"></div>
-                    </div>
+            <section class="monitor-workspace" id="monitor-workspace" aria-label="监视台工作区">
+                <div class="workspace-toolbar" id="workspace-toolbar">
+                    <span class="workspace-label" title="Ctrl＋滚轮或 Ctrl＋= / Ctrl＋- 缩放工作区；Shift＋滚轮横向滚动">工作区</span>
+                    <label class="workspace-zoom-input"><input id="workspace-zoom-percent" type="number" min="25" max="500" step="1" value="100" aria-label="工作区缩放百分比" />%</label>
+                    <button id="workspace-zoom-reset" type="button" title="恢复工作区缩放至 100%" aria-label="恢复工作区缩放至 100%">100%</button>
+                    <label for="workspace-step">对齐步进</label>
+                    <select id="workspace-step" aria-label="监视台对齐步进">
+                        <option value="10" selected>10 px</option>
+                        <option value="20">20 px</option>
+                        <option value="40">40 px</option>
+                    </select>
+                    <button id="workspace-reset" type="button" title="整理现有控件的位置与大小">恢复布局</button>
                 </div>
-                <canvas id="waveform-canvas"></canvas>
-                <div class="plot-y-scrollbar-wrap" id="plot-y-scrollbar-wrap" hidden>
-                    <div class="plot-y-scrollbar-thumb" id="plot-y-scrollbar-thumb"></div>
-                </div>
-                <div class="plot-scrollbar-wrap" id="plot-scrollbar-wrap">
-                    <div class="plot-scrollbar-thumb" id="plot-scrollbar-thumb"></div>
-                </div>
-            </div>
+                <div class="workspace-viewport" id="workspace-viewport">
+                    <div class="workspace-surface" id="workspace-surface">
+                        <div id="workspace-empty" class="workspace-empty">从左侧“控件”拖入监视台，或点击“添加”。</div>
+                        <!-- ── 波形绘图区 ── -->
 
-            <!-- 垂直分隔条：拖拽调整波形区与监视台高度，与水平分隔条 h-resizer 共用交互模式 -->
-            <div class="v-resizer" id="v-resizer"></div>
 
-            <!-- ── 字节流监视台 ── -->
-            <div class="monitor-panel box-border" id="monitor-panel">
-                <div class="monitor-header monitor-title-row" id="monitor-header">
-                    <span class="monitor-title">字节流监视台</span>
-                </div>
-                <div class="stats-bar-row monitor-stats-row monitor-stat-grid" id="monitor-stats">
-                    <span id="stat-rx" class="monitor-stat-item"><span class="monitor-stat-label">RX:</span><span id="stat-rx-value" class="monitor-stat-value">0 B/s</span></span>
-                    <span id="stat-tx" class="monitor-stat-item"><span class="monitor-stat-label">TX:</span><span id="stat-tx-value" class="monitor-stat-value">0 B/s</span></span>
-                    <span id="stat-fps" class="monitor-stat-item"><span class="monitor-stat-label">帧率:</span><span id="stat-fps-value" class="monitor-stat-value">0 f/s</span></span>
-                    <span id="stat-fail" class="monitor-stat-item"><span id="stat-fail-label" class="monitor-stat-label">校验失败:</span><span id="stat-fail-value" class="monitor-stat-value">0%</span></span>
-                </div>
-                <!-- 可滚动的窗口原始帧记录；只渲染可见行 -->
-                <div id="data-log" class="log-content"></div>
+                        <!-- ── 字节流监视台 ── -->
 
-                <!-- 日志/发送区分隔条（暂未启用） -->
-                <!-- <div class="v-resizer-inner" id="log-send-resizer"></div> -->
-
-                <!-- 发送面板 -->
-                <div class="send-panel" id="send-panel">
-                    <div class="send-toolbar">
-                        <div class="send-mode-row">
-                            <label for="send-mode">发送显示</label>
-                            <select id="send-mode" aria-label="发送框显示格式">
-                                <option value="hex" selected>Hex</option>
-                                <option value="text">Text</option>
-                            </select>
-                        </div>
-                        <div class="interval-wrap">
-                            <label for="send-interval">间隔</label>
-                            <input type="number" id="send-interval" value="0" min="0" step="0.001" title="支持浮点数" />
-                            <select id="send-interval-unit" aria-label="发送间隔单位">
-                                <option value="s" selected>s</option>
-                                <option value="hz">Hz</option>
-                            </select>
-                        </div>
-                        <div class="send-actions">
-                            <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
-                            <input type="file" id="send-file-input" hidden />
-                            <button id="btn-send" class="btn btn-primary">发送</button>
-                        </div>
-                    </div>
-                    <textarea id="send-input" rows="4" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
-                </div>
-
-            </div>
-            <!-- 独立的缓冲区设置、时间定位与搜索面板，不参与波形与字节流之间的拖拽分配 -->
-            <section class="navigation-panel box-border" id="navigation-panel" aria-label="缓冲区设置、时间定位和搜索">
-                <div class="monitor-tool-row" id="board-toolbar" aria-label="缓冲区设置">
-                    <span class="tool-label">缓冲区设置</span>
-                    <div class="buffer-toolbar">
-                        <div class="input-group">
-                            <label id="max-points-label" for="max-points">最大采样点数</label>
-                            <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
-                        </div>
-                        <div class="input-group" id="plot-window-control">
-                            <label for="plot-window-points">波形监视台内采样点数</label>
-                            <input type="number" step="100" min="2" max="1000" id="plot-window-points" value="1000" />
-                        </div>
-                        <button id="btn-pause" class="btn btn-secondary">暂停捕捉</button>
-                        <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
                     </div>
                 </div>
+            </section>
+            <!-- 独立的时间定位与搜索面板，保持在工作区外 -->
+            <section class="navigation-panel box-border" id="navigation-panel" aria-label="时间定位和搜索">
                 <div class="monitor-tool-row" id="nav-time-tools">
                     <span class="tool-label">时间定位</span>
                     <div class="jump-toolbar" id="nav-jump-toolbar">
@@ -344,26 +316,306 @@
                         <div class="search-origin-group">
                             <label for="monitor-search-origin">就近依据</label>
                             <select id="monitor-search-origin" aria-label="就近依据">
-                                <option value="wave">波形当前位置就近</option>
-                                <option value="byte" selected>字节流当前位置就近</option>
+                                <option value="">请选择参考控件</option>
                             </select>
                         </div>
                         <span id="monitor-search-status" role="status"></span>
                     </div>
                 </div>
             </section>
+            <section class="global-send box-border" id="global-send" aria-labelledby="global-send-title">
+                <div class="send-resizer" id="send-resizer" role="separator" aria-orientation="horizontal" aria-label="调整发送输入框高度" aria-controls="send-input" tabindex="0"></div>
+                <h2 class="global-send-title" id="global-send-title">全局发送</h2><div class="send-panel" id="send-panel">
+                                <div class="send-toolbar">
+                                    <div class="send-mode-row">
+                                        <label for="send-mode">发送显示</label>
+                                        <select id="send-mode" aria-label="发送框显示格式">
+                                            <option value="hex" selected>Hex</option>
+                                            <option value="text">Text</option>
+                                        </select>
+                                    </div>
+                                    <div class="interval-wrap">
+                                        <label for="send-interval">间隔</label>
+                                        <input type="number" id="send-interval" value="0" min="0" step="0.001" title="支持浮点数" />
+                                        <select id="send-interval-unit" aria-label="发送间隔单位">
+                                            <option value="s" selected>s</option>
+                                            <option value="hz">Hz</option>
+                                        </select>
+                                    </div>
+                                    <div class="send-actions">
+                                        <button id="btn-load-file" class="btn btn-secondary">载入文件</button>
+                                        <input type="file" id="send-file-input" hidden />
+                                        <button id="btn-send" class="btn btn-primary">发送</button>
+                                    </div>
+                                </div>
+                                <textarea id="send-input" rows="4" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
+                            </div></section>
         </main>
-        <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-label="调整通道配置宽度"></div>
-        <aside class="channel-sidebar" id="channel-sidebar" aria-label="通道显示设置">
-            <div class="channel-settings-content tab-group">
-                <div class="tab-bar">
-                    <button class="tab-btn" id="tab-waveform-config-button" data-tab="tab-waveform-config">波形</button>
-                    <button class="tab-btn active" id="tab-monitor-config-button" data-tab="tab-monitor-config">字节流</button>
-                    <button class="tab-btn" id="tab-export-button" data-tab="tab-export">导出配置</button>
+        <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-orientation="vertical" aria-label="调整监视台配置宽度"></div>
+        <aside class="channel-sidebar" id="channel-sidebar" aria-label="监视台配置">
+            <div class="sidebar-section-header" id="active-monitor-caption" aria-live="polite">控件属性</div>
+            <div id="widget-selection-prompt" class="widget-selection-prompt">点击控件以查看和修改其配置。</div>
+            <div id="widget-title-tools" class="widget-title-tools" hidden><input id="widget-title" aria-label="控件标题" /><button id="widget-delete" type="button" class="btn btn-danger">删除</button></div>
+            <div class="channel-settings-content tab-group" id="monitor-settings-tabs" hidden>
+                <div class="tab-bar settings-tabs">
+                    <button class="tab-btn" id="tab-waveform-frame-button" data-tab="tab-waveform-frame">帧解析</button>
+                    <button class="tab-btn" id="tab-byte-frame-button" data-tab="tab-byte-frame">帧解析</button>
+                    <button class="tab-btn" id="tab-waveform-config-button" data-tab="tab-waveform-config">显示方式</button>
+                    <button class="tab-btn active" id="tab-monitor-config-button" data-tab="tab-monitor-config">显示方式</button>
+                    <button class="tab-btn" id="tab-waveform-channels-button" data-tab="tab-waveform-channels">通道配置</button>
+                    <button class="tab-btn" id="tab-monitor-channels-button" data-tab="tab-monitor-channels">通道配置</button>
+                </div>
+                <span id="format-apply-status" class="hint-text format-status sidebar-status" role="status" aria-live="polite" hidden></span>
+                <span id="monitor-display-status" class="hint-text monitor-display-status sidebar-status" role="status" aria-live="polite" hidden></span>
+                <div class="tab-content" id="tab-waveform-frame">
+                    <div class="control-group" id="frame-history-settings">
+                        <div class="section-title">重建历史数据</div>
+                        <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
+                        <span class="hint-text">未勾选时，仅受影响的数据源从当前接收位置开始记录。</span>
+                    </div>
+                    <div id="shared-numeric-settings" class="numeric-frame-settings">
+                        <div class="control-group" id="frame-numeric-settings">
+                            <div class="section-title">数值解码（所有数值控件共用）</div>
+                            <div class="row">
+                                <div class="input-group">
+                                    <label>数据类型</label>
+                                    <select id="data-type">
+                                        <option value="int8">Int8</option>
+                                        <option value="uint8">UInt8</option>
+                                        <option value="int16">Int16</option>
+                                        <option value="uint16">UInt16</option>
+                                        <option value="int32">Int32</option>
+                                        <option value="uint32">UInt32</option>
+                                        <option value="int64">Int64</option>
+                                        <option value="uint64">UInt64</option>
+                                        <option value="float32" selected>Float32</option>
+                                        <option value="float64">Float64</option>
+                                    </select>
+                                </div>
+                                <div class="input-group">
+                                    <label>字节端序</label>
+                                    <select id="endianness">
+                                        <option value="little" selected>小端 (LE)</option>
+                                        <option value="big">大端 (BE)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label>采样通道数 (Channels)</label>
+                                <input type="number" id="channels-count" value="1" min="1" max="50" />
+                            </div>
+                        </div>
+                        <div class="control-group" id="frame-header-settings">
+                            <div class="section-title">帧首</div>
+                            <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
+                            <div class="input-group" id="header-config">
+                                <label>帧首字节序列 (Hex, 空格分隔)</label>
+                                <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
+                                <span class="hint-text">支持多字节，如: AA BB CC</span>
+                            </div>
+                        </div>
+                        <div class="control-group" id="frame-footer-settings">
+                            <div class="section-title">帧尾</div>
+                            <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
+                            <div class="input-group" id="footer-config">
+                                <label>帧尾字节序列 (Hex, 空格分隔)</label>
+                                <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
+                            </div>
+                        </div>
+                        <div class="control-group" id="frame-checksum-settings">
+                            <div class="section-title">校验位</div>
+                            <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
+                            <span class="hint-text" style="margin-top:-4px;">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-content" id="tab-byte-frame">
+                    <div class="control-group">
+                        <div class="section-title">数据格式</div>
+                        <div class="input-group">
+                            <label for="capture-mode">采集方式</label>
+                            <select id="capture-mode">
+                                <option value="hex">Hex</option>
+                                <option value="text">文本</option>
+                                <option value="number" selected>通道数值</option>
+                                <option value="custom" disabled>自定义帧（暂未开放）</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <div class="section-title">重建历史数据</div>
+                        <label class="chk-label"><input type="checkbox" id="rebuild-history-byte" checked />格式变更时重建</label>
+                        <span class="hint-text">与其它控件同步；仅受影响的数据源重新记录。</span>
+                    </div>
+                    <div id="byte-numeric-settings" hidden></div>
+                    <div class="control-group" id="frame-raw-settings" hidden>
+                        <div class="section-title">原始数据断帧（全局共用）</div>
+                        <div id="frame-text-settings" hidden>
+                            <div class="input-group">
+                                <label for="text-encoding">文本字符集</label>
+                                <select id="text-encoding">
+                                    <option value="utf-8" selected>UTF-8</option>
+                                    <option value="ascii">ASCII</option>
+                                    <option value="gbk">GBK（兼容 GB2312）</option>
+                                    <option value="gb18030">GB18030</option>
+                                    <option value="big5">Big5</option>
+                                    <option value="utf-16le">UTF-16LE</option>
+                                    <option value="utf-16be">UTF-16BE</option>
+                                    <option value="shift_jis">Shift-JIS</option>
+                                    <option value="windows-1252">Windows-1252</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label for="text-boundary">断帧方式</label>
+                                <select id="text-boundary">
+                                    <option value="idle" selected>空闲间隔</option>
+                                    <option value="cr">\r</option>
+                                    <option value="lf">\n</option>
+                                    <option value="crlf">\r\n</option>
+                                    <option value="lfcr">\n\r</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-content" id="tab-waveform-config">
+                    <div class="channels-display-panel" id="channels-display-panel">
+                        <div class="control-group">
+                            <div class="section-title">显示内容</div>
+                            <div class="input-group">
+                                <label for="plot-content">显示对象</label>
+                                <select id="plot-content"><option value="samples">采样波形</option><option value="response">系统响应</option></select>
+                            </div>
+                            <div class="input-group">
+                                <label class="option-label" for="plot-view-mode">波形模式</label>
+                                <select id="plot-view-mode">
+                                    <option value="time" selected>时域图</option>
+                                    <option value="frequency">幅频图</option>
+                                    <option value="phase">相频图</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="control-group">
+                            <div class="section-title">采样与响应</div>
+                            <div class="input-group" id="plot-window-control">
+                                <label id="plot-window-label" for="plot-window-points">采样点数（全局共用）</label>
+                                <input type="number" step="100" min="2" max="1000" id="plot-window-points" value="1000" />
+                            </div>
+                            <div id="wrap-response-options" hidden>
+                                <div class="input-group"><label for="plot-response-sample-rate">响应采样率（Hz，0 表示未设置）</label><input id="plot-response-sample-rate" type="number" min="0" step="any" value="0" /></div>
+                                <p class="hint-text">时域为零状态单位脉冲响应，左侧固定为 [0]，向右递增。未设置采样率时，频率单位为 cycles/sample。</p>
+                            </div>
+                            <span id="plot-response-status" class="hint-text" role="status" style="color:#b42318;" hidden></span>
+                        </div>
+                        <div class="control-group" id="plot-horizontal-settings">
+                            <div class="section-title">横轴设置</div>
+                            <div id="wrap-plot-time-axis" class="input-group">
+                                <label class="option-label" for="plot-time-x-unit">时域横轴单位</label>
+                                <select id="plot-time-x-unit">
+                                    <option value="samples" selected>Sample</option>
+                                    <option value="s">s</option>
+                                </select>
+                            </div>
+                            <div id="wrap-plot-frequency-axis" class="axis-options" style="display:none;">
+                                <div class="input-group">
+                                    <label class="option-label" for="plot-freq-x-scale">横轴刻度</label>
+                                    <select id="plot-freq-x-scale">
+                                        <option value="bins-linear">Bin-线性</option>
+                                        <option value="bins-log">Bin-对数</option>
+                                        <option value="hz-linear">Hz-线性</option>
+                                        <option value="hz-log" selected>Hz-对数</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <span id="plot-sample-axis-hint" class="hint-text">Hz 和 s 按最近测得的接收帧率估算；对数横轴从第 1 个频点开始。</span>
+                        </div>
+                        <div class="control-group" id="plot-vertical-settings">
+                            <div class="section-title">纵轴设置</div>
+                            <div class="input-group" id="wrap-magnitude-scale">
+                                <label class="option-label" for="plot-freq-y-scale">纵轴刻度</label>
+                                <select id="plot-freq-y-scale">
+                                    <option value="amplitude-linear">原幅值-线性</option>
+                                    <option value="amplitude-log">原幅值-对数</option>
+                                    <option value="db10" selected>dB：10lg(幅值)</option>
+                                    <option value="db20">dB：20lg(幅值)</option>
+                                </select>
+                            </div>
+                            <div id="wrap-phase-unit" class="input-group" hidden>
+                                <label class="option-label" for="plot-phase-unit">纵轴刻度</label>
+                                <select id="plot-phase-unit">
+                                    <option value="degrees">角度（°）</option>
+                                    <option value="radians" selected>弧度（rad）</option>
+                                </select>
+                            </div>
+                            <div id="wrap-phase-options" class="input-group" hidden>
+                                <label class="chk-label"><input type="checkbox" id="plot-phase-unwrap" checked />展开相位</label>
+                                <span class="hint-text">取消勾选时折叠至 −180°～180°（−π～π rad）。采样波形相位相对 FFT 窗口首点。</span>
+                            </div>
+                            <div class="input-group">
+                                <label class="option-label" for="plot-y-scale-mode">Y 轴策略</label>
+                                <select id="plot-y-scale-mode">
+                                    <option value="auto" selected>自动缩放 Y 轴</option>
+                                    <option value="manual">自定义 Y 轴范围</option>
+                                </select>
+                            </div>
+                            <div class="row" id="wrap-plot-y-bounds" style="display:none;">
+                                <div class="input-group">
+                                    <label>Y 轴最小值</label>
+                                    <input type="number" id="plot-y-min" step="0.1" value="-1" />
+                                </div>
+                                <div class="input-group">
+                                    <label>Y 轴最大值</label>
+                                    <input type="number" id="plot-y-max" step="0.1" value="1" />
+                                </div>
+                            </div>
+                            <span id="plot-y-range-status" class="hint-text" role="status" aria-live="polite" style="color:#b42318;" hidden></span>
+                            <span id="plot-log-axis-hint" class="hint-text" hidden>对数纵轴自定义下限为 0 时，零附近自动采用线性刻度，其余范围按对数间距显示原幅值。</span>
+                        </div>
+                        <div class="control-group" id="plot-spectrum-settings" hidden>
+                            <div class="section-title">FFT 设置</div>
+                            <div class="input-group" id="wrap-fft-window">
+                                <label class="option-label" for="plot-fft-window">FFT 窗函数</label>
+                                <select id="plot-fft-window">
+                                    <option value="rectangular">无窗</option>
+                                    <option value="hann" selected>Hann</option>
+                                    <option value="hamming">Hamming</option>
+                                    <option value="blackman">Blackman</option>
+                                    <option value="flatTop">Flat-top</option>
+                                </select>
+                            </div>
+                            <div id="wrap-fft-remove-dc" style="display:none;">
+                                <label class="chk-label"><input type="checkbox" id="plot-fft-remove-dc" checked />频域去直流</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-content" id="tab-waveform-channels">
+                    <div class="control-group channels-list-panel" id="channels-list-panel">
+                        <div class="section-title">通道配置</div>
+                        <div class="input-group"><label for="channel-category-wave">通道分类</label><select id="channel-category-wave"><option value="all">全部分类</option><option value="raw">原始数据</option><option value="formula">运算通道</option><option value="constant">常量数组</option><option value="system">差分方程系统</option></select></div>
+                        <div class="channel-toolbar">
+                            <p class="hint-text">名称、颜色和运算定义全局共用；可见性仅作用于当前控件。</p>
+                            <div class="channel-toolbar-actions">
+                                <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
+                                <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
+                            </div>
+                        </div>
+                        <div class="channel-create">
+                            <select id="channel-add-type-wave" aria-label="新建通道类型">
+                                <option value="raw" disabled hidden>原始数据</option>
+                                <option value="formula">运算通道</option><option value="constant">常量数组</option><option value="system">差分方程系统</option>
+                            </select>
+                            <button id="channel-add-wave" class="btn btn-primary">新增通道</button>
+                        </div>
+                        <div id="channel-help-wave" class="channel-help hint-text"></div>
+                        <label class="chk-label"><input type="checkbox" id="channel-rebuild-wave" checked />重建历史数据</label>
+                        <p class="hint-text">不勾选时保留历史波形，新定义从下一点开始。支持 diff、int、filter。</p>
+                        <div id="channel-config-list" class="channel-config-list"></div>
+                    </div>
                 </div>
                 <div class="tab-content active" id="tab-monitor-config">
                     <div class="control-group monitor-settings-panel" id="monitor-display-panel">
-                        <div class="section-title">字节流显示方式</div>
+                        <div class="section-title">显示方式</div>
                         <div class="monitor-options" id="monitor-hex-options" hidden>
                             <div class="input-group">
                                 <label for="monitor-hex-bytes-per-line">每行字节数</label>
@@ -436,7 +688,7 @@
                         <label class="chk-label"><input type="checkbox" id="monitor-show-direction" checked />显示 RX/TX 方向标记</label>
                     </div>
                     <div class="control-group monitor-settings-panel" id="monitor-config-panel">
-                        <div class="section-title">字节流显示配置</div>
+                        <div class="section-title">记录配置</div>
                         <div class="monitor-checkboxes">
                             <label class="chk-label"><input type="checkbox" id="monitor-show-rx" checked />RX 接收</label>
                             <label class="chk-label"><input type="checkbox" id="monitor-show-tx" checked />TX 发送</label>
@@ -460,7 +712,6 @@
                             <label for="monitor-fold-lines">折叠后显示行数</label>
                             <input type="number" id="monitor-fold-lines" min="1" max="64" step="1" value="8" />
                         </div>
-                        <span id="monitor-display-status" class="hint-text monitor-display-status" role="status" aria-live="polite" hidden></span>
                     </div>
                     <div class="control-group monitor-settings-panel" id="monitor-color-panel">
                         <div class="section-title">颜色配置</div>
@@ -473,6 +724,10 @@
                             <input type="color" id="monitor-tx-color" class="monitor-color" value="#63ff9a" />
                             <label for="monitor-rx-error-color">RX 错误</label>
                             <input type="color" id="monitor-rx-error-color" class="monitor-color" value="#ffcc02" />
+                            <label for="monitor-rx-invalid-color">RX 无效字符</label>
+                            <input type="color" id="monitor-rx-invalid-color" class="monitor-color" value="#ffffff" />
+                            <label for="monitor-rx-limit-color">RX 超出分段上限</label>
+                            <input type="color" id="monitor-rx-limit-color" class="monitor-color" value="#ffcc02" />
                             <label for="monitor-tx-error-color">TX 错误</label>
                             <input type="color" id="monitor-tx-error-color" class="monitor-color" value="#ff5a5a" />
                             <label for="monitor-search-current-color">当前搜索结果</label>
@@ -482,118 +737,30 @@
                         </div>
                     </div>
                 </div>
-                <div class="tab-content" id="tab-waveform-config">
-                    <div class="control-group channels-display-panel" id="channels-display-panel">
-                        <div class="section-title">通道显示方式</div>
-                        <div class="input-group">
-                            <label class="option-label" for="plot-view-mode">波形模式</label>
-                            <select id="plot-view-mode">
-                                <option value="time" selected>时域图</option>
-                                <option value="frequency">频域图</option>
-                            </select>
-                        </div>
-                        <div id="wrap-plot-time-axis" class="input-group">
-                            <label class="option-label" for="plot-time-x-unit">时域横轴单位</label>
-                            <select id="plot-time-x-unit">
-                                <option value="samples" selected>Sample</option>
-                                <option value="s">s</option>
-                            </select>
-                        </div>
-                        <div id="wrap-plot-frequency-axis" class="axis-options" style="display:none;">
-                            <div class="input-group">
-                                <label class="option-label" for="plot-freq-x-unit">频域横轴单位</label>
-                                <select id="plot-freq-x-unit">
-                                    <option value="bins">Bin</option>
-                                    <option value="hz" selected>Hz</option>
+                <div class="tab-content" id="tab-monitor-channels">
+                    <div class="control-group channels-list-panel">
+                        <div class="section-title">通道配置</div>
+                        <div class="input-group"><label for="channel-category-byte">通道分类</label><select id="channel-category-byte"><option value="all">全部分类</option><option value="raw">原始数据</option><option value="formula">运算通道</option><option value="constant">常量数组</option><option value="system">差分方程系统</option></select></div>
+                        <input type="hidden" id="monitor-hidden-channels" value="[]" />
+                        <p class="hint-text" id="monitor-channel-unavailable" hidden>Hex／文本没有通道数值；通道选择仅影响通道数值模式的字节流显示。</p>
+                        <div id="monitor-channel-options" class="monitor-channel-options">
+                            <p class="hint-text">独立控制字节流中的通道显示，不影响波形、搜索及导出。</p>
+                            <div class="row">
+                                <button id="btn-monitor-channels-all-on" class="btn btn-secondary">全部打开</button>
+                                <button id="btn-monitor-channels-all-off" class="btn btn-secondary">全部关闭</button>
+                            </div>
+                            <div class="channel-create">
+                                <select id="channel-add-type-byte" aria-label="新建通道类型">
+                                    <option value="raw" disabled hidden>原始数据</option>
+                                    <option value="formula">运算通道</option><option value="constant">常量数组</option><option value="system">差分方程系统</option>
                                 </select>
+                                <button id="channel-add-byte" class="btn btn-primary">新增通道</button>
                             </div>
-                            <div class="input-group">
-                                <label class="option-label" for="plot-freq-x-scale">频域横轴形式</label>
-                                <select id="plot-freq-x-scale">
-                                    <option value="linear" selected>线性</option>
-                                    <option value="log">对数</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label class="option-label" for="plot-freq-y-scale">频域纵轴形式</label>
-                                <select id="plot-freq-y-scale">
-                                    <option value="linear" selected>线性</option>
-                                    <option value="log">对数幅值</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label class="option-label" for="plot-fft-window">FFT 窗函数</label>
-                                <select id="plot-fft-window">
-                                    <option value="rectangular">无窗</option>
-                                    <option value="hann" selected>Hann</option>
-                                    <option value="hamming">Hamming</option>
-                                    <option value="blackman">Blackman</option>
-                                    <option value="flatTop">Flat-top</option>
-                                </select>
-                            </div>
+                            <div id="channel-help-byte" class="channel-help hint-text"></div>
+                            <label class="chk-label"><input type="checkbox" id="channel-rebuild-byte" checked />重建历史数据</label>
+                            <p class="hint-text">名称、颜色和运算定义全局共用；不重建时保留历史结果。</p>
+                            <div id="monitor-channel-list" class="channel-config-list"></div>
                         </div>
-                        <div class="input-group">
-                            <label class="option-label" for="plot-y-scale-mode">Y 轴策略</label>
-                            <select id="plot-y-scale-mode">
-                                <option value="auto" selected>自动缩放 Y 轴</option>
-                                <option value="manual">自定义 Y 轴范围</option>
-                            </select>
-                        </div>
-                        <div id="wrap-fft-remove-dc" style="display:none;">
-                            <label class="chk-label"><input type="checkbox" id="plot-fft-remove-dc" />频域去直流</label>
-                        </div>
-                        <div class="row" id="wrap-plot-y-bounds" style="display:none;">
-                            <div class="input-group">
-                                <label>Y 轴最小值</label>
-                                <input type="number" id="plot-y-min" step="0.1" value="-1" />
-                            </div>
-                            <div class="input-group">
-                                <label>Y 轴最大值</label>
-                                <input type="number" id="plot-y-max" step="0.1" value="1" />
-                            </div>
-                        </div>
-                        <span id="plot-y-range-status" class="hint-text" role="status" aria-live="polite" style="color:#b42318;" hidden></span>
-                        <span class="hint-text">Hz 和 s 按最近测得的接收帧率估算；对数横轴从第 1 个频点开始。对数纵轴自定义下限为 0 时，零附近自动采用线性刻度，其余范围按对数间距显示原幅值。</span>
-                    </div>
-                    <div class="control-group channels-list-panel" id="channels-list-panel">
-                        <div class="section-title">通道显示配置</div>
-                        <div class="channel-toolbar">
-                            <p class="hint-text">在帧格式页设置通道数后自动更新。</p>
-                            <div class="channel-toolbar-actions">
-                                <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
-                                <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
-                            </div>
-                        </div>
-                        <div id="channel-config-list" class="channel-config-list"></div>
-                    </div>
-                </div>
-                <div class="tab-content" id="tab-export">
-                    <div class="control-group export-panel" id="export-panel">
-                        <div class="section-title">数据导出设置</div>
-                        <div class="input-group">
-                            <label for="export-format">导出格式</label>
-                            <select id="export-format">
-                                <option value="binary">Hex 原始字节（.bin）</option>
-                                <option value="hex-text">Hex 文本（.txt）</option>
-                                <option value="text">文本（.txt，UTF-8）</option>
-                                <option value="csv" selected>通道 CSV（.csv）</option>
-                            </select>
-                        </div>
-                        <div class="input-group" id="wrap-export-direction" hidden>
-                            <label for="export-direction">导出范围</label>
-                            <select id="export-direction">
-                                <option value="rx" selected>RX 接收帧</option>
-                                <option value="tx">TX 发送帧</option>
-                                <option value="both">RX＋TX（按时间顺序）</option>
-                            </select>
-                        </div>
-                        <div class="export-metadata" id="export-text-metadata" hidden>
-                            <label class="chk-label"><input type="checkbox" id="export-timestamps" />带时间戳</label>
-                            <label class="chk-label" id="wrap-export-markers"><input type="checkbox" id="export-markers" />带 RX/TX 标记</label>
-                        </div>
-                        <span class="hint-text" id="export-binary-hint" hidden>原始字节文件不附加时间戳；如需时间戳，请选择 Hex 文本。</span>
-                        <span class="hint-text" id="export-retention-hint" hidden>RX/TX 各自最多保留“最大帧数量”的记录；仅导出成功发送的 TX 数据。</span>
-                        <button id="btn-export" class="btn btn-success">导出数据</button>
                     </div>
                 </div>
             </div>
@@ -603,11 +770,13 @@
     <script src="projectLimits.js"></script>
     <script src="byteUtils.js"></script>
     <script src="frameBuffer.js"></script>
+    <script src="frameNavigation.js"></script>
     <script src="plotMath.js"></script>
     <script src="channelTransform.js"></script>
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
     <script src="textCodec.js"></script>
+    <script src="textEncoder.js"></script>
     <script src="captureExport.js"></script>
     <script src="numberMonitor.js"></script>
     <script src="monitorDisplay.js"></script>
@@ -628,6 +797,61 @@
     <script src="netEngine.js"></script>
     <script src="sendController.js"></script>
     <script src="selectWheel.js"></script>
+    <script src="monitorWorkspace.js"></script>
+    <script src="monitorSettingsView.js"></script>
+    <script src="exportSettingsView.js"></script>
+    <template id="wave-widget-template"><div class="canvas-wrapper box-border workspace-panel" data-role="canvas-wrapper">
+                            <div class="plot-header" data-role="plot-header">
+                                <div class="plot-title-row monitor-title-row" data-role="waveform-drag-handle" title="拖动标题移动；拖动边缘调整大小">
+                                    <span class="plot-title">波形</span>
+                                    <span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
+                                </div>
+                                <!-- 单通道统计由 app.js 动态更新 -->
+                                <div class="plot-info-row monitor-stats-row" data-role="plot-info-row" hidden>
+                                    <div data-role="plot-channel-stats" class="plot-channel-stats monitor-stat-grid"></div>
+                                </div>
+                            </div>
+                            <canvas data-role="waveform-canvas"></canvas>
+                            <div class="plot-y-scrollbar-wrap" data-role="plot-y-scrollbar-wrap" hidden>
+                                <div class="plot-y-scrollbar-thumb" data-role="plot-y-scrollbar-thumb"></div>
+                            </div>
+                            <div class="plot-scrollbar-wrap" data-role="plot-scrollbar-wrap">
+                                <div class="plot-scrollbar-thumb" data-role="plot-scrollbar-thumb"></div>
+                            </div>
+                        </div></template>
+    <template id="byte-widget-template"><div class="monitor-panel box-border workspace-panel" data-role="monitor-panel">
+                            <div class="monitor-header monitor-title-row" data-role="monitor-header" title="拖动标题移动；拖动边缘调整大小">
+                                <span class="monitor-title">字节流</span>
+                            </div>
+                            <div class="stats-bar-row monitor-stats-row monitor-stat-grid" data-role="monitor-stats">
+                                <span data-role="stat-rx" class="monitor-stat-item"><span class="monitor-stat-label">RX:</span><span data-role="stat-rx-value" class="monitor-stat-value">0 B/s</span></span>
+                                <span data-role="stat-tx" class="monitor-stat-item"><span class="monitor-stat-label">TX:</span><span data-role="stat-tx-value" class="monitor-stat-value">0 B/s</span></span>
+                                <span data-role="stat-fps" class="monitor-stat-item"><span class="monitor-stat-label">帧率:</span><span data-role="stat-fps-value" class="monitor-stat-value">0 f/s</span></span>
+                                <span data-role="stat-fail" class="monitor-stat-item"><span data-role="stat-fail-label" class="monitor-stat-label">校验失败:</span><span data-role="stat-fail-value" class="monitor-stat-value">0%</span></span>
+                            </div>
+                            <!-- 可滚动的窗口原始帧记录；只渲染可见行 -->
+                            <div data-role="data-log" class="log-content"></div>
+
+                            <!-- 日志/发送区分隔条（暂未启用） -->
+                            <!-- <div class="v-resizer-inner" data-role="log-send-resizer"></div> -->
+
+                            <!-- 发送面板 -->
+
+
+                        </div></template>
+    <script src="channelOperations.js"></script>
+    <script src="exportParsing.js"></script>
+    <script src="systemResponse.js"></script>
+    <script src="systemResponseFrames.js"></script>
+    <script src="computedFrames.js"></script>
+    <script src="sampleRate.js"></script>
+    <script src="captureService.js"></script>
+    <script src="widgetConfig.js"></script>
+    <script src="widgetViewport.js"></script>
+    <script src="widgetWorkspace.js"></script>
+    <script src="channelConfigView.js"></script>
+    <script src="widgetController.js"></script>
+    <script src="workspaceTools.js"></script>
     <script src="app.js"></script>
 </body>
 

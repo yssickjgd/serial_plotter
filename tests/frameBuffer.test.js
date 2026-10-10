@@ -2,6 +2,27 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FrameBuffer } = require('../frameBuffer');
 
+test('retained byte count follows overwrite shrink rebuild and clear in both storage modes', () => {
+    for (const raw of [false, true]) {
+        const frames = new FrameBuffer(1, 4);
+        const append = size => raw ? frames.appendRaw(new Uint8Array(size)) : frames.append([1], new Uint8Array(size));
+        for (const size of [1, 2, 3, 4, 5]) append(size);
+        assert.equal(frames.retainedByteLength, 14);
+        frames.resize(3);
+        assert.equal(frames.retainedByteLength, 12);
+        append(6);
+        assert.equal(frames.retainedByteLength, 15);
+        frames.resize(10);
+        assert.equal(frames.retainedByteLength, 15);
+        const destination = new FrameBuffer(1, 2);
+        destination.replaceFrom(frames);
+        assert.equal(destination.retainedByteLength, 15);
+        assert.equal(frames.retainedByteLength, 0);
+        destination.clear();
+        assert.equal(destination.retainedByteLength, 0);
+    }
+});
+
 test('atomic replacement transfers complete replay state while preserving the consumer identity', () => {
     const destination = new FrameBuffer(1, 3);
     destination.append([99]);

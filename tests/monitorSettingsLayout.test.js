@@ -18,9 +18,9 @@ function panel(id) {
     throw new Error(`Unclosed ${id}`);
 }
 
-test('right sidebar separates byte, waveform, and export settings with no waveform subtabs', () => {
-    assert.match(html, /id="tab-monitor-config-button"[^>]*data-tab="tab-monitor-config">字节流<\/button>/);
-    assert.match(html, /id="tab-waveform-config-button"[^>]*data-tab="tab-waveform-config">波形<\/button>/);
+test('monitor properties stay on the right while export is a peer left sidebar category', () => {
+    assert.match(html, /id="tab-monitor-config-button"[^>]*data-tab="tab-monitor-config">显示方式<\/button>/);
+    assert.match(html, /id="tab-waveform-config-button"[^>]*data-tab="tab-waveform-config">显示方式<\/button>/);
     const bytes = panel('tab-monitor-config');
     const wave = panel('tab-waveform-config');
     const exportPanel = panel('tab-export');
@@ -29,9 +29,21 @@ test('right sidebar separates byte, waveform, and export settings with no wavefo
     assert.ok(bytes.includes('id="monitor-color-panel"'));
     assert.ok(bytes.indexOf('id="monitor-config-panel"') < bytes.indexOf('id="monitor-color-panel"'));
     assert.ok(!bytes.includes('id="channels-list-panel"'));
-    assert.ok(wave.indexOf('id="channels-display-panel"') < wave.indexOf('id="channels-list-panel"'));
+    assert.ok(wave.includes('id="channels-display-panel"'));
+    assert.ok(!wave.includes('id="channels-list-panel"'));
+    assert.ok(panel('tab-waveform-channels').includes('id="channels-list-panel"'));
+    assert.ok(panel('tab-monitor-channels').includes('id="monitor-channel-list"'));
+    assert.ok(panel('tab-byte-frame').includes('id="capture-mode"'));
+    assert.ok(panel('tab-byte-frame').includes('id="rebuild-history-byte"'));
+    assert.ok(panel('tab-waveform-frame').includes('id="rebuild-history"'));
+    assert.ok(panel('tab-waveform-frame').indexOf('id="rebuild-history"') <
+        panel('tab-waveform-frame').indexOf('id="frame-numeric-settings"'));
+    assert.doesNotMatch(html, /id="tab-frame"|data-tab="tab-frame"/);
     assert.ok(!wave.includes('tab-bar'));
     assert.ok(exportPanel.includes('id="export-panel"'));
+    assert.ok(panel('sidebar-top').includes('data-tab="tab-export"'));
+    assert.ok(panel('sidebar-top').includes('id="export-panel"'));
+    assert.doesNotMatch(panel('monitor-settings-tabs'), /tab-export|export-panel/);
     assert.ok(!html.includes('id="tab-channel-config"'));
 });
 

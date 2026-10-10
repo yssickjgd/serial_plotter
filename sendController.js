@@ -22,15 +22,32 @@ class SendController {
         this.timer = null;
         this.inFlight = false;
         this.starting = false;
+        this.disposed = false;
+        this.listeners = [];
+        this.fileGeneration = 0;
 
-        mode.addEventListener('change', () => this.changeMode());
-        input.addEventListener('input', () => {
+        this.listen(mode, 'change', () => this.changeMode());
+        this.listen(input, 'input', () => {
+            this.fileGeneration++;
             this.loadedBytes = null;
             this.previewBytes = null;
         });
-        button.addEventListener('click', () => { void this.handleClick(); });
-        loadButton.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', event => this.loadFile(event));
+        this.listen(button, 'click', () => { void this.handleClick(); });
+        this.listen(loadButton, 'click', () => fileInput.click());
+        this.listen(fileInput, 'change', event => this.loadFile(event));
+    }
+
+    listen(element, name, callback) {
+        element.addEventListener(name, callback);
+        this.listeners.push(() => element.removeEventListener?.(name, callback));
+    }
+
+    dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        this.fileGeneration++;
+        this.stop();
+        for (const remove of this.listeners.splice(0)) remove();
     }
 
     stop() {
@@ -50,7 +67,7 @@ class SendController {
     }
 
     async sendOnce() {
-        if (this.inFlight) return false;
+        if (this.disposed || this.inFlight) return false;
         const engine = this.getEngine();
         if (!engine) { this.stop(); return false; }
         let bytes;
@@ -67,10 +84,10 @@ class SendController {
         this.inFlight = true;
         try {
             await engine.send(bytes);
-            this.onSent(bytes);
+            if (!this.disposed) this.onSent(bytes);
             return true;
         } catch (error) {
-            this.onSendError(error, bytes);
+            if (!this.disposed) this.onSendError(error, bytes);
             this.stop();
             return false;
         } finally {
@@ -79,6 +96,7 @@ class SendController {
     }
 
     async handleClick() {
+        if (this.disposed) return;
         if (this.timer !== null || this.starting) { this.stop(); return; }
         const period = this.periodMs();
         if (period > 0) {
@@ -114,18 +132,22 @@ class SendController {
     }
 
     async loadFile(event) {
+        if (this.disposed) return;
         const file = event.target.files[0];
         if (!file) return;
+        const generation = ++this.fileGeneration;
         this.loadedBytes = null;
         this.previewBytes = null;
         this.input.value = '';
         try {
-            this.loadedBytes = new Uint8Array(await file.arrayBuffer());
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            if (this.disposed || generation !== this.fileGeneration) return;
+            this.loadedBytes = bytes;
             this.input.value = this.mode.value === 'hex'
                 ? sendByteUtils.bytesToHex(this.loadedBytes)
                 : sendByteUtils.bytesToText(this.loadedBytes);
         } catch (error) {
-            this.onInputError(error);
+            if (!this.disposed && generation === this.fileGeneration) this.onInputError(error);
         } finally {
             event.target.value = '';
         }

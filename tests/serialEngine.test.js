@@ -74,3 +74,51 @@ test('end of readable stream stops the loop instead of reopening readers', async
     assert.equal(readers, 1);
     assert.equal(engine.port, null);
 });
+
+test('disconnect cancels pending port selection without opening the selected port', async () => {
+    let selected, opened = 0;
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const SerialEngine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial: {
+        requestPort: () => new Promise(resolve => { selected = resolve; }), addEventListener() {}
+    } } });
+    const engine = new SerialEngine(), connection = engine.connect({});
+    await engine.disconnect();
+    selected({ open: async () => { opened++; }, close: async () => {} });
+    await assert.rejects(connection, { name: 'AbortError' });
+    assert.equal(opened, 0);
+    assert.equal(engine.port, null);
+});
+
+test('dispose closes a port opened after cancellation and removes the serial listener', async () => {
+    let opened, closed = 0, removed;
+    const serial = { requestPort: async () => ({
+        open: () => new Promise(resolve => { opened = resolve; }), close: async () => { closed++; }
+    }), addEventListener() {}, removeEventListener(name, handler) { removed = { name, handler }; } };
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const SerialEngine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial } });
+    const engine = new SerialEngine(), connection = engine.connect({});
+    for (let i = 0; i < 10 && !opened; i++) await Promise.resolve();
+    assert.equal(typeof opened, 'function');
+    await engine.dispose();
+    opened();
+    await assert.rejects(connection, { name: 'AbortError' });
+    assert.equal(closed, 1);
+    assert.equal(engine.port, null);
+    assert.equal(engine._connected, false);
+    assert.equal(removed.name, 'disconnect');
+    assert.equal(removed.handler, engine._onSerialDisconnect);
+});
+
+test('disconnect before any connection does not prevent a later connection from closing', async () => {
+    let closed = 0;
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const SerialEngine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial: {
+        requestPort: async () => ({ open: async () => {}, close: async () => { closed++; } }), addEventListener() {}
+    } } });
+    const engine = new SerialEngine();
+    await engine.disconnect();
+    await engine.connect({});
+    await engine.disconnect();
+    assert.equal(closed, 1);
+    assert.equal(engine.port, null);
+});

@@ -7,7 +7,7 @@
  *    2. 全局重置与布局
  *    3. 侧栏（sidebar、tab-bar、control-group）
  *    4. 主显示区（canvas-wrapper、plot-header、monitor-panel）
- *    5. 分隔条（h-resizer、v-resizer）
+ *    5. 侧栏分隔条与监视台工作区
  *    6. 发送面板（send-panel）
  *    7. 滚动条样式
  * ═══════════════════════════════════════════════════════════════ */
@@ -94,6 +94,19 @@ body {
 .sidebar-top .tab-content { min-height: 0; }
 .format-status[data-state="invalid"] { color: #b42318; }
 .export-metadata { display: flex; flex-wrap: wrap; gap: 5px 12px; }
+.export-panel { flex: 0 0 auto; }
+.export-range-summary { margin: 8px 0; padding: 6px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; white-space: pre-line; }
+.export-channels { margin-bottom: 8px; }
+.export-channel-heading { color: var(--text-sub); margin-bottom: 6px; font-size: 0.66rem; font-weight: 500; }
+.export-channel-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+    gap: 3px 7px;
+    margin: 6px 0;
+}
+.export-channel-choice { display: flex; align-items: center; gap: 5px; min-width: 0; min-height: 18px; font-size: 0.68rem; line-height: 1.4; cursor: pointer; }
+.export-channel-choice input { flex-shrink: 0; width: 13px; height: 13px; accent-color: var(--primary); }
+.export-channel-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .channel-sidebar {
     width: var(--channel-sidebar-w);
@@ -126,11 +139,12 @@ body {
     flex-shrink: 0;
 }
 
-/* ── 水平分隔条（侧栏 ↔ 主区域），与 .v-resizer 共用布局模式 ── */
+/* ── 水平分隔条（侧栏 ↔ 主区域）── */
 .h-resizer {
     width: var(--h-resizer-w);
     background: var(--border);
     cursor: ew-resize;
+    touch-action: none;
     flex-shrink: 0;
     display: flex;
     align-items: center;
@@ -220,12 +234,39 @@ body {
 .channels-display-panel {
     flex: 0 0 auto;
     overflow: visible;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .monitor-settings-panel { flex: 0 0 auto; }
-#tab-waveform-config .channels-list-panel { flex: 0 0 auto; overflow: visible; }
-#tab-waveform-config .channel-config-list { flex: 0 0 auto; overflow: visible; }
 .channel-settings-content .tab-btn { line-height: 1.4; padding-inline: 4px; }
+.settings-tabs {
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 3px;
+    padding: 4px;
+    border-bottom: 1px solid var(--border);
+}
+.settings-tabs .tab-btn {
+    flex: 1 0 auto;
+    min-width: max-content;
+    white-space: nowrap;
+    height: 28px;
+    padding: 3px 4px;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: #f7f9fb;
+}
+.settings-tabs .tab-btn:hover { border-color: #94b6d8; background: #edf4fb; }
+.settings-tabs .tab-btn.active { border-color: var(--primary); background: #e6f0fb; }
+.settings-tabs .tab-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.sidebar-status { margin: 6px 9px 0; flex: 0 0 auto; }
+.monitor-channel-options { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.monitor-channel-choice { display: flex; align-items: center; gap: 7px; padding: 4px 2px; cursor: pointer; }
+.monitor-channel-choice span { min-width: 0; overflow-wrap: anywhere; font-size: 0.7rem; }
+.monitor-channel-choice input[type="text"] { min-width: 0; flex: 1; height: 22px; padding: 2px 4px; font-size: .68rem; }
 .monitor-options { display: flex; flex-direction: column; gap: 6px; }
 .monitor-checkboxes { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .monitor-keywords {
@@ -311,6 +352,12 @@ body {
     flex: 1;
 }
 
+.buffer-actions .btn {
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
+}
+
 .input-group {
     display: flex;
     flex-direction: column;
@@ -321,6 +368,12 @@ body {
     display: flex;
     flex-direction: column;
     gap: 7px;
+}
+
+.numeric-frame-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .input-group label {
@@ -576,6 +629,7 @@ input.channel-name-input {
     gap: 0;
     min-width: 0;
     overflow: hidden;
+    overflow-y: auto;
 }
 
 .box-border {
@@ -584,6 +638,77 @@ input.channel-name-input {
     box-shadow: inset 0 0 4px rgba(0, 0, 0, .5);
     border-radius: 3px;
 }
+
+/* ── 可移动、按网格步进调整大小的监视台工作区 ── */
+.monitor-workspace { display: flex; flex-direction: column; flex: 1 1 0; min-height: 150px; min-width: 0; }
+.workspace-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 6px;
+    padding: 3px 8px;
+    min-height: 30px;
+    background: #18212a;
+    color: #bcc9d6;
+    border: 1px solid #354351;
+    font-size: 0.7rem;
+}
+.workspace-label { margin-right: auto; color: #dce6ef; font-weight: 700; }
+.workspace-toolbar label { margin: 0; white-space: nowrap; }
+.workspace-toolbar select, .workspace-toolbar button {
+    width: auto;
+    min-height: 24px;
+    padding: 2px 6px;
+    border: 1px solid #465869;
+    border-radius: 3px;
+    background: #22303d;
+    color: #e0e9f1;
+    font-size: inherit;
+}
+.workspace-toolbar button { cursor: pointer; }
+.workspace-toolbar button:hover { background: #304557; }
+.workspace-zoom-input { display: inline-flex; align-items: center; gap: 3px; }
+#workspace-zoom-percent { width: 64px; padding: 3px 5px; color: #ddd; background: #202a34; border: 1px solid #465567; border-radius: 3px; font-size: inherit; }
+.workspace-selection-box { position: absolute; pointer-events: none; border: 1px solid #79b5e6; background: #79b5e622; z-index: 1000; }
+.workspace-surface > .workspace-panel-selected { outline: 2px solid #79b5e6; outline-offset: -2px; }
+.workspace-toolbar :is(button, select):focus-visible { outline: 2px solid #79b5e6; outline-offset: 1px; }
+.workspace-viewport { flex: 1 1 0; min-height: 120px; min-width: 0; overflow: auto; background: #0c1117; }
+.workspace-surface {
+    --workspace-step: 10px;
+    position: relative;
+    background-image: radial-gradient(#35414d 0.7px, transparent 0.7px);
+    background-size: var(--workspace-step) var(--workspace-step);
+}
+.workspace-surface > .workspace-panel { position: absolute; border-color: #536374; padding: 5px; }
+.workspace-surface > .workspace-panel-active { border-color: #79b5e6; }
+.workspace-drag-handle { cursor: grab; touch-action: none; }
+.workspace-drag-handle:active { cursor: grabbing; }
+.workspace-drag-handle:focus-visible { outline: 2px solid #79b5e6; outline-offset: -2px; }
+.workspace-resize-handle { position: absolute; z-index: 4; touch-action: none; }
+.workspace-resize-n, .workspace-resize-s { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.workspace-resize-n { top: 0; }
+.workspace-resize-s { bottom: 0; }
+.workspace-resize-e, .workspace-resize-w { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+.workspace-resize-e { right: 0; }
+.workspace-resize-w { left: 0; }
+.workspace-resize-ne, .workspace-resize-se, .workspace-resize-sw, .workspace-resize-nw { width: 10px; height: 10px; }
+.workspace-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.workspace-resize-se { bottom: 0; right: 0; cursor: nwse-resize; }
+.workspace-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.workspace-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+.workspace-resize-se::after {
+    content: '';
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 5px;
+    height: 5px;
+    border-right: 1px solid #8294a5;
+    border-bottom: 1px solid #8294a5;
+}
+.workspace-panel .plot-y-scrollbar-wrap { right: 7px; }
+.workspace-panel .plot-scrollbar-wrap { flex-shrink: 0; }
 
 /* ── 波形绘图区 ── */
 .canvas-wrapper {
@@ -607,10 +732,71 @@ canvas {
     min-height: 0;
 }
 
-#waveform-canvas {
+[data-role="waveform-canvas"] {
     cursor: crosshair;
     touch-action: none;
 }
+
+/* Instance controls keep the compact monitor visual language. */
+.workspace-empty { padding: 42px 24px; color: #9bacbd; text-align: center; font-size: .8rem; pointer-events: none; }
+.widget-library-item {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px;
+    padding: 12px 10px; margin-bottom: 10px; border: 1px solid var(--border);
+    border-radius: 4px; background: #f7fafc; cursor: grab; touch-action: none;
+}
+.widget-library-item > span { font-size: .8rem; font-weight: 700; }
+.widget-library-item > small { grid-column: 1; color: var(--text-sub); font-size: .65rem; }
+.widget-library-item > button { grid-column: 2; grid-row: 1 / 3; align-self: center; padding: 5px 8px; cursor: pointer; }
+.widget-drop-preview { position: absolute; z-index: 10; border: 2px dashed #79b5e6; border-radius: 3px; background: #79b5e61a; pointer-events: none; }
+.widget-close { border: none; background: transparent; color: #aab6c2; font: inherit; font-size: 1rem; cursor: pointer; padding: 0 4px; }
+.widget-close:hover { color: #ff7272; }
+.workspace-widget .monitor-title-row { flex-wrap: nowrap; min-height: 28px; padding: 3px 7px; gap: 8px; }
+.workspace-widget .monitor-title-row > :first-child { margin-right: auto; overflow: hidden; text-overflow: ellipsis; }
+.workspace-widget [data-role="stat-plot-fps"] { flex: 0 0 auto; color: #bbc8d5; font-size: .65rem; font-variant-numeric: tabular-nums; }
+.widget-selection-prompt { padding: 20px 14px; color: var(--text-sub); font-size: .75rem; }
+.widget-title-tools { display: flex; padding: 8px 10px; gap: 6px; border-bottom: 1px solid var(--border); }
+.widget-title-tools > input { min-width: 0; flex: 1; font-size: .75rem; padding: 3px 5px; }
+.widget-title-tools > button { width: auto; }
+.channel-config-row { padding: 3px 0; border-bottom: 1px solid #eceff2; }
+.channel-config-main { display: grid; grid-template-columns: 48px 22px minmax(0, 1fr) 13px; align-items: center; gap: 5px; }
+.channel-config-main :is(.channel-toggle, .channel-label) { padding: 1px 0; border: 0; background: transparent; font-size: .65rem; text-align: left; white-space: nowrap; }
+.channel-config-main .channel-toggle { cursor: pointer; }
+.channel-config-main .channel-toggle[draggable="true"] { cursor: grab; }
+.channel-config-main.channel-dragging { opacity: .5; }
+.channel-config-main.channel-drop-target { box-shadow: inset 0 2px #007bff, inset 0 -2px #007bff; background: #eef6ff; }
+.channel-config-main input[type="color"] { width: 22px; height: 17px; padding: 0; border: 1px solid #ccc; }
+.channel-config-main input[type="text"] { min-width: 0; height: 22px; padding: 2px 4px; font-size: .68rem; }
+.channel-definition, .channel-definition-error { grid-column: 1 / -1; min-width: 0; }
+.channel-definition { display: grid; gap: 6px; padding: 5px 0 3px; }
+.channel-definition[hidden], .channel-definition-error[hidden] { display: none; }
+.channel-definition label { display: grid; gap: 3px; margin: 0; font-size: .7rem; }
+.channel-definition textarea { width: 100%; min-width: 0; padding: 4px; resize: vertical; font: inherit; }
+.channel-definition-error { color: #b42318; font-size: .7rem; overflow-wrap: anywhere; }
+.channel-delete { justify-self: start; padding: 3px 7px; font-size: .7rem; }
+.channel-definition-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.channel-definition-actions .btn { width: auto; padding: 3px 7px; font-size: .7rem; white-space: nowrap; }
+.channel-create { display: flex; gap: 5px; margin: 6px 0; align-items: center; }
+.channel-create select { min-width: 0; flex: 1; font-size: .72rem; }
+.channel-create .btn { width: auto; flex: 0 0 auto; padding: 5px 7px; font-size: .72rem; white-space: nowrap; }
+.channel-help { margin: 4px 0 8px; line-height: 1.5; }
+.channel-help p { margin: 2px 0; }
+.channel-definition .channel-delete { width: auto; }
+.channel-transform-row { display: grid; grid-template-columns: 13px 76px minmax(0, 1fr); align-items: center; gap: 5px; font-size: .68rem; }
+.channel-transform-row input[type="number"] { min-width: 0; height: 22px; padding: 2px 4px; }
+.global-send { flex: 0 0 auto; margin-top: 5px; color: #d4dfeb; }
+.global-send-title { margin: 0; background: #18212a; padding: 5px 10px; font-size: .7rem; }
+.send-resizer {
+    height: 7px;
+    background: #26313d;
+    cursor: ns-resize;
+    touch-action: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.send-resizer::before { content: ''; width: 36px; height: 2px; background: #8b9bad; border-radius: 1px; }
+.send-resizer:hover, .send-resizer:focus-visible { background: #3c5065; }
+#monitor-search-origin { width: 170px; }
 
 .plot-header {
     display: flex;
@@ -640,7 +826,7 @@ canvas {
     white-space: nowrap;
 }
 
-.buffer-toolbar, .jump-toolbar, .monitor-search-toolbar {
+.jump-toolbar, .monitor-search-toolbar {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -669,23 +855,11 @@ canvas {
     white-space: nowrap;
 }
 .monitor-tool-row.tools-disabled { opacity: 0.55; }
-.monitor-tool-row .buffer-toolbar,
 .monitor-tool-row .jump-toolbar,
 .monitor-tool-row .monitor-search-toolbar {
     flex: 1 1 auto;
     min-width: 0;
 }
-.buffer-toolbar .input-group {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    margin: 0;
-}
-.buffer-toolbar .input-group label { margin: 0; color: var(--monitor-fg); font-size: inherit; white-space: nowrap; }
-.buffer-toolbar input[type="number"] { flex: 0 0 86px; width: 86px; }
-.buffer-toolbar .btn { flex: 0 0 auto; width: auto; min-height: 24px; padding: 3px 8px; font-size: inherit; }
 .navigation-panel :is(input[type="text"], input[type="number"], input[type="datetime-local"]) {
     height: 24px;
     padding: 3px 6px;
@@ -848,7 +1022,7 @@ canvas {
     color: var(--monitor-fg);
 }
 
-.monitor-stat-label { flex: 0 0 auto; white-space: nowrap; }
+.monitor-stat-label { flex: 0 0 auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .monitor-stat-value { min-width: 0; overflow-wrap: anywhere; }
 
 @container monitor (max-width: 700px) {
@@ -909,31 +1083,6 @@ canvas {
 .plot-y-scrollbar-thumb:hover { background: #6a6a6a; }
 .plot-y-scrollbar-thumb:active { background: #8a8a8a; cursor: grabbing; }
 
-/* ── 垂直分隔条（波形区 ↔ 监视台），与 .h-resizer 共用布局模式 ── */
-.v-resizer {
-    height: 5px;
-    background: var(--border);
-    cursor: ns-resize;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;       /* 为 ::before 手柄指示器提供定位基准 */
-    transition: background .15s;
-}
-
-.v-resizer::before {
-    content: '';
-    width: 36px;
-    height: 2px;
-    background: #aaa;
-    border-radius: 2px;
-}
-
-.v-resizer:hover {
-    background: #bbc;
-}
-
 .navigation-panel {
     --monitor-title-bg: #1a1a1a;
     --monitor-bar-bg: #151515;
@@ -953,7 +1102,6 @@ canvas {
 @container monitor (max-width: 400px) {
     .navigation-panel .monitor-tool-row { flex-wrap: wrap; }
     .navigation-panel .tool-label { flex-basis: 100%; height: 24px; }
-    .navigation-panel .buffer-toolbar,
     .navigation-panel .jump-toolbar,
     .navigation-panel .monitor-search-toolbar { flex-basis: 100%; }
     .navigation-panel .jump-time-value { flex-basis: 240px; min-width: 240px; max-width: 240px; }
@@ -1166,7 +1314,6 @@ canvas {
     flex: 0 0 auto;
     height: calc(4 * 1.2em + 6px);
     min-height: calc(4 * 1.2em + 6px);
-    max-height: calc(4 * 1.2em + 6px);
     background: #1e1e1e;
     border: 1px solid #333;
     color: #ddd;

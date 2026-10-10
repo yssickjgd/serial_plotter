@@ -26,19 +26,42 @@ function bucketExtrema(values, pixels) {
     return result;
 }
 
+/** Keep gaps when compressing a time trace; never connect across a missing sample. */
+function bucketTraceExtrema(values, pixels) {
+    const points = [];
+    let start = 0;
+    while (start < values.length) {
+        while (start < values.length && !Number.isFinite(values[start])) start++;
+        let end = start;
+        while (end < values.length && Number.isFinite(values[end])) end++;
+        if (end > start) {
+            const count = Math.max(1, pixels * (end - start) / values.length);
+            const bucket = bucketExtrema(values.slice(start, end), count);
+            bucket.forEach((point, index) => points.push({ ...point, index: point.index + start,
+                ...(index === 0 && start > 0 ? { break: true } : {}) }));
+        }
+        start = end + 1;
+    }
+    return points;
+}
+
 /** Keep chronological extrema for samples sharing the same horizontal pixel. */
 function bucketAxisExtrema(values, xPositions) {
     const result = [];
     let pixel = -1, minIndex = -1, maxIndex = -1;
+    let broken = false;
     const flush = () => {
         if (minIndex < 0) return;
         const first = Math.min(minIndex, maxIndex);
         const last = Math.max(minIndex, maxIndex);
-        result.push({ index: first, value: values[first] });
+        result.push({ index: first, value: values[first], ...(broken ? { break: true } : {}) });
+        broken = false;
         if (last !== first) result.push({ index: last, value: values[last] });
     };
     for (let i = 0; i < values.length; i++) {
-        if (!Number.isFinite(values[i]) || !Number.isFinite(xPositions[i])) continue;
+        if (!Number.isFinite(values[i]) || !Number.isFinite(xPositions[i])) {
+            flush(); minIndex = maxIndex = pixel = -1; broken = true; continue;
+        }
         const nextPixel = Math.floor(xPositions[i]);
         if (nextPixel !== pixel) {
             flush();
@@ -144,10 +167,10 @@ function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
 
 if (typeof module !== 'undefined') module.exports = {
     adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
-    bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
+    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
     adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
-    bucketAxisExtrema, bucketExtrema, csvField, formatChannelId, zoomRectToBounds
+    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds
 });
