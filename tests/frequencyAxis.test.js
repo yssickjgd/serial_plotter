@@ -192,6 +192,7 @@ test('hover preserves sample or bin positions when the sample rate is unknown', 
     plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 'samples' });
     plotter.vp.time.autoFollow = false;
     plotter.vp.time.scrollOffset = 200;
+    plotter.vp.time.displayCount = 101;
     labels.length = 0;
     plotter.draw();
     assert.ok(labels.includes('Time: -- s (Sample 200)'));

@@ -100,6 +100,26 @@ test('empty numeric and raw buffers defer restoration until samples exist', () =
     assert.equal(plotter.vp.time.scrollOffset, 24);
 });
 
+test('saved boundary jumps restore legal time windows and FFT spans', () => {
+    const { captureWidgetViewport, restoreWidgetViewport } = viewportApi();
+    const plotter = createPlotter();
+    plotter.isPaused = true;
+    plotter.setPlotWindowPoints(32);
+    for (const [index, start] of [[0, 0], [127, 96]]) {
+        plotter.jumpToFrame(index);
+        plotter.setDisplayOptions({ displayMode: 'frequency' });
+        plotter.draw();
+        assert.equal(plotter._cachedScrollTotal, 17, 'boundary navigation retains all 32 FFT input samples');
+        const saved = captureWidgetViewport(plotter);
+        assert.equal(restoreWidgetViewport(plotter, saved), true);
+        plotter.setDisplayOptions({ displayMode: 'time' });
+        plotter.draw();
+        assert.equal(plotter._drawState.startIdx, start);
+        assert.equal(plotter._drawState.visibleCnt, 32);
+        assert.deepEqual({ ...plotter._frequencyInputRange() }, { start, end: start + 32 });
+    }
+});
+
 test('following restores the latest window while preserving zoom counts as data grows', () => {
     const { restoreWidgetViewport } = viewportApi();
     const plotter = createPlotter(1), saved = state();

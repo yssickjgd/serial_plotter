@@ -734,7 +734,7 @@ class MonitorView {
         if (this.expandedRows.size >= 256) this.expandedRows.delete(this.expandedRows.values().next().value);
         this.expandedRows.add(this.revealOrder);
         this.anchor = { order: this.revealOrder, center: true, byteOffset: offset };
-        this.centerPadding = Math.ceil(this.container.clientHeight / 2);
+        this.centerPadding = 0;
         this.render({ userAction: true });
         return true;
     }
@@ -1471,6 +1471,7 @@ class MonitorView {
             this.expandedRows.add(this.revealOrder);
         }
         this.followTail = false;
+        this.centerPadding = 0;
         this.anchor = { order: this.frames.orderAt(index), within: 0, center: true };
         if (this._usesLargeLayout()) {
             const records = this._records(), position = records.indexAtOrAfterOrder(this.anchor.order);
@@ -1478,7 +1479,7 @@ class MonitorView {
                 Math.max(this.container.clientHeight, records.length * this.rowHeight))}px`;
             const maxScroll = Math.max(0, this.container.scrollHeight - this.container.clientHeight);
             this._setScrollTop(maxScroll * position / Math.max(1, records.length - 1));
-        } else this.centerPadding = Math.ceil(this.container.clientHeight / 2);
+        }
         this.render({ userAction: true });
     }
 
@@ -1974,6 +1975,13 @@ class MonitorView {
         // Preserve the pixel offset captured before a small history becomes virtual.
         if (!this.followTail && !centered && Number.isFinite(this.anchor?.within) && rows[anchorRow]?.order === this.anchor.order)
             top = container.scrollTop - beforeAnchor - this.anchor.within;
+        if (centered) {
+            // Center interior hits, but align the retained edges instead of
+            // inserting empty space before the first or after the last record.
+            if (last === records.length) top = Math.max(top, container.scrollTop + contentHeight -
+                layouts.reduce((sum, layout) => sum + layout.lineCount * this.rowHeight, 0));
+            if (first === 0) top = Math.min(top, container.scrollTop);
+        }
         if (!this.followTail && !this.anchor?.center && first === 0)
             top = position === 0 ? container.scrollTop : Math.min(top, container.scrollTop);
         const fragment = (this.document ?? document).createDocumentFragment();

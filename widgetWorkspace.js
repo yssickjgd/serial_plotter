@@ -130,9 +130,10 @@
             this.setZoom(zoom, fallbackAnchor);
             if (!fits) return;
             this.fitted = true;
-            // Positive origin leaves room to show the bleed even when a widget sits at logical zero.
-            this.origin = { x: Math.max(0, this.viewport.clientWidth / 2 - (bounds.x + bounds.width / 2) * zoom),
-                y: Math.max(0, this.viewport.clientHeight / 2 - (bounds.y + bounds.height / 2) * zoom) };
+            // Only the requested bleed may extend beyond logical zero. Centering a
+            // short row of widgets must not expose a large negative workspace.
+            this.origin = { x: Math.max(0, (10 - bounds.x) * zoom),
+                y: Math.max(0, (10 - bounds.y) * zoom) };
             this._surfaceSize();
             this.viewport.scrollLeft = Math.max(0, this.origin.x + (bounds.x + bounds.width / 2) * zoom - this.viewport.clientWidth / 2);
             this.viewport.scrollTop = Math.max(0, this.origin.y + (bounds.y + bounds.height / 2) * zoom - this.viewport.clientHeight / 2);
@@ -171,7 +172,7 @@
             if (this.disposed) return;
             if (!Number.isFinite(value)) throw new RangeError('Workspace zoom must be finite');
             const zoom = Math.max(0.25, Math.min(5, Math.round((value + Number.EPSILON) * 100) / 100));
-            if (zoom === this.zoom) return;
+            if (zoom === this.zoom && !this.fitted && this.origin.x === 0 && this.origin.y === 0) return;
             this._finish(true);
             const x = (this.viewport.scrollLeft + anchor.x - this.origin.x) / this.zoom;
             const y = (this.viewport.scrollTop + anchor.y - this.origin.y) / this.zoom;

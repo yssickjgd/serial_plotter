@@ -124,6 +124,7 @@ test('raw capture draws an empty waveform without decoding samples or calculatin
 
 test('wave search position follows latest data or the time window center even in frequency mode', () => {
     const { plotter, fire } = createPlotter();
+    plotter.setPlotWindowPoints(40);
     assert.equal(plotter.currentFrameIndex(), 100);
     plotter.jumpToFrame(30);
     assert.equal(plotter.currentFrameIndex(), 30);
@@ -423,14 +424,34 @@ test('live X scrollbar keeps the selected samples fixed until they leave the buf
     assert.equal(plotter._dirty, true);
 });
 
-test('time jump centers even the first sample using blank edge space', () => {
+test('time and byte jumps clamp to retained samples and keep the full window at both edges', () => {
     const { plotter } = createPlotter();
     plotter.setPlotWindowPoints(40);
-    assert.equal(plotter.jumpToFrame(0), true);
-    plotter.draw();
-    assert.equal(plotter._drawState.startIdx, -20);
-    assert.equal(plotter._drawState.visibleCnt, 40);
-    plotter.togglePause();
-    assert.equal(plotter._frequencyInputRange().start, 0);
-    assert.equal(plotter._frequencyInputRange().end, 20);
+    plotter.isPaused = true;
+    for (const [index, start, end] of [[0, 0, 40], [10, 0, 40], [50, 30, 70], [100, 61, 101]]) {
+        assert.equal(plotter.jumpToFrame(index), true);
+        plotter.draw();
+        assert.equal(plotter._drawState.startIdx, start);
+        assert.equal(plotter._drawState.visibleCnt, end - start);
+        assert.equal(plotter.vp.time.scrollOffset, start);
+        assert.deepEqual({ ...plotter._frequencyInputRange() }, { start, end });
+        assert.equal(plotter.currentFrameIndex(), start + 20);
+        assert.equal(plotter.jumpToByteOffset(plotter.frames.rawByteOffsetAt(index)), true);
+        assert.equal(plotter._drawState.startIdx, start);
+    }
+});
+
+test('jumping within a short history fills the plot with real samples without shrinking the configured count', () => {
+    const { plotter } = createPlotter();
+    plotter.isPaused = true;
+    for (const index of [0, 50, 100]) {
+        plotter.jumpToFrame(index); plotter.draw();
+        assert.equal(plotter._drawState.startIdx, 0);
+        assert.equal(plotter._drawState.visibleCnt, 101);
+        assert.equal(plotter.vp.time.displayCount, 1000);
+        assert.deepEqual({ ...plotter._frequencyInputRange() }, { start: 0, end: 101 });
+        assert.equal(plotter.currentFrameIndex(), 50);
+    }
+    plotter._timeCenterOrder = null;
+    assert.equal(plotter.currentFrameIndex(), 50, 'history reference uses actual samples when the configured window is larger');
 });

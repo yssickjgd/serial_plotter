@@ -587,10 +587,10 @@ class Plotter {
         const view = this.vp.time;
         const count = Math.max(2, Math.min(this.plotWindowPoints, view.displayCount));
         view.displayCount = count;
-        view.scrollOffset = Math.max(0, Math.min(this.frames.length - count,
-            Math.round(target - count / 2)));
         view.autoFollow = false;
         this._timeCenterOrder = this.frames.orderAt(target);
+        view.scrollOffset = this._timeViewportRange().start;
+        this._timeWindowStartOrder = this.frames.orderAt(view.scrollOffset);
         this._markViewDirty();
         if (this.displayMode === 'time') this._updateScrollbar();
         if (this.isPaused && this.isVisible) this.draw();
@@ -625,11 +625,12 @@ class Plotter {
         if (!this.frames.length) return -1;
         if (this.vp.time.autoFollow && this._timeCenterOrder === null) return this.frames.length - 1;
         if (this._timeCenterOrder !== null) {
-            const centered = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
-            if (this.frames.orderAt(centered) === this._timeCenterOrder) return centered;
+            const range = this._timeViewportRange();
+            if (this._timeCenterOrder !== null)
+                return range.start + Math.floor((range.end - range.start) / 2);
         }
-        const view = this.vp.time;
-        const center = view.scrollOffset + (view.displayCount - 1) / 2;
+        const range = this._timeViewportRange();
+        const center = range.start + (range.end - range.start - 1) / 2;
         return Math.max(0, Math.min(this.frames.length - 1, center));
     }
 
@@ -702,23 +703,25 @@ class Plotter {
         return values;
     }
 
-    /** 实时取全部保留样本；暂停取时域视口内的样本。 */
-    _frequencyInputRange() {
+    /** Center where possible, but never extend a time window past retained samples. */
+    _timeViewportRange() {
         const total = this.frames.length;
-        if (!this.isPaused) return { start: Math.max(0, total - this.plotWindowPoints), end: total };
+        const count = Math.min(total, Math.max(2, Math.floor(this.vp.time.displayCount)));
+        let start = Math.floor(this.vp.time.scrollOffset);
         if (this._timeCenterOrder !== null) {
             const center = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
-            if (this.frames.orderAt(center) === this._timeCenterOrder) {
-                const count = Math.max(2, Math.floor(this.vp.time.displayCount));
-                const start = center - Math.floor(count / 2);
-                return { start: Math.max(0, start), end: Math.min(total, start + count) };
-            }
-            this._timeCenterOrder = null;
+            if (this.frames.orderAt(center) === this._timeCenterOrder) start = center - Math.floor(count / 2);
+            else this._timeCenterOrder = null;
         }
-        const count = Math.max(2, Math.floor(this.vp.time.displayCount));
-        let start = Math.max(0, Math.floor(this.vp.time.scrollOffset));
-        if (start >= total) start = Math.max(0, total - count);
-        return { start, end: Math.min(total, start + count) };
+        start = Math.max(0, Math.min(start, total - count));
+        return { start, end: start + count };
+    }
+
+    /** 实时取最新全局窗口；暂停取实际显示的时域样本范围。 */
+    _frequencyInputRange() {
+        const total = this.frames.length;
+        return this.isPaused ? this._timeViewportRange()
+            : { start: Math.max(0, total - this.plotWindowPoints), end: total };
     }
 
     /** 对所有可见通道的当前输入范围执行 FFT，结果缓存在 Map 中供 draw 复用。 */
@@ -1224,13 +1227,11 @@ class Plotter {
         const dispCnt   = Math.max(2, Math.floor(this._vp.displayCount));
         let actualEnd   = Math.min(startIdx + dispCnt, scrollTotal);
         let visibleCnt  = actualEnd - startIdx;
-        if (this.displayMode === 'time' && this._timeCenterOrder !== null) {
-            const center = this.frames.indexAtOrAfterOrder(this._timeCenterOrder);
-            if (this.frames.orderAt(center) === this._timeCenterOrder) {
-                startIdx = center - Math.floor(dispCnt / 2);
-                actualEnd = startIdx + dispCnt;
-                visibleCnt = dispCnt;
-            } else this._timeCenterOrder = null;
+        if (this.displayMode === 'time') {
+            const range = this._timeViewportRange();
+            startIdx = range.start;
+            actualEnd = range.end;
+            visibleCnt = actualEnd - startIdx;
         }
         if (visibleCnt <= 0) {
             this._vp.scrollOffset = Math.max(0, scrollTotal - dispCnt);

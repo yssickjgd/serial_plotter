@@ -527,6 +527,40 @@ test('workspace accepts integer percentages through 500 percent and fits bounds 
     assert.equal(f.workspace.zoom, 0.71, 'can leave the snapped percentage');
 });
 
+test('fit keeps top-aligned widgets visible without revealing negative workspace coordinates beyond the bleed', () => {
+    const f = fixture();
+    for (let i = 0; i < 3; i++) f.add(`top-${i}`, { rect: { x: i * 310, y: 0, width: 300, height: 200 } });
+    f.viewport.fire('contextmenu');
+    f.viewport.fire('contextmenu');
+    const workspace = f.workspace, zoom = workspace.zoom;
+    assert.ok((f.viewport.scrollTop - workspace.origin.y) / zoom >= -10,
+        'fit may add ten-pixel bleed, but must not invent a negative workspace above the origin');
+    assert.ok((f.viewport.scrollLeft - workspace.origin.x) / zoom >= -10);
+    for (const entry of workspace.entries.values()) {
+        const left = workspace.origin.x + entry.rect.x * zoom - f.viewport.scrollLeft;
+        const top = workspace.origin.y + entry.rect.y * zoom - f.viewport.scrollTop;
+        assert.ok(left >= 0 && top >= 0);
+        assert.ok(left + entry.rect.width * zoom <= f.viewport.clientWidth);
+        assert.ok(top + entry.rect.height * zoom <= f.viewport.clientHeight);
+    }
+    f.viewport.clientWidth = 320; f.viewport.clientHeight = 220;
+    workspace.refresh(); workspace.fitAll();
+    assert.ok((f.viewport.scrollTop - workspace.origin.y) / workspace.zoom >= -10);
+    f.workspace.dispose();
+});
+
+test('restoring 100 percent clears fit translation even when the fitted percentage is already 100', () => {
+    const f = fixture();
+    f.viewport.clientWidth = 660; f.viewport.clientHeight = 600;
+    f.add('a', { rect: { x: 0, y: 0, width: 640, height: 200 } });
+    f.workspace.fitAll();
+    assert.equal(f.workspace.zoom, 1);
+    f.workspace.setZoom(1);
+    assert.deepEqual(f.workspace.origin, { x: 0, y: 0 });
+    assert.equal(f.workspace.fitted, false);
+    f.workspace.dispose();
+});
+
 test('blank context menu alternates visible-center 100 percent and all-widget fit, without intercepting widgets', () => {
     const f = fixture();
     const a = f.add('a', { rect: { x: 1000, y: 0, width: 960, height: 300 } });

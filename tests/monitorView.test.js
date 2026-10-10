@@ -333,6 +333,33 @@ test('selected text stays fixed through repeated live updates when CSSOM rounds 
     } finally { global.document = oldDocument; }
 });
 
+test('record and byte jumps center interior hits but do not add blank space beyond the retained edges', () => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    try {
+        for (const count of [30, 3000]) {
+            const frames = new FrameBuffer(1, count, { raw: true });
+            for (let i = 0; i < count; i++) frames.appendRaw(Uint8Array.of(65), 't', i + 1);
+            const view = monitorFixture(frames, 640, 200);
+            for (const useBytes of [false, true]) {
+                const jump = index => useBytes ? view.jumpToByteOffset(frames.rawByteOffsetAt(index)) : view.jumpToFrame(index);
+                jump(0);
+                const first = view.rowPositions.find(row => row.frameIndex === 0);
+                assert.equal(first.top - view.container.scrollTop, 0, 'oldest record starts at the top edge');
+                jump(Math.floor(count / 2));
+                const middle = view.rowPositions.find(row => row.frameIndex === Math.floor(count / 2));
+                assert.equal(middle.top + middle.height / 2 - view.container.scrollTop, 100);
+                jump(count - 1);
+                const last = view.rowPositions.find(row => row.frameIndex === count - 1);
+                assert.ok(Math.abs(last.top + last.height - view.container.scrollTop - 200) < .01,
+                    'latest record ends at the bottom edge');
+                assert.equal(view.followTail, false);
+            }
+            view.dispose();
+        }
+    } finally { global.document = oldDocument; }
+});
+
 test('native scrollbar dragging freezes record mapping and track height until pointer release', () => {
     const oldDocument = global.document, listeners = {};
     global.document = { ...monitorDocument(), addEventListener(name, callback) { listeners[name] = callback; } };
@@ -543,7 +570,9 @@ test('time jumps, display changes and clearing release a log selection so explic
         view.jumpToFrame(0);
         assert.equal(selection.isCollapsed, true);
         assert.equal(view.followTail, false);
-        assert.equal(view.currentFrameIndex(), 0);
+        assert.equal(view.cursorByteOffset, null);
+        assert.equal(view.revealOrder, frames.orderAt(0));
+        assert.equal(view.currentFrameIndex(), 2, 'reference follows the real window center at the retained edge');
         selectBody();
         view.setMode('number');
         assert.equal(selection.isCollapsed, true);
@@ -1762,9 +1791,8 @@ test('large live monitor fills the log above the newest row', () => {
         listeners.scroll();
         assert.ok(parseInt(view.spacer.children[0].style.top, 10) <= container.scrollTop);
         view.jumpToFrame(0);
-        assert.ok(Math.abs(parseInt(view.spacer.children[0].style.top, 10) -
-            container.scrollTop - container.clientHeight / 2) <= view.rowHeight);
-        assert.equal(view.currentFrameIndex(), 0);
+        assert.equal(parseInt(view.spacer.children[0].style.top, 10) - container.scrollTop, 0);
+        assert.equal(view.currentFrameIndex(), 10);
         view.jumpToFrame(1500);
         assert.equal(view.currentFrameIndex(), 1500);
     } finally { global.document = oldDocument; }
@@ -2024,7 +2052,7 @@ test('large numeric rows scroll upward from the live tail without snapping back'
     } finally { global.document = oldDocument; }
 });
 
-test('monitor time jump centers edge records and large mode renders only nearby rows', () => {
+test('monitor time jump clamps edge records and large mode renders only nearby rows', () => {
     const oldDocument = global.document;
     global.document = {
         createElement: () => ({ style: {}, children: [],
@@ -2045,7 +2073,7 @@ test('monitor time jump centers edge records and large mode renders only nearby 
         const view = new MonitorView(container, frames);
         view.render();
         view.jumpToFrame(0);
-        assert.ok(Math.abs(parseInt(view.spacer.children[0].style.top, 10) - container.scrollTop - 100) <= 10);
+        assert.equal(parseInt(view.spacer.children[0].style.top, 10) - container.scrollTop, 0);
         for (let i = 100; i < 20000; i++) frames.append([i], Uint8Array.of(i & 255), `t${i}`, i);
         let reads = 0;
         const originalFrameAt = frames.frameAt.bind(frames);

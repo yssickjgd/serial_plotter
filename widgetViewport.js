@@ -52,17 +52,8 @@ function widgetFrequencyTotal(plotter) {
     const total = plotter.frames.rawMode ? 0 : plotter.frames.length;
     let count = Math.min(total, plotter.plotWindowPoints);
     if (plotter.isPaused) {
-        const view = plotter.vp.time;
-        const span = Math.max(2, Math.floor(view.displayCount));
-        let start = Math.max(0, Math.floor(view.scrollOffset));
-        if (start >= total) start = Math.max(0, total - span);
-        if (plotter._timeCenterOrder !== null && plotter._timeCenterOrder !== undefined) {
-            const center = plotter.frames.indexAtOrAfterOrder(plotter._timeCenterOrder);
-            if (plotter.frames.orderAt(center) === plotter._timeCenterOrder) {
-                const centeredStart = center - Math.floor(span / 2);
-                count = Math.min(total, centeredStart + span) - Math.max(0, centeredStart);
-            } else count = Math.min(span, total - start);
-        } else count = Math.min(span, total - start);
+        const range = plotter._frequencyInputRange();
+        count = range.end - range.start;
     }
     return count >= 2 ? 2 ** Math.ceil(Math.log2(count)) / 2 + 1 : 0;
 }
