@@ -79,13 +79,13 @@
             const oldReference = this.referenceId;
             const active = this.getActiveWidget();
             this.sourceId = active && widgets.get(active.id) === active ? active.id : null;
-            const desired = Object.hasOwn(selection, 'referenceId') ? selection.referenceId : this.referenceId;
-            this.referenceId = widgets.has(desired) && !widgets.get(desired).view?.frames?.responseMode ? desired : null;
+            const eligible = id => widgets.has(id) && !widgets.get(id).view?.frames?.responseMode;
+            const desired = Object.hasOwn(selection, 'referenceId') ? selection.referenceId
+                : previous !== this.sourceId ? this.sourceId : this.referenceId;
+            this.referenceId = !this.sourceId ? null : eligible(desired) ? desired : eligible(this.sourceId) ? this.sourceId : null;
             const select = this._el('monitor-search-origin');
             if (select) {
-                const placeholder = this.document.createElement('option');
-                placeholder.value = ''; placeholder.textContent = '请选择参考控件';
-                const options = [placeholder];
+                const options = [];
                 for (const widget of widgets.values()) {
                     if (widget.view?.frames?.responseMode) continue;
                     const option = this.document.createElement('option');
@@ -95,7 +95,7 @@
             }
             if (previous !== this.sourceId) {
                 this.selectedChannels = null; this.invalidate(); this._status('nav-jump-status', '');
-            }
+            } else if (oldReference && !eligible(oldReference)) this.invalidate();
             if (!this.sourceId || !this.referenceId) this._searchStatus(!this.sourceId ? '请激活一个控件' : '请选择参考控件');
             this._syncSearchFields();
             this.syncPaused();

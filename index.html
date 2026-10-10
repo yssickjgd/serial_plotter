@@ -316,9 +316,7 @@
                         </div>
                         <div class="search-origin-group">
                             <label for="monitor-search-origin">就近依据</label>
-                            <select id="monitor-search-origin" aria-label="就近依据">
-                                <option value="">请选择参考控件</option>
-                            </select>
+                            <select id="monitor-search-origin" aria-label="就近依据"></select>
                         </div>
                         <span id="monitor-search-status" role="status"></span>
                     </div>
@@ -375,7 +373,7 @@
                     <div class="control-group">
                         <div class="section-title">重建历史数据</div>
                         <label class="chk-label"><input type="checkbox" id="rebuild-history-pose" checked />格式变更时重建</label>
-                        <p class="hint-text">数值帧规则影响所有波形、位姿及数值字节流控件。</p>
+                        <span class="hint-text">未勾选时，仅受影响的数据源从当前接收位置开始记录。</span>
                     </div>
                     <div id="pose-numeric-settings"></div>
                 </div>
@@ -866,12 +864,13 @@
         <div class="monitor-title-row pose-header" data-role="pose-header" title="拖动标题移动；双击聚焦或返回">
             <span class="monitor-title">位姿</span><span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
         </div>
-        <canvas data-role="pose-canvas" aria-label="三维位姿：odom 与 body 坐标轴和机体立方体"></canvas>
+        <canvas data-role="pose-canvas" aria-label="三维位姿：odom 与 body 坐标轴和飞机模型"></canvas>
         <div class="pose-status" data-role="pose-status" role="status">无保留数据</div>
     </div></template>
     <script src="poseMath.js"></script>
     <script src="poseConfig.js"></script>
     <script src="poseData.js"></script>
+    <script src="poseModelData.js"></script>
     <script src="poseRenderer.js"></script>
     <script src="poseView.js"></script>
     <script src="poseConfigView.js"></script>

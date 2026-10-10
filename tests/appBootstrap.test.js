@@ -264,10 +264,12 @@ test('shared numeric rule changes preserve raw bytes and do not report replay as
     assert.equal(f.get('history-rebuild-progress').hidden, true);
 });
 
-test('search follows the active widget while keeping the chosen nearest reference', async t => {
+test('search and default nearest reference follow the active widget without a placeholder option', async t => {
     const initial = config([wave('w1'), bytes('b1')]); initial.tools = { sourceId: 'b1', referenceId: 'w1' };
     const f = boot(t, initial);
     f.app.widgets.activate('b1');
+    assert.equal(f.get('monitor-search-origin').value, 'b1');
+    assert.ok(f.get('monitor-search-origin').options.every(option => option.value));
     f.app.serialAdapter.onDataCallback(Uint8Array.of(65, 66, 65)); await f.tick();
     assert.equal(f.get('monitor-search-nearest').disabled, true);
     f.click('btn-pause');

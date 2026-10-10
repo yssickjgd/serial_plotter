@@ -65,3 +65,22 @@ test('invalid target retains a visibly stale pose with both timestamps and setti
     f.view.setSettings({ ...f.settings, cubeVisible: false }); f.tick(34);
     assert.equal(f.view.completedDraws, before + 2); f.view.dispose();
 });
+
+test('orbit, wheel and reset keep the vector camera synchronized while vertical views remain valid', () => {
+    const f = fixture(); f.append(); f.tick(34);
+    assert.ok(Array.isArray(f.view.settings.camera.direction));
+    const before = [...f.view.settings.camera.direction];
+    f.listeners.get('pointerdown')({ button: 0, pointerId: 1, clientX: 0, clientY: 0, preventDefault() {} });
+    f.listeners.get('pointermove')({ pointerId: 1, clientX: 20, clientY: 10 });
+    f.listeners.get('pointerup')({ pointerId: 1 }); f.tick(34);
+    assert.notDeepEqual(f.view.settings.camera.direction, before);
+    const orbit = [...f.view.settings.camera.direction], scale = f.view.settings.camera.scale;
+    f.listeners.get('wheel')({ deltaY: -1, preventDefault() {} }); f.tick(34);
+    assert.deepEqual(f.view.settings.camera.direction, orbit);
+    assert.ok(f.view.settings.camera.scale > scale);
+    f.view.setSettings({ ...f.settings, camera: { direction: [0, 0, 1], scale: 1 } }); f.tick(34);
+    assert.equal(f.view.target.valid, true);
+    f.listeners.get('contextmenu')({ preventDefault() {} }); f.tick(34);
+    assert.deepEqual(f.view.settings.camera, C.defaults().camera);
+    f.view.dispose();
+});

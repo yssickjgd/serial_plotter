@@ -77,7 +77,7 @@ test('nonmonotonic timestamps keep the first sample origin and allow every retai
     assert.equal(f.tools.jumpToTime(), false);
 });
 
-test('source follows activation while reference stays independent and no active widget disables navigation', () => {
+test('source and default nearest reference follow activation and no active widget disables navigation', () => {
     const f = fixture([widget('a', [1]), widget('b', [2])]);
     assert.deepEqual(f.tools.serialize(), { referenceId: null });
     f.select('a', 'b');
@@ -85,12 +85,29 @@ test('source follows activation while reference stays independent and no active 
     assert.equal(f.tools.sourceId, 'b');
     f.activate('a');
     f.map.delete('a'); f.tools.syncSources();
-    assert.deepEqual(f.tools.serialize(), { referenceId: 'b' });
+    assert.deepEqual(f.tools.serialize(), { referenceId: null });
     assert.equal(f.tools.sourceId, null);
     assert.equal(f.el('nav-jump-button').disabled, true);
     assert.ok(f.el('monitor-search-status').textContent);
     f.map.set('c', widget('c', [3])); f.tools.syncSources();
     assert.equal(f.tools.sourceId, null);
+});
+
+test('nearest search immediately uses the active widget without choosing a placeholder', async () => {
+    const a = widget('a', [7, 0, 7]), b = widget('b', [7, 0, 7]);
+    b.view.reference = 2;
+    const f = fixture([a, b]); f.activate('a'); f.el('monitor-search-query').value = '7';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.equal(f.tools.matches[f.tools.currentMatch].startByte, 0);
+    assert.equal(f.el('monitor-search-origin').value, 'a');
+    assert.ok(f.el('monitor-search-origin').children.every(option => option.value));
+    f.select('a', 'b'); await f.tools.requestSearch('nearest');
+    assert.equal(f.tools.matches[f.tools.currentMatch].startByte, 2, 'another reference may still be chosen manually');
+    f.activate('b'); assert.equal(f.tools.referenceId, 'b');
+    f.activate('a'); assert.equal(f.el('monitor-search-origin').value, 'a');
+    await f.tools.requestSearch('nearest');
+    assert.equal(f.tools.matches[f.tools.currentMatch].startByte, 0);
+    f.tools.dispose();
 });
 
 test('changing active source cancels old asynchronous search and updates search type and latest time', async () => {
@@ -101,7 +118,7 @@ test('changing active source cancels old asynchronous search and updates search 
     f.activate('byte');
     assert.equal(await pending, false);
     assert.equal(f.tools.sourceId, 'byte');
-    assert.equal(f.tools.referenceId, 'wave');
+    assert.equal(f.tools.referenceId, 'byte');
     assert.equal(f.tools.matches.length, 0);
     assert.equal(f.el('monitor-search-tolerance').hidden, true);
     assert.equal(f.el('monitor-search-case-wrap').hidden, false);
@@ -198,13 +215,14 @@ test('text byte search maps cross-frame Unicode spans and source colors to each 
     assert.equal(f.el('monitor-search-case-wrap').hidden, false);
 });
 
-test('deleting a pending reference requires reselection before results navigate', async () => {
+test('deleting a pending reference cancels the old request and defaults back to the active widget', async () => {
     const a = widget('a', Array(600).fill(7)), b = widget('b', [7]);
     const f = fixture([a, b]); f.select('a', 'b'); f.el('monitor-search-query').value = '7';
     const pending = f.tools.requestSearch('nearest'); f.map.delete('b'); f.tools.syncSources();
     assert.equal(await pending, false);
     assert.deepEqual(a.view.jumps, []);
-    assert.equal(f.tools.serialize().referenceId, null);
+    assert.equal(f.tools.serialize().referenceId, 'a');
+    assert.equal(await f.tools.requestSearch('nearest'), true);
 });
 
 test('a view render failure settles asynchronous search without leaking a pending request', async () => {

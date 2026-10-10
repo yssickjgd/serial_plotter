@@ -65,7 +65,17 @@
         const c = cross.map(v => hand === 'left' ? -v : v);
         return [a[0], b[0], c[0], a[1], b[1], c[1], a[2], b[2], c[2]];
     }
-    const PoseMath = { identity, multiply, transpose, apply, fromEuler, fromQuaternion, fromMatrix, displayBasis,
+    function cameraAngles(vector) {
+        if (!finite(vector, 3)) throw new Error('观察方位向量必须包含三个有限数值');
+        const magnitude = Math.max(...vector.map(Math.abs));
+        if (magnitude === 0) throw new Error('观察方位向量不能全为零');
+        const [x, y, z] = vector.map(value => value / magnitude);
+        return { azimuth: Math.atan2(y, x), elevation: Math.atan2(z, Math.hypot(x, y)) };
+    }
+    function cameraDirection(azimuth, elevation) {
+        return [Math.cos(elevation) * Math.cos(azimuth), Math.cos(elevation) * Math.sin(azimuth), Math.sin(elevation)];
+    }
+    const PoseMath = { identity, multiply, transpose, apply, fromEuler, fromQuaternion, fromMatrix, displayBasis, cameraAngles, cameraDirection,
         compose: (input, overlay, order) => order === 'overlay-first' ? multiply(input, overlay) : multiply(overlay, input) };
     root.SerialPlotter ??= {}; root.SerialPlotter.PoseMath = PoseMath;
     if (typeof module !== 'undefined') module.exports = { PoseMath };

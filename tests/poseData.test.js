@@ -32,6 +32,42 @@ test('fixed and channel overlays use the same source frame and respect multiplic
     settings.overlay.source = 'channels'; settings.overlay.bindings.euler = [1, 0, 2];
     close(M.apply(D.read(frames, 1, settings).matrix, [1, 0, 0]), [0, 0, -1]);
 });
+
+test('mixed Euler overlay reads only channel-backed components from the selected historical frame', () => {
+    const { frames } = fixture(), version = frames.version;
+    const settings = C.normalize({ bindings: { euler: [1, 1, 1] }, overlay: { enabled: true,
+        sources: { euler: ['fixed', 'channels', 'fixed'] },
+        fixed: { euler: [Math.PI / 2, 0, 0] }, bindings: { euler: [null, 0, null] } } });
+    const pose = D.read(frames, 1, settings);
+    assert.equal(pose.valid, true); assert.equal(pose.order, 2);
+    close(M.apply(pose.matrix, [1, 0, 0]), [0, 0, -1]);
+    close(M.apply(pose.matrix, [0, 1, 0]), [-1, 0, 0]);
+    close(M.apply(D.read(frames, 0, settings).matrix, [1, 0, 0]), [0, 1, 0]);
+    assert.equal(frames.version, version);
+    settings.overlay.bindings.euler[1] = null;
+    assert.match(D.read(frames, 1, settings).reason, /pitch.*未绑定/);
+    settings.overlay.bindings.euler[1] = 0;
+    frames.append([NaN, 0, 0], Uint8Array.of(5), '', 3, 1002, { byteOffset: 14 });
+    assert.match(D.read(frames, 2, settings).reason, /pitch.*CH01.*无效/);
+});
+
+test('quaternion and matrix overlays support independent fixed and channel values', () => {
+    const frames = new FrameBuffer(3, 2);
+    frames.append([Math.SQRT1_2, NaN, 0], Uint8Array.of(1), '', 1, 1000, { byteOffset: 0 });
+    frames.append([-1, NaN, 0], Uint8Array.of(2), '', 2, 1001, { byteOffset: 1 });
+    const settings = C.normalize({ bindings: { euler: [2, 2, 2] }, overlay: { enabled: true, representation: 'quaternion',
+        sources: { quaternion: ['fixed', 'fixed', 'fixed', 'channels'],
+            matrix: ['fixed', 'channels', 'fixed', 'fixed', 'fixed', 'fixed', 'fixed', 'fixed', 'fixed'] },
+        fixed: { quaternion: [Math.SQRT1_2, 0, 0, 0], matrix: [0, 0, 0, 1, 0, 0, 0, 0, 1] },
+        bindings: { quaternion: [1, 1, 1, 0], matrix: [1, 0, 1, 1, 1, 1, 1, 1, 1] } } });
+    const quaternion = D.read(frames, 0, settings);
+    assert.equal(quaternion.valid, true);
+    close(M.apply(quaternion.matrix, [1, 0, 0]), [0, 1, 0]);
+    settings.overlay.representation = 'matrix';
+    const matrix = D.read(frames, 1, settings);
+    assert.equal(matrix.valid, true);
+    close(M.apply(matrix.matrix, [1, 0, 0]), [0, 1, 0]);
+});
 test('missing bindings, nonfinite components and overwritten indices report invalid target metadata', () => {
     const { frames, settings } = fixture(); settings.bindings.euler[0] = null;
     assert.match(D.read(frames, 1, settings).reason, /yaw/);

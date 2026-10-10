@@ -10,10 +10,11 @@
             euler: { order: 'YPR', rotation: 'intrinsic', unit: 'radians' },
             quaternion: { order: 'wxyz', normalize: true }, matrix: { orthonormalize: true },
             fixed: { euler: [0, 0, 0], quaternion: [1, 0, 0, 0], matrix: M.identity() },
+            sources: { euler: Array(3).fill(null), quaternion: Array(4).fill(null), matrix: Array(9).fill(null) },
             bindings: { euler: Array(3).fill(null), quaternion: Array(4).fill(null), matrix: Array(9).fill(null) } },
-        axes: { odom: { x: 'forward', y: 'left', hand: 'right', visible: true },
-            body: { x: 'forward', y: 'left', hand: 'right', visible: true } },
-        cubeVisible: true, camera: { azimuth: Math.PI / 4, elevation: Math.PI / 6, scale: 1 }
+        axes: { odom: { x: 'forward', y: 'left', hand: 'right', visible: true, showLabels: false },
+            body: { x: 'forward', y: 'left', hand: 'right', visible: true, showLabels: false } },
+        cubeVisible: true, camera: { direction: M.cameraDirection(Math.PI / 4, Math.PI / 6), scale: 1 }
     });
     function merge(template, input, path = '位姿') {
         if (Array.isArray(template)) {
@@ -29,6 +30,7 @@
     }
     function normalize(input = {}, { channelCount = Infinity, isSignal = () => true } = {}) {
         const s = merge(defaults(), input);
+        s.camera = normalizeCamera(input.camera);
         const choice = (value, values, name) => { if (!values.includes(value)) throw new Error(`${name} 选项无效`); };
         const bool = (value, name) => { if (typeof value !== 'boolean') throw new Error(`${name} 启用值无效`); };
         const representation = t => {
@@ -46,13 +48,28 @@
         choice(s.inputDirection, ['body-to-odom', 'odom-to-body'], '输入方向');
         bool(s.overlay.enabled, '叠加旋转');
         choice(s.overlay.source, ['fixed', 'channels'], '叠加来源');
+        for (const values of Object.values(s.overlay.sources)) for (const source of values)
+            choice(source, [null, 'fixed', 'channels'], '叠加参数来源');
         choice(s.overlay.order, ['input-first', 'overlay-first'], '叠加顺序');
         for (const values of Object.values(s.overlay.fixed)) if (!values.every(Number.isFinite)) throw new Error('固定旋转参数必须是有限数');
-        for (const axis of Object.values(s.axes)) { M.displayBasis(axis); bool(axis.visible, '坐标轴显示'); }
+        for (const axis of Object.values(s.axes)) {
+            M.displayBasis(axis); bool(axis.visible, '坐标轴显示'); bool(axis.showLabels, '坐标轴名称显示');
+        }
         bool(s.cubeVisible, '机体显示');
-        if (!Object.values(s.camera).every(Number.isFinite) || Math.abs(s.camera.elevation) > 89 * Math.PI / 180 ||
-            s.camera.scale < 0.25 || s.camera.scale > 4) throw new Error('观察视角或倍率超出范围');
         return s;
+    }
+    function normalizeCamera(input = {}) {
+        const template = defaults().camera, camera = merge(template, input, '观察视角');
+        if (input.azimuth !== undefined || input.elevation !== undefined) {
+            const fallback = M.cameraAngles(template.direction);
+            const azimuth = input.azimuth ?? fallback.azimuth, elevation = input.elevation ?? fallback.elevation;
+            if (!Number.isFinite(azimuth) || !Number.isFinite(elevation) || Math.abs(elevation) > Math.PI / 2)
+                throw new Error('观察视角超出范围');
+            if (input.direction === undefined) camera.direction = M.cameraDirection(azimuth, elevation);
+        }
+        M.cameraAngles(camera.direction);
+        if (!Number.isFinite(camera.scale) || camera.scale < 0.25 || camera.scale > 4) throw new Error('观察倍率超出范围');
+        return camera;
     }
     function remapBindings(input, numberMap) {
         const s = normalize(input);
@@ -60,9 +77,12 @@
             group[key] = group[key].map(index => index === null ? null : Number.isInteger(numberMap.get(index + 1)) ? numberMap.get(index + 1) - 1 : null);
         return s;
     }
+    // Null overrides inherit the saved group source, preserving older configurations.
+    const componentSource = (overlay, index, type = overlay.representation) => overlay.sources?.[type]?.[index] ?? overlay.source;
     const boundChannels = s => [...new Set([...s.bindings[s.representation],
-        ...(s.overlay.enabled && s.overlay.source === 'channels' ? s.overlay.bindings[s.overlay.representation] : [])].filter(index => index !== null))];
-    const PoseConfig = { defaults, normalize, remapBindings, boundChannels };
+        ...(s.overlay.enabled ? s.overlay.bindings[s.overlay.representation]
+            .filter((_, i) => componentSource(s.overlay, i) === 'channels') : [])].filter(index => index !== null))];
+    const PoseConfig = { defaults, normalize, remapBindings, boundChannels, componentSource };
     root.SerialPlotter ??= {}; root.SerialPlotter.PoseConfig = PoseConfig;
     if (typeof module !== 'undefined') module.exports = { PoseConfig };
 })(globalThis);

@@ -1,6 +1,7 @@
 /** Read-only pose view with bounded rendering, history targeting and camera interaction. */
 (function (root) {
     const C = typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : root.SerialPlotter.PoseConfig;
+    const M = typeof module !== 'undefined' ? require('./poseMath').PoseMath : root.SerialPlotter.PoseMath;
     const D = typeof module !== 'undefined' ? require('./poseData').PoseData : root.SerialPlotter.PoseData;
     const R = typeof module !== 'undefined' ? require('./poseRenderer').PoseRenderer : root.SerialPlotter.PoseRenderer;
     const timeText = timestamp => {
@@ -37,10 +38,11 @@
             this._listen(this.canvas, 'pointermove', event => {
                 if (!this.drag || this.drag.id !== event.pointerId) return;
                 const rect = this.canvas.getBoundingClientRect(), zoom = rect.width / this.width || 1;
-                const camera = this.settings.camera;
-                camera.azimuth -= (event.clientX - this.drag.x) / zoom * 0.01;
-                camera.elevation = Math.max(-89 * Math.PI / 180, Math.min(89 * Math.PI / 180,
-                    camera.elevation + (event.clientY - this.drag.y) / zoom * 0.01));
+                const camera = this.settings.camera, angles = M.cameraAngles(camera.direction);
+                angles.azimuth -= (event.clientX - this.drag.x) / zoom * 0.01;
+                angles.elevation = Math.max(-Math.PI / 2, Math.min(Math.PI / 2,
+                    angles.elevation + (event.clientY - this.drag.y) / zoom * 0.01));
+                camera.direction = M.cameraDirection(angles.azimuth, angles.elevation);
                 this.drag.x = event.clientX; this.drag.y = event.clientY;
                 this.revision++; this.requestRender();
             });

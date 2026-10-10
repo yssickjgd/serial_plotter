@@ -62,3 +62,14 @@ test('display bases keep axis orientation and handedness separate from rotation 
     assert.equal(M.fromMatrix(left, { orthonormalize: true }).valid, false);
     assert.throws(() => M.displayBasis({ x: 'forward', y: 'backward', hand: 'right' }), /共线/);
 });
+
+test('camera direction vectors produce finite view angles for poles and extreme nonzero magnitudes', () => {
+    assert.equal(typeof M.cameraAngles, 'function');
+    const a = M.cameraAngles([1, 1, 1]);
+    assert.ok(Math.abs(a.azimuth - Math.PI / 4) < 1e-9);
+    assert.ok(Math.abs(a.elevation - Math.atan(1 / Math.sqrt(2))) < 1e-9);
+    for (const factor of [1e300, 1e-300]) assert.deepEqual(M.cameraAngles([factor, factor, factor]), a);
+    for (const sign of [-1, 1]) assert.equal(M.cameraAngles([0, 0, sign]).elevation, sign * Math.PI / 2);
+    close(M.cameraDirection(.7, -.2), [Math.cos(.2) * Math.cos(.7), Math.cos(.2) * Math.sin(.7), -Math.sin(.2)]);
+    for (const vector of [[0, 0, 0], [1, 2], [NaN, 0, 1], [Infinity, 0, 1]]) assert.throws(() => M.cameraAngles(vector));
+});

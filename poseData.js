@@ -1,6 +1,7 @@
 /** Read a pose atomically from one shared numeric frame, without changing history. */
 (function (root) {
     const M = typeof module !== 'undefined' ? require('./poseMath').PoseMath : root.SerialPlotter.PoseMath;
+    const C = typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : root.SerialPlotter.PoseConfig;
     function componentLabels(settings) {
         if (settings.representation === 'euler') return ['yaw', 'pitch', 'roll'];
         if (settings.representation === 'quaternion') return [...settings.quaternion.order];
@@ -14,6 +15,9 @@
     function readComponents(frames, index, settings, prefix) {
         const values = [], labels = componentLabels(settings);
         for (const [i, channel] of settings.bindings[settings.representation].entries()) {
+            if (settings.fixed && C.componentSource(settings, i) === 'fixed') {
+                values.push(settings.fixed[settings.representation][i]); continue;
+            }
             if (channel === null) return { valid: false, reason: `${prefix}${labels[i]} 未绑定通道` };
             if (channel < 0 || channel >= frames.channelCount || frames.isSignal && !frames.isSignal(channel))
                 return { valid: false, reason: `${prefix}${labels[i]} 来源不是有效标量通道` };
@@ -32,8 +36,7 @@
         if (!input.valid) return { ...metadata, ...input };
         let matrix = settings.inputDirection === 'odom-to-body' ? M.transpose(input.matrix) : input.matrix;
         if (settings.overlay.enabled) {
-            const overlay = settings.overlay.source === 'fixed' ? convert(settings.overlay.fixed[settings.overlay.representation], settings.overlay)
-                : readComponents(frames, index, settings.overlay, '叠加 ');
+            const overlay = readComponents(frames, index, settings.overlay, '叠加 ');
             if (!overlay.valid) return { ...metadata, valid: false, reason: `叠加旋转：${overlay.reason}` };
             matrix = M.compose(matrix, overlay.matrix, settings.overlay.order);
         }

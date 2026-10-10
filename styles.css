@@ -724,6 +724,7 @@ input.channel-name-input {
 .pose-status[data-valid="false"] { color: #ffd078; }
 .pose-matrix-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .pose-component-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 4px; }
+.pose-overlay-component { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1fr); gap: 6px; align-items: start; }
 .pose-input-group { min-width: 0; }
 .pose-input-group input[type="checkbox"] { width: 14px; height: 14px; }
 .pose-error { color: #c33232; font-size: .7rem; overflow-wrap: anywhere; margin: 4px 0; }
