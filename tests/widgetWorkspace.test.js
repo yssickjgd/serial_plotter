@@ -39,6 +39,24 @@ function assertSeparate(workspace) {
     }
 }
 
+test('Ctrl left click toggles individual widgets without starting a drag', () => {
+    const f = fixture(), a = f.add('a'), b = f.add('b');
+    a.element.fire('pointerdown');
+    b.element.fire('pointerdown', { ctrlKey: true });
+    assert.deepEqual([...f.workspace.selectedIds], ['a', 'b']);
+    assert.equal(f.workspace.activeId, 'b');
+    assert.equal(f.workspace.gesture, null);
+    a.element.fire('pointerdown', { ctrlKey: true });
+    assert.deepEqual([...f.workspace.selectedIds], ['b']);
+    b.element.fire('pointerdown', { ctrlKey: true });
+    assert.equal(f.workspace.selectedIds.size, 0);
+    assert.equal(f.workspace.activeId, null);
+    const input = { closest: () => ({ tagName: 'INPUT' }) };
+    a.element.fire('pointerdown', { ctrlKey: true, target: input });
+    assert.equal(f.workspace.gesture, null);
+    f.workspace.dispose();
+});
+
 test('first widget sizes and library previews are grid multiples for every alignment step', () => {
     for (const step of [10, 20, 40]) {
         const f = fixture({ step });
@@ -220,7 +238,7 @@ test('resize stops at peer collisions and focus activation, removal and disposal
     assertSeparate(f.workspace);
     a.element.fire('focusin');
     assert.equal(f.workspace.activeId, 'a');
-    a.handle.fire('keydown', { key: 'Delete' });
+    f.document.fire('keydown', { key: 'Delete', target: a.handle });
     assert.deepEqual(deleted, ['a']);
     f.workspace.remove('a');
     a.handle.fire('keydown', { key: 'Delete' });
@@ -561,14 +579,14 @@ test('restoring 100 percent clears fit translation even when the fitted percenta
     f.workspace.dispose();
 });
 
-test('blank context menu alternates visible-center 100 percent and all-widget fit, without intercepting widgets', () => {
+test('blank context menu centers the click at 100 percent then fits all widgets, without intercepting widgets', () => {
     const f = fixture();
     const a = f.add('a', { rect: { x: 1000, y: 0, width: 960, height: 300 } });
     f.workspace.setZoom(2);
     f.viewport.scrollLeft = 1800;
     f.viewport.fire('contextmenu', { clientX: 300, clientY: 200 });
     assert.equal(f.workspace.zoom, 1);
-    assert.equal(f.viewport.scrollLeft, 700);
+    assert.equal(f.viewport.scrollLeft, 600);
     f.viewport.fire('contextmenu');
     assert.equal(f.workspace.zoom, 0.81);
     f.viewport.fire('contextmenu', { composedPath: () => [a.element, f.surface, f.viewport] });
@@ -578,6 +596,204 @@ test('blank context menu alternates visible-center 100 percent and all-widget fi
     f.viewport.fire('contextmenu');
     f.viewport.fire('contextmenu', { clientX: 300, clientY: 200 });
     assert.equal(f.workspace.zoom, 0.25);
+});
+
+test('right click recenters at the same zoom, clamps the origin and keeps the positive edge scrollable', () => {
+    const f = fixture();
+    f.add('a', { rect: { x: 2400, y: 1600, width: 300, height: 200 } });
+    f.viewport.scrollLeft = 1800; f.viewport.scrollTop = 1300;
+    f.viewport.fire('contextmenu', { clientX: 850, clientY: 600 });
+    assert.equal(f.workspace.zoom, 1);
+    assert.equal(f.viewport.scrollLeft, 2150);
+    assert.equal(f.viewport.scrollTop, 1550);
+    f.workspace.refresh();
+    assert.ok(parseFloat(f.workspace.scaleLayer.style.width) >= 2950);
+    assert.ok(parseFloat(f.workspace.scaleLayer.style.height) >= 2150);
+    f.workspace.contextFitNext = false;
+    f.viewport.scrollLeft = 0; f.viewport.scrollTop = 0;
+    f.viewport.fire('contextmenu', { clientX: 110, clientY: 60 });
+    assert.equal(f.viewport.scrollLeft, 0);
+    assert.equal(f.viewport.scrollTop, 0);
+    assert.deepEqual(f.workspace.origin, { x: 0, y: 0 });
+    f.workspace.dispose();
+});
+
+test('double clicking a title fits that widget by scaling the workspace and preserves every rectangle', () => {
+    const f = fixture();
+    const a = f.add('a', { rect: { x: 1200, y: 900, width: 300, height: 200 } });
+    f.add('b', { rect: { x: 1700, y: 0, width: 500, height: 400 } });
+    const before = f.workspace.serialize().rects;
+    a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 2.5);
+    assert.equal(f.workspace.activeId, 'a');
+    assert.deepEqual([...f.workspace.selectedIds], ['a']);
+    assert.deepEqual(f.workspace.serialize().rects, before);
+    assert.equal(f.viewport.scrollLeft, 2975);
+    assert.equal(f.viewport.scrollTop, 2200);
+    f.workspace.refresh();
+    assert.ok(parseFloat(f.workspace.scaleLayer.style.height) >= 2800);
+    a.handle.fire('dblclick', { target: { closest: () => ({}) } });
+    assert.equal(f.workspace.zoom, 2.5);
+    f.workspace.dispose();
+});
+
+test('title focus respects percentage limits and the legal origin for small and oversized widgets', () => {
+    const f = fixture();
+    const small = f.add('small', { rect: { x: 0, y: 0, width: 280, height: 180 } });
+    small.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 2.66);
+    assert.ok(f.viewport.scrollLeft >= 0 && f.viewport.scrollTop >= 0);
+    assert.ok((f.viewport.scrollTop - f.workspace.origin.y) / f.workspace.zoom >= -10);
+    const big = f.add('big', { rect: { x: 300, y: 300, width: 4000, height: 3000 } });
+    big.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 0.25);
+    assert.equal(f.workspace.activeId, 'big');
+    f.viewport.clientWidth = 2000; f.viewport.clientHeight = 2000;
+    small.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 5);
+    f.workspace.dispose();
+});
+
+test('double clicking the focused title restores its prior zoom and scroll without altering layout', () => {
+    const f = fixture();
+    const a = f.add('a', { rect: { x: 2400, y: 1600, width: 300, height: 200 } });
+    f.add('b', { rect: { x: 2900, y: 1600, width: 300, height: 200 } });
+    f.workspace.setZoom(1.55, { x: 0, y: 0 });
+    f.viewport.scrollLeft = 1400; f.viewport.scrollTop = 700;
+    const before = f.workspace.serialize();
+    a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 2.5);
+    f.viewport.scrollLeft += 10;
+    a.handle.fire('dblclick');
+    assert.deepEqual(f.workspace.serialize(), before);
+    assert.equal(f.viewport.scrollLeft, 1400);
+    assert.equal(f.viewport.scrollTop, 700);
+    assert.deepEqual(f.workspace.origin, { x: 0, y: 0 });
+    assert.equal(f.workspace.fitted, false);
+    f.workspace.dispose();
+});
+
+test('title focus restores fit translation and switching titles records the immediately previous view', () => {
+    const f = fixture();
+    const a = f.add('a', { rect: { x: 0, y: 0, width: 300, height: 200 } });
+    const b = f.add('b', { rect: { x: 350, y: 0, width: 300, height: 200 } });
+    f.workspace.fitAll();
+    const initial = { zoom: f.workspace.zoom, origin: { ...f.workspace.origin },
+        centerPoint: { ...f.workspace.centerPoint }, left: f.viewport.scrollLeft, top: f.viewport.scrollTop };
+    a.handle.fire('dblclick'); a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, initial.zoom);
+    assert.deepEqual(f.workspace.origin, initial.origin);
+    assert.deepEqual(f.workspace.centerPoint, initial.centerPoint);
+    assert.equal(f.workspace.fitted, true);
+    assert.equal(f.viewport.scrollLeft, initial.left);
+    assert.equal(f.viewport.scrollTop, initial.top);
+    a.handle.fire('dblclick');
+    const aView = { zoom: f.workspace.zoom, left: f.viewport.scrollLeft, top: f.viewport.scrollTop };
+    b.handle.fire('dblclick'); b.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, aView.zoom);
+    assert.equal(f.viewport.scrollLeft, aView.left);
+    assert.equal(f.viewport.scrollTop, aView.top);
+    f.workspace.dispose();
+});
+
+test('title focus fits against final viewport dimensions when peer widgets introduce scrollbars', () => {
+    const f = fixture();
+    Object.defineProperties(f.viewport, {
+        clientWidth: { get: () => 800 - (parseFloat(f.workspace.scaleLayer.style.height) > 600 ? 5 : 0) },
+        clientHeight: { get: () => 600 - (parseFloat(f.workspace.scaleLayer.style.width) > 800 ? 5 : 0) }
+    });
+    const a = f.add('a', { rect: { x: 0, y: 0, width: 300, height: 1180 } });
+    f.add('b', { rect: { x: 1000, y: 0, width: 1000, height: 200 } });
+    f.workspace.fitAll();
+    const before = { zoom: f.workspace.zoom, left: f.viewport.scrollLeft, top: f.viewport.scrollTop };
+    assert.equal(before.zoom, 0.39);
+    a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 0.49);
+    assert.equal(f.workspace.zoom, f.workspace.fitZoom(a.rect));
+    for (const [axis, size, viewportSize, scroll] of [['y', 'height', 'clientHeight', 'scrollTop'],
+        ['x', 'width', 'clientWidth', 'scrollLeft']]) {
+        const start = f.workspace.origin[axis] + a.rect[axis] * f.workspace.zoom - f.viewport[scroll];
+        assert.ok(start >= 10 * f.workspace.zoom - 1e-9);
+        assert.ok(f.viewport[viewportSize] - start - a.rect[size] * f.workspace.zoom >= 10 * f.workspace.zoom - 1e-9);
+    }
+    a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, before.zoom);
+    assert.equal(f.viewport.scrollLeft, before.left);
+    assert.equal(f.viewport.scrollTop, before.top);
+    f.workspace.dispose();
+});
+
+test('leaving title focus restores within current scroll bounds after the viewport expands', () => {
+    const f = fixture();
+    const a = f.add('a', { rect: { x: 2400, y: 1600, width: 300, height: 200 } });
+    f.viewport.scrollLeft = 1900; f.viewport.scrollTop = 1200;
+    a.handle.fire('dblclick');
+    f.viewport.clientWidth = 4000; f.viewport.clientHeight = 3000;
+    a.handle.fire('dblclick');
+    assert.equal(f.workspace.zoom, 1);
+    assert.deepEqual(f.workspace.origin, { x: 0, y: 0 });
+    assert.equal(f.viewport.scrollLeft, 0);
+    assert.equal(f.viewport.scrollTop, 0);
+    assert.ok(f.viewport.scrollLeft <= parseFloat(f.workspace.scaleLayer.style.width) - f.viewport.clientWidth);
+    assert.ok(f.viewport.scrollTop <= parseFloat(f.workspace.scaleLayer.style.height) - f.viewport.clientHeight);
+    f.workspace.dispose();
+});
+
+test('explicit workspace navigation and deleting the focused widget discard its focus snapshot', () => {
+    for (const navigate of [f => f.workspace.fitAll(), f => f.viewport.fire('contextmenu'),
+        f => f.workspace.reset(), f => f.workspace.restore(f.workspace.serialize()), f => f.workspace.remove('a')]) {
+        const f = fixture();
+        const a = f.add('a', { rect: { x: 0, y: 0, width: 300, height: 200 } });
+        f.add('b', { rect: { x: 350, y: 0, width: 300, height: 200 } });
+        a.handle.fire('dblclick');
+        assert.ok(f.workspace.focusState);
+        navigate(f);
+        assert.equal(f.workspace.focusState, null);
+        f.workspace.dispose();
+    }
+});
+
+test('Ctrl A selects all widgets in workspace context and preserves text editing outside it', () => {
+    const f = fixture();
+    for (const id of ['a', 'b', 'c']) f.add(id);
+    f.workspace.activate('b');
+    let prevented = 0;
+    const event = { ctrlKey: true, key: 'a', preventDefault() { prevented++; }, stopPropagation() {} };
+    f.document.fire('keydown', event);
+    assert.equal(prevented, 0);
+    f.viewport.fire('pointerenter');
+    f.document.fire('keydown', event);
+    assert.deepEqual([...f.workspace.selectedIds], ['a', 'b', 'c']);
+    assert.equal(f.workspace.activeId, 'b');
+    f.workspace._select(['b']);
+    f.document.fire('keydown', { ...event, target: { closest: () => ({}) } });
+    assert.deepEqual([...f.workspace.selectedIds], ['b']);
+    f.viewport.fire('pointerleave');
+    f.document.activeElement = { closest: selector => selector === '.workspace-widget' ? {} : null };
+    f.document.fire('keydown', event);
+    assert.deepEqual([...f.workspace.selectedIds], ['a', 'b', 'c']);
+    assert.equal(prevented, 2);
+    f.workspace.dispose();
+});
+
+test('Delete requests only the active widget once and ignores editing, modifiers, repeat and cancelled drags', () => {
+    const deletions = [], f = fixture({ onDelete: id => deletions.push(id) });
+    const a = f.add('a'); f.add('b');
+    f.workspace.activate('a'); f.workspace._select(['a', 'b']);
+    f.document.fire('keydown', { key: 'Delete' });
+    assert.deepEqual(deletions, ['a']);
+    for (const props of [{ repeat: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true },
+        { target: { closest: () => ({}) } }, { isComposing: true }])
+        f.document.fire('keydown', { key: 'Delete', ...props });
+    assert.deepEqual(deletions, ['a']);
+    a.handle.fire('pointerdown');
+    f.document.fire('keydown', { key: 'Delete' });
+    assert.equal(f.workspace.gesture, null);
+    assert.deepEqual(deletions, ['a', 'a']);
+    f.workspace.activate(null);
+    f.document.fire('keydown', { key: 'Delete' });
+    assert.deepEqual(deletions, ['a', 'a']);
+    f.workspace.dispose();
 });
 
 test('marquee selection moves a group on the grid, keeps relative offsets and cancels together', () => {

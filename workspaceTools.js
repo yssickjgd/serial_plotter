@@ -197,6 +197,14 @@
             this._publish(); this._searchStatus('');
         }
 
+        resetNavigation() {
+            this.invalidate();
+            this._status('nav-jump-status', '');
+            for (const widget of this.getWidgets().values()) {
+                widget.view.setNavigationMarkers?.({ timeOrder: null, matches: [], currentMatch: -1 });
+            }
+        }
+
         _publish() {
             const origin = this._source();
             const display = !isWave(origin) ? origin?.settings?.monitorDisplay : null;

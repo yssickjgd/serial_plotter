@@ -122,24 +122,8 @@ class Plotter {
         this._listen(this.canvas, 'pointercancel', e => this._onPointerCancel(e));
         this._listen(this.canvas, 'lostpointercapture', e => this._onPointerCancel(e));
         this._listen(this.canvas, 'pointerleave', () => this._onMouseLeave());
-        this._listen(this.canvas, 'contextmenu', (e) => {
-            e.preventDefault();
-            const previousViewport = this._viewportState();
-            this._selection = null;
-            this._timeCenterOrder = null;
-            this._markViewDirty();
-            this._vp.displayCount = this.displayMode === 'time'
-                ? this.plotWindowPoints : this.frames.responseMode ? this._scrollTotal() : this.maxPoints;
-            this._vp.autoFollow   = true;
-            this._clampScroll();
-            this.vp.time.displayCount = this.plotWindowPoints;
-            this.vp.time.autoFollow = true;
-            this.vp.time.scrollOffset = Math.max(0, this.frames.length - this.plotWindowPoints);
-            this._timeWindowStartOrder = this.frames.orderAt(this.vp.time.scrollOffset);
-            if (this.displayMode !== 'time') this._clearYZoom('time');
-            this._clearYZoom(this.displayMode);
-            if (this.isPaused) this.draw();
-            this._notifyViewportChange(previousViewport);
+        this._listen(this.canvas, 'contextmenu', e => {
+            e.preventDefault(); this.followLatest();
         });
 
         this.resize();
@@ -253,6 +237,24 @@ class Plotter {
     }
 
     /** Retain shared time/search markers; only visible matches are drawn. */
+    followLatest() {
+        const previousViewport = this._viewportState();
+        this._selection = null; this._timeCenterOrder = null;
+        this._markViewDirty();
+        this._vp.displayCount = this.displayMode === 'time'
+            ? this.plotWindowPoints : this.frames.responseMode ? this._scrollTotal() : this.maxPoints;
+        this._vp.autoFollow = true;
+        this._clampScroll();
+        this.vp.time.displayCount = this.plotWindowPoints;
+        this.vp.time.autoFollow = true;
+        this.vp.time.scrollOffset = Math.max(0, this.frames.length - this.plotWindowPoints);
+        this._timeWindowStartOrder = this.frames.orderAt(this.vp.time.scrollOffset);
+        if (this.displayMode !== 'time') this._clearYZoom('time');
+        this._clearYZoom(this.displayMode);
+        if (this.isPaused) this.draw();
+        this._notifyViewportChange(previousViewport);
+    }
+
     setNavigationMarkers({ timeOrder = null, matches = [], currentMatch = -1 }, redraw = true) {
         this.navigationMarkers = { timeOrder, matches, currentMatch };
         this._markViewDirty();

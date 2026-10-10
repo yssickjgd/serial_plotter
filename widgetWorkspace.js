@@ -13,6 +13,8 @@
     const validRect = rect => rect && ['x', 'y', 'width', 'height'].every(key =>
         Number.isFinite(rect[key]) && rect[key] >= 0 && rect[key] <= 1e7) && rect.width > 0 && rect.height > 0;
     const interactive = event => event.target?.closest?.('button,input,select,textarea,a,[contenteditable="true"]');
+    const editing = event => event.target?.isContentEditable || event.target?.closest?.(
+        'input,select,textarea,[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"]');
 
     class WidgetWorkspace {
         constructor({ viewport, surface, step = 10, zoom = 1, onActivate = () => {}, onResize = () => {}, onZoomChange = () => {},
@@ -26,6 +28,8 @@
             this.activeId = null;
             this.selectedIds = new Set();
             this.origin = { x: 0, y: 0 };
+            this.centerPoint = null;
+            this.focusState = null;
             this.fitted = false;
             this.contextFitNext = false;
             this.activationSequence = 0;
@@ -57,10 +61,15 @@
             this._listen(viewport, 'contextmenu', event => {
                 if (this._fromWidget(event) || interactive(event)) return;
                 event.preventDefault();
+                this.focusState = null;
                 if (this.contextFitNext) {
                     const area = viewport.getBoundingClientRect();
                     this.fitAll({ x: event.clientX - area.left, y: event.clientY - area.top });
-                } else this.setZoom(1);
+                } else {
+                    const point = this._point(event);
+                    this.setZoom(1);
+                    this._centerAt(point);
+                }
                 this.contextFitNext = !this.contextFitNext;
             });
             this._listen(document, 'pointermove', event => this._pointerMove(event));
@@ -69,6 +78,24 @@
                 if (event.pointerId === this.gesture?.pointerId) this._finish(true);
             });
             this._listen(document, 'keydown', event => {
+                if (event.isComposing || event.target?.closest?.('dialog[open]')) return;
+                if (!editing(event) && !event.ctrlKey && !event.metaKey && !event.altKey && event.key === 'Delete') {
+                    if (this.activeId && !event.repeat) {
+                        event.preventDefault(); event.stopPropagation?.();
+                        this._finish(true);
+                        this.onDelete(this.activeId);
+                    }
+                    return;
+                }
+                const workspaceContext = this.pointerInside || this._fromWidget(event) ||
+                    this.document.activeElement === viewport || this.document.activeElement?.closest?.('.workspace-widget');
+                if (workspaceContext && !editing(event) && event.ctrlKey && !event.metaKey && !event.altKey && event.key?.toLowerCase() === 'a') {
+                    event.preventDefault(); event.stopPropagation?.();
+                    this._finish(true);
+                    this._select(this.entries.keys());
+                    if (!this.activeId && this.entries.size) this.activate(this.entries.keys().next().value);
+                    return;
+                }
                 if (this.pointerInside && event.ctrlKey && !event.metaKey && !event.altKey) {
                     const direction = ['=', '+'].includes(event.key) || event.code === 'NumpadAdd' ? 1
                         : event.key === '-' || event.code === 'NumpadSubtract' ? -1 : 0;
@@ -118,25 +145,76 @@
             return { x, y, width: Math.max(...rects.map(rect => rect.x + rect.width)) - x,
                 height: Math.max(...rects.map(rect => rect.y + rect.height)) - y };
         }
-        fitZoom() {
-            const bounds = this._contentBounds();
+        fitZoom(bounds = this._contentBounds()) {
             return bounds ? Math.max(0.25, Math.min(5, Math.floor(100 * Math.min(
                 this.viewport.clientWidth / (bounds.width + 20), this.viewport.clientHeight / (bounds.height + 20)) + 1e-9) / 100)) : 1;
         }
         fitAll(fallbackAnchor) {
-            const bounds = this._contentBounds(), zoom = this.fitZoom();
+            this.focusState = null;
+            this._fitBounds(this._contentBounds(), fallbackAnchor);
+        }
+        _fitBounds(bounds, fallbackAnchor) {
+            let zoom = this.fitZoom(bounds);
+            this.setZoom(zoom, fallbackAnchor);
+            // Zooming may make other widgets introduce scrollbars and shrink the viewport.
+            const corrected = this.fitZoom(bounds);
+            if (corrected < zoom) {
+                zoom = corrected;
+                this.setZoom(zoom, fallbackAnchor);
+            }
             const fits = bounds && (bounds.width + 20) * zoom <= this.viewport.clientWidth &&
                 (bounds.height + 20) * zoom <= this.viewport.clientHeight;
-            this.setZoom(zoom, fallbackAnchor);
-            if (!fits) return;
+            if (!fits) return false;
             this.fitted = true;
             // Only the requested bleed may extend beyond logical zero. Centering a
             // short row of widgets must not expose a large negative workspace.
             this.origin = { x: Math.max(0, (10 - bounds.x) * zoom),
                 y: Math.max(0, (10 - bounds.y) * zoom) };
+            this._centerAt({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
+            return true;
+        }
+        fitWidget(id) {
+            const entry = this.entries.get(id);
+            if (!entry || this.disposed) return false;
+            this._finish(true);
+            this._select([id]); this.activate(id);
+            if (this.focusState?.id === id) {
+                const view = this.focusState.view;
+                this.focusState = null;
+                this._restoreView(view);
+                return true;
+            }
+            const view = { zoom: this.zoom, origin: { ...this.origin },
+                centerPoint: this.centerPoint ? { ...this.centerPoint } : null,
+                fitted: this.fitted, contextFitNext: this.contextFitNext,
+                scrollLeft: this.viewport.scrollLeft, scrollTop: this.viewport.scrollTop };
+            const bounds = entry.rect;
+            if (!this._fitBounds(bounds))
+                this._centerAt({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
+            this.focusState = { id, view };
+            return true;
+        }
+        _restoreView(view) {
+            this.zoom = view.zoom;
+            this.origin = { ...view.origin };
+            this.centerPoint = view.centerPoint ? { ...view.centerPoint } : null;
+            this.fitted = view.fitted;
+            this.contextFitNext = view.contextFitNext;
             this._surfaceSize();
-            this.viewport.scrollLeft = Math.max(0, this.origin.x + (bounds.x + bounds.width / 2) * zoom - this.viewport.clientWidth / 2);
-            this.viewport.scrollTop = Math.max(0, this.origin.y + (bounds.y + bounds.height / 2) * zoom - this.viewport.clientHeight / 2);
+            // The window or widget list may have changed since focus began.
+            this.viewport.scrollLeft = Math.max(0, Math.min(view.scrollLeft,
+                parseFloat(this.scaleLayer.style.width) - this.viewport.clientWidth));
+            this.viewport.scrollTop = Math.max(0, Math.min(view.scrollTop,
+                parseFloat(this.scaleLayer.style.height) - this.viewport.clientHeight));
+            this.onZoomChange(this.zoom);
+            this.onLayoutChange(this.serialize());
+        }
+        _centerAt(point) {
+            // Near logical zero, alignment to the legal edge takes priority over centering.
+            this.centerPoint = { x: Math.max(0, point.x), y: Math.max(0, point.y) };
+            this._surfaceSize();
+            this.viewport.scrollLeft = Math.max(0, this.origin.x + this.centerPoint.x * this.zoom - this.viewport.clientWidth / 2);
+            this.viewport.scrollTop = Math.max(0, this.origin.y + this.centerPoint.y * this.zoom - this.viewport.clientHeight / 2);
         }
         _stepZoom(direction, anchor) {
             const target = Math.max(0.25, Math.min(5, Math.round((this.zoom + direction * 0.1) * 100) / 100));
@@ -177,6 +255,7 @@
             const x = (this.viewport.scrollLeft + anchor.x - this.origin.x) / this.zoom;
             const y = (this.viewport.scrollTop + anchor.y - this.origin.y) / this.zoom;
             this.origin = { x: 0, y: 0 };
+            this.centerPoint = null;
             this.fitted = false;
             this.zoom = zoom;
             this._surfaceSize();
@@ -223,13 +302,16 @@
         }
 
         _surfaceSize(extraBottom = 0, extraRight = 0) {
-            const bottom = Math.max(0, ...this._obstacles().map(rect => rect.y + rect.height));
+            const centeredRight = this.centerPoint ? this.centerPoint.x + (this.viewport.clientWidth / 2 - this.origin.x) / this.zoom : 0;
+            const centeredBottom = this.centerPoint ? this.centerPoint.y + (this.viewport.clientHeight / 2 - this.origin.y) / this.zoom : 0;
+            const right = Math.max(0, extraRight, centeredRight, ...this._obstacles().map(rect => rect.x + rect.width));
+            const bottom = Math.max(0, extraBottom, centeredBottom, ...this._obstacles().map(rect => rect.y + rect.height));
             // Keep room to pan around the anchor when zooming in; do not round the empty viewport into scrollbars.
             const minimumScale = Math.min(1, this.zoom);
             this.surface.style.width = Math.max(this.viewport.clientWidth / minimumScale,
-                ceil(Math.max(this._width(), extraRight), this.step)) + 'px';
+                ceil(Math.max(this._width(), right), this.step)) + 'px';
             this.surface.style.height = Math.max((this.viewport.clientHeight || 0) / minimumScale,
-                ceil(Math.max(bottom, extraBottom), this.step)) + 'px';
+                ceil(bottom, this.step)) + 'px';
             this.surface.style.setProperty?.('--workspace-step', this.step + 'px');
             this.surface.dataset.workspaceZoom = String(this.zoom);
             // Native layout zoom rerasterizes text instead of stretching a composited layer.
@@ -238,8 +320,8 @@
             this.surface.style.left = this.origin.x / this.zoom + 'px';
             this.surface.style.top = this.origin.y / this.zoom + 'px';
             const extent = this.fitted ? { width: Math.max(this.viewport.clientWidth,
-                this.origin.x + (Math.max(extraRight, 0, ...this._obstacles().map(rect => rect.x + rect.width)) + 10) * this.zoom),
-                height: Math.max(this.viewport.clientHeight, this.origin.y + (Math.max(bottom, extraBottom) + 10) * this.zoom) }
+                this.origin.x + (right + 10) * this.zoom),
+                height: Math.max(this.viewport.clientHeight, this.origin.y + (bottom + 10) * this.zoom) }
                 : { width: this.origin.x + parseFloat(this.surface.style.width) * this.zoom,
                     height: this.origin.y + parseFloat(this.surface.style.height) * this.zoom };
             this.scaleLayer.style.width = extent.width + 'px';
@@ -281,7 +363,19 @@
         _bind(entry) {
             const { element, handle, cleanups } = entry;
             const focus = () => { if (!this.selectedIds.has(entry.id)) this._select([entry.id]); this.activate(entry.id); };
-            this._listen(element, 'pointerdown', focus, cleanups);
+            this._listen(element, 'pointerdown', event => {
+                if (event.button === 0 && event.ctrlKey && !interactive(event)) {
+                    event.preventDefault(); event.stopPropagation?.();
+                    const selected = new Set(this.selectedIds);
+                    if (selected.has(entry.id)) selected.delete(entry.id);
+                    else selected.add(entry.id);
+                    this._select([...selected]);
+                    if (selected.has(entry.id)) this.activate(entry.id);
+                    else if (this.activeId === entry.id) this.activate([...selected].at(-1) ?? null);
+                    return;
+                }
+                focus();
+            }, cleanups, { capture: true });
             this._listen(element, 'focusin', focus, cleanups);
             handle.classList.add('workspace-drag-handle');
             handle.dataset.widgetHandle = entry.id;
@@ -303,6 +397,11 @@
                 }, cleanups);
             };
             bind(handle, 'move');
+            this._listen(handle, 'dblclick', event => {
+                if (interactive(event)) return;
+                event.preventDefault(); event.stopPropagation?.();
+                this.fitWidget(entry.id);
+            }, cleanups);
             for (const direction of ['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw']) {
                 const edge = this.document.createElement('div');
                 edge.className = 'workspace-resize-handle workspace-resize-' + direction;
@@ -316,7 +415,7 @@
             }
             this._listen(handle, 'keydown', event => {
                 if (interactive(event) || event.ctrlKey || event.metaKey || event.altKey) return;
-                if (event.key === 'Delete' || event.key === 'Backspace') {
+                if (event.key === 'Backspace') {
                     event.preventDefault(); this.onDelete(entry.id); return;
                 }
                 const offset = { ArrowLeft: [-this.step, 0], ArrowRight: [this.step, 0],
@@ -472,6 +571,7 @@
         remove(id) {
             const entry = this.entries.get(id);
             if (!entry) return false;
+            if (this.focusState?.id === id) this.focusState = null;
             if (this.gesture?.entry === entry || this.gesture?.group?.some(item => item.entry === entry) || this.gesture?.library || this.gesture?.marquee) this._finish(true);
             for (const cleanup of entry.cleanups) cleanup();
             for (const handle of entry.resizeHandles) handle.remove();
@@ -501,6 +601,9 @@
             this.step = layout.step;
             this.zoom = Math.round(zoom * 100) / 100;
             this.origin = { x: 0, y: 0 };
+            this.centerPoint = null;
+            this.focusState = null;
+            this.fitted = false;
             this._select([]);
             for (const [id, entry] of this.entries) entry.rect = { ...layout.rects[id] };
             this.refresh({ notifyResize: true });
@@ -539,6 +642,7 @@
 
         reset() {
             this._finish(true);
+            this.focusState = null;
             const obstacles = [];
             for (const entry of this.entries.values()) {
                 const rect = this._place(this._normalize({ x: 0, y: 0, width: 640, height: 300 }, this._minimum(entry), true),

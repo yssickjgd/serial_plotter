@@ -46,9 +46,9 @@ class WidgetController {
 
     get active() { return this.widgets.get(this.activeId); }
     element(id) { return this.document.getElementById(id); }
-    _listen(element, event, callback) {
+    _listen(element, event, callback, cleanups = this.cleanups) {
         element.addEventListener(event, callback);
-        this.cleanups.push(() => element.removeEventListener(event, callback));
+        cleanups.push(() => element.removeEventListener(event, callback));
     }
     register(type, definition) { this.registry.set(type, definition); }
 
@@ -119,7 +119,7 @@ class WidgetController {
                 widget.chromeObserver.observe(refs['monitor-stats']);
             }
         }
-        remove.addEventListener('click', event => { event.stopPropagation(); this.remove(id); });
+        this._listen(remove, 'click', event => { event.stopPropagation(); this.requestRemove(id); }, widget.cleanups ??= []);
         this.applySettings(widget);
         widget.view.setVisible(true);
         if (typeof IntersectionObserver === 'function') {
@@ -524,7 +524,16 @@ class WidgetController {
         for (const name of ['change', 'blur', 'pointerleave'])
             this._listen(this.element('widget-title'), name, () => this._commitTitle());
         this._listen(this.element('widget-title-tools'), 'pointerleave', () => this._commitTitle());
-        this._listen(this.element('widget-delete'), 'click', () => { if (this.active) this.remove(this.activeId); });
+        this._listen(this.element('widget-delete'), 'click', () => { if (this.active) this.requestRemove(this.activeId); });
+        const dialog = this.element('widget-delete-dialog');
+        this._listen(this.element('widget-delete-cancel'), 'click', () => this._closeDeleteDialog());
+        this._listen(dialog, 'cancel', event => { event.preventDefault(); this._closeDeleteDialog(); });
+        this._listen(dialog, 'close', () => { if (!dialog.open) this.pendingDeleteId = null; });
+        this._listen(this.element('widget-delete-confirm'), 'click', () => {
+            const id = this.pendingDeleteId;
+            this._closeDeleteDialog();
+            if (id !== null && id !== undefined) this.remove(id);
+        });
         for (const [key, id] of Object.entries(this.fieldIds)) this._listen(this.element(id), 'change', () => {
             const widget = this.active;
             if (!widget || this.binding) return;
@@ -715,6 +724,10 @@ class WidgetController {
     setPaused(paused) {
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave' && widget.view.isPaused !== paused) widget.view.togglePause();
+            if (!paused) {
+                this._cancelViewportRestore(widget); widget.pendingViewport = null;
+                widget.view.followLatest?.();
+            }
             widget.view.invalidateData();
         }
     }
@@ -744,10 +757,24 @@ class WidgetController {
         }
         this.activate(this.activeId);
     }
+    _closeDeleteDialog() {
+        this.pendingDeleteId = null;
+        this.element('widget-delete-dialog').close();
+    }
+    requestRemove(id) {
+        const widget = this.widgets.get(id), dialog = this.element('widget-delete-dialog');
+        if (this.disposed || !widget || this.pendingDeleteId != null || dialog.open) return false;
+        this.pendingDeleteId = id;
+        this.element('widget-delete-message').textContent = `确定删除控件“${widget.title}”吗？`;
+        dialog.showModal();
+        return true;
+    }
     remove(id) {
         const widget = this.widgets.get(id);
         if (!widget) return;
+        if (this.pendingDeleteId === id) this._closeDeleteDialog();
         this._cancelViewportRestore(widget);
+        for (const cleanup of widget.cleanups ?? []) cleanup();
         widget.disposed = true; widget.visibility?.disconnect(); widget.chromeObserver?.disconnect(); widget.view.dispose(); widget.responseFrames?.dispose();
         this.service.releaseSource(widget.source);
         this.widgets.delete(id); this.workspace.remove(id);
@@ -765,10 +792,13 @@ class WidgetController {
         });
     }
     dispose() {
+        this.disposed = true;
+        this._closeDeleteDialog();
         this.channelView.dispose();
         for (const cleanup of this.cleanups.splice(0)) cleanup();
         this.displayView.dispose();
         for (const widget of this.widgets.values()) {
+            for (const cleanup of widget.cleanups ?? []) cleanup();
             this._cancelViewportRestore(widget);
             widget.disposed = true; widget.visibility?.disconnect(); widget.chromeObserver?.disconnect(); widget.view.dispose(); widget.responseFrames?.dispose(); this.service.releaseSource(widget.source);
         }

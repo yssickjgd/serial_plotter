@@ -86,7 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (widget.type === 'wave') widget.view.resize();
         },
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
-        onDelete: id => widgets?.remove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
+        onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
     widgets = new S.WidgetController({ document, service, globals, workspace,
         onChange() {
             if (!widgets || disposed) return;
@@ -427,7 +427,9 @@ document.addEventListener('DOMContentLoaded', () => {
         finally { connecting = false; if (!disposed) syncConnection(); }
     });
     function setPaused(paused) {
-        service.pause(paused); widgets.setPaused(service.paused); tools.invalidate(); tools.syncPaused();
+        service.pause(paused);
+        if (service.paused) tools.invalidate(); else tools.resetNavigation();
+        widgets.setPaused(service.paused); tools.syncPaused();
         for (const widget of widgets.widgets.values()) { widget.view.draw?.(); widget.view.render?.(); }
         el('btn-pause').textContent = service.paused ? '恢复捕获' : '暂停捕获';
         el('btn-pause').className = service.paused ? 'btn btn-success' : 'btn btn-secondary';

@@ -1,6 +1,118 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+test('resuming capture clears navigation and makes every retained widget follow latest', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const wave = f.app.widgets.create({ type: 'wave' });
+    const spectrum = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'frequency' } });
+    const bytes = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
+    const hex = f.app.widgets.create({ type: 'byte' });
+    for (let i = 0; i < 10; i++) f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 128, 63));
+    await f.settle(); f.click('btn-pause');
+    f.app.tools._jumpAll(wave.source.frames.rawByteOffsetAt(3), true);
+    f.app.tools.matches = [{ startByte: wave.source.frames.rawByteOffsetAt(3),
+        endByte: wave.source.frames.rawByteOffsetAt(3) + 5 }];
+    f.app.tools.currentMatch = 0; f.app.tools._publish();
+    assert.equal(wave.view.vp.time.autoFollow, false);
+    assert.notEqual(wave.view.navigationMarkers.timeOrder, null);
+    assert.equal(bytes.view.followTail, false);
+    f.get('nav-jump-status').textContent = '已定位第 4 帧';
+    f.click('btn-pause'); await f.tick();
+    assert.equal(f.app.service.paused, false);
+    assert.equal(f.app.tools.matches.length, 0);
+    assert.equal(f.get('nav-jump-status').textContent, '');
+    for (const widget of [wave, spectrum]) {
+        assert.equal(widget.view.vp.time.autoFollow, true);
+        assert.equal(widget.view.navigationMarkers.timeOrder, null);
+        assert.equal(widget.view.navigationMarkers.matches.length, 0);
+    }
+    for (const widget of [bytes, hex]) {
+        assert.equal(widget.view.followTail, true);
+        assert.equal(widget.view.cursorOrder, null);
+        assert.equal(widget.view.cursorByteOffset, null);
+    }
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 0, 64)); await f.tick();
+    assert.equal(wave.source.frames.length, 11, 'resuming must preserve retained history');
+    assert.equal(wave.source.frames.getValue(0, 10), 2);
+});
 const { bootApplication } = require('./helpers/widgetAppHarness');
+
+test('inspector deletion waits for confirmation, cancellation preserves the widget, and confirmed deletion keeps capture', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const widget = f.app.widgets.create({ type: 'wave', title: '待确认的波形' });
+    const source = widget.source;
+    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0x80, 0x3F), { timestamp: 100 });
+    f.click('widget-delete');
+    assert.equal(f.app.widgets.widgets.has(widget.id), true);
+    assert.equal(f.get('widget-delete-dialog').open, true);
+    assert.ok(f.get('widget-delete-message').textContent.includes(widget.title));
+    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0, 0x40), { timestamp: 101 });
+    assert.equal(source.frames.length, 2, 'confirmation must not pause incoming capture');
+    f.click('widget-delete-cancel');
+    assert.equal(f.app.widgets.widgets.has(widget.id), true);
+    assert.equal(f.get('widget-delete-dialog').open, false);
+    f.click('widget-delete'); f.click('widget-delete-confirm');
+    assert.equal(f.app.widgets.widgets.has(widget.id), false);
+    assert.equal(f.app.workspace.entries.has(widget.id), false);
+    assert.equal(f.get('widget-delete-dialog').open, false);
+    assert.equal(f.app.service.numericSource, source);
+    assert.equal(source.frames.length, 2);
+    assert.equal(source.frames.getValue(0, 1), 2);
+});
+
+test('close button and global Delete use the same confirmation and Escape cancels it', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const first = f.app.widgets.create({ type: 'wave' }), second = f.app.widgets.create({ type: 'byte' });
+    first.element.querySelector('.widget-close').click();
+    assert.equal(f.app.widgets.widgets.has(first.id), true);
+    assert.equal(f.get('widget-delete-dialog').open, true);
+    f.get('widget-delete-dialog').dispatchEvent({ type: 'cancel' });
+    assert.equal(f.app.widgets.widgets.has(first.id), true);
+    assert.equal(f.get('widget-delete-dialog').open, false);
+    f.app.workspace.activate(second.id);
+    f.document.dispatchEvent({ type: 'keydown', key: 'Delete' });
+    assert.equal(f.app.widgets.widgets.has(second.id), true);
+    assert.equal(f.get('widget-delete-dialog').open, true);
+    f.click('widget-delete-confirm');
+    assert.equal(f.app.widgets.widgets.has(second.id), false);
+    assert.equal(f.app.widgets.widgets.has(first.id), true);
+});
+
+test('confirmation cannot switch its target and stale or disposed deletion requests cannot remove another widget', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const first = f.app.widgets.create({ type: 'wave' }), second = f.app.widgets.create({ type: 'byte' });
+    f.app.widgets.requestRemove(first.id);
+    f.app.widgets.requestRemove(second.id);
+    f.app.widgets.activate(second.id);
+    f.click('widget-delete-confirm');
+    assert.equal(f.app.widgets.widgets.has(first.id), false);
+    assert.equal(f.app.widgets.widgets.has(second.id), true);
+    f.app.widgets.requestRemove(second.id);
+    f.get('widget-delete-dialog').dispatchEvent({ type: 'close' });
+    assert.equal(f.app.widgets.pendingDeleteId, second.id, 'a queued close from an old dialog cannot cancel a new request');
+    f.app.widgets.remove(second.id);
+    assert.equal(f.get('widget-delete-dialog').open, false);
+    const third = f.app.widgets.create({ type: 'wave' });
+    f.click('widget-delete-confirm');
+    assert.equal(f.app.widgets.widgets.has(third.id), true);
+    f.app.dispose();
+    assert.equal(f.app.widgets.requestRemove(third.id), false);
+});
+
+test('workspace shortcuts do not intercept title editing and Ctrl A works after keyboard focus', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const first = f.app.widgets.create({ type: 'wave' }), second = f.app.widgets.create({ type: 'byte' });
+    f.get('workspace-viewport').dispatchEvent({ type: 'pointerenter' });
+    f.document.dispatchEvent({ type: 'keydown', key: 'a', ctrlKey: true, target: f.get('widget-title') });
+    assert.notEqual(f.app.workspace.selectedIds.size, 2);
+    f.document.dispatchEvent({ type: 'keydown', key: 'Delete', target: f.get('widget-title') });
+    assert.notEqual(f.get('widget-delete-dialog').open, true);
+    f.get('workspace-viewport').dispatchEvent({ type: 'pointerleave' });
+    f.document.activeElement = first.refs['waveform-drag-handle'];
+    f.document.dispatchEvent({ type: 'keydown', key: 'a', ctrlKey: true, target: first.refs['waveform-drag-handle'] });
+    assert.deepEqual(Array.from(f.app.workspace.selectedIds), [first.id, second.id]);
+    assert.equal(f.app.workspace.activeId, second.id);
+});
 
 test('leaving the title editor commits to the original widget without Enter', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());

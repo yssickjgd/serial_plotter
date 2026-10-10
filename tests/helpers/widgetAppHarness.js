@@ -57,6 +57,8 @@ function bootApplication(config = null, options = {}) {
             return true;
         }
         click() { this.dispatchEvent({ type: 'click', target: this }); }
+        showModal() { this.open = true; this.attributes.open = ''; }
+        close() { this.open = false; delete this.attributes.open; this.dispatchEvent({ type: 'close' }); }
         append(...children) { children.forEach(child => this.appendChild(child)); }
         appendChild(child) {
             if (child.tagName === '#FRAGMENT') { [...child.children].forEach(node => this.appendChild(node)); return child; }
@@ -66,7 +68,7 @@ function bootApplication(config = null, options = {}) {
         remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
         contains(node) { return node === this || this.children.some(child => child.contains(node)); }
         matches(selector) {
-            const attribute = selector.match(/\[([^=\]]+)(?:="?([^"\]]+)"?)?\]/);
+            const attribute = selector.match(/\[([^=\]]+)(?:="?([^"\]]*)"?)?\]/);
             const cls = selector.match(/\.([\w-]+)/), id = selector.match(/#([\w-]+)/), tag = selector.match(/^[\w-]+/);
             return (!tag || this.tagName === tag[0].toUpperCase()) && (!cls || this.classList.contains(cls[1])) &&
                 (!id || this.id === id[1]) && (!attribute || this.getAttribute(attribute[1]) !== null &&
