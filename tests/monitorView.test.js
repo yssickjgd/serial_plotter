@@ -293,6 +293,46 @@ test('selection holds text in place while both small and virtual scroll ranges g
     } finally { global.document = oldDocument; }
 });
 
+test('selected text stays fixed through repeated live updates when CSSOM rounds large row coordinates', () => {
+    const oldDocument = global.document, listeners = {}, paintedTops = new WeakMap();
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null };
+    const document = monitorDocument(), createElement = document.createElement;
+    document.createElement = (...args) => {
+        const node = createElement(...args);
+        Object.defineProperty(node.style, 'top', {
+            // Chrome serializes large CSS lengths with six significant digits,
+            // while layout retains the more precise value originally assigned.
+            get() { return paintedTops.has(node) ? `${paintedTops.get(node).toPrecision(6)}px` : ''; },
+            set(value) { paintedTops.set(node, parseFloat(value)); }
+        });
+        return node;
+    };
+    global.document = { ...document, getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        const frames = new FrameBuffer(1, 6000, { raw: true });
+        const append = i => frames.appendRaw(new Uint8Array(i % 3 === 0 ? 1024 : 96).fill(65), 't', i + 1);
+        for (let i = 0; i < 2100; i++) append(i);
+        const view = monitorFixture(frames, 640, 200); view.render();
+        const container = view.container, row = view.spacer.children.at(-1), body = row.children[1];
+        container.contains = node => node === body;
+        Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+        listeners.selectionchange();
+        const selectedTop = paintedTops.get(row) - container.scrollTop, initialHeight = container.scrollHeight;
+        for (let batch = 0; batch < 100; batch++) {
+            for (let j = 0; j < 20; j++) append(2100 + batch * 20 + j);
+            view.render();
+            assert.equal(view.spacer.children.at(-1), row, 'native selection keeps its original DOM node');
+            assert.ok(Math.abs(paintedTops.get(row) - container.scrollTop - selectedTop) < .01,
+                `selected text moved during update ${batch}`);
+        }
+        assert.ok(container.scrollHeight > initialHeight, 'new records still extend the scrollbar range');
+        assert.equal(frames.length, 4100);
+        assert.equal(selection.isCollapsed, false);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
 test('native scrollbar dragging freezes record mapping and track height until pointer release', () => {
     const oldDocument = global.document, listeners = {};
     global.document = { ...monitorDocument(), addEventListener(name, callback) { listeners[name] = callback; } };
@@ -1555,18 +1595,13 @@ test('text monitor preserves cross-frame Unicode, wraps display cells and highli
 
 test('text replacement characters stay white with and without search highlights', () => {
     const oldDocument = global.document;
-    global.document = {
-        createElement: () => ({ style: {}, children: [],
-            append(...children) { this.children.push(...children); },
-            appendChild(child) { this.children.push(child); } })
-    };
+    global.document = monitorDocument();
     try {
         const frames = new FrameBuffer(1, 5);
         frames.append([0], Uint8Array.of(0x41, 0xff, 0x00, 0x0d, 0x0a, 0x09), 't', 1);
         const { MappedTextDecoder } = require('../textCodec');
         const decoder = new MappedTextDecoder('utf-8');
-        const view = Object.create(MonitorView.prototype);
-        view.frames = frames;
+        const view = monitorFixture(frames);
         const row = { ...frames.frameAt(0), frameIndex: 0 };
         const tokens = decoder.write(row.bytes, 0);
         const layout = { prefix: '[t] RX ', byteMode: 'text', lineCount: 1,
@@ -1586,6 +1621,7 @@ test('text replacement characters stay white with and without search highlights'
         const search = new MonitorSearchSession(frames, parseMonitorSearch('text', '\uFFFD'));
         search.step();
         assert.deepEqual(search.matches, [], 'invalid bytes must not match a literal replacement character');
+        view.dispose();
     } finally { global.document = oldDocument; }
 });
 

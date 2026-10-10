@@ -381,6 +381,7 @@ class MonitorView {
         this.lastRows = [];
         this.lastOffsets = [0];
         this.rowPositions = [];
+        this._paintedRowTops = new WeakMap();
         this.mode = 'hex';
         this.displayOptions = monitorDisplayUtils.normalizeDisplayOptions();
         this.expandedRows = new Set();
@@ -815,8 +816,13 @@ class MonitorView {
         const shift = container.scrollTop - oldTop;
         if (shift) {
             for (const node of this.spacer.children) {
-                const top = parseFloat(node.style.top);
-                if (Number.isFinite(top)) node.style.top = `${top + shift}px`;
+                // CSSOM rounds large lengths when read back (e.g. 1.55313e+06px).
+                // Keep the original numeric coordinate to avoid cumulative selection drift.
+                const top = this._paintedRowTops.get(node);
+                if (Number.isFinite(top)) {
+                    this._paintedRowTops.set(node, top + shift);
+                    node.style.top = `${top + shift}px`;
+                }
             }
             for (const row of this.rowPositions) row.top += shift;
             this.lastOffsets = this.lastOffsets.map(offset => offset + shift);
@@ -1649,6 +1655,7 @@ class MonitorView {
             this.render({ userAction: true });
         }, undefined, true);
         div.style.top = `${top}px`;
+        this._paintedRowTops.set(div, top);
         div.style.height = `${rowLineCount * this.rowHeight}px`;
         const prefix = (this.document ?? document).createElement('span');
         prefix.className = 'monitor-prefix';
