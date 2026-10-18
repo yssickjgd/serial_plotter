@@ -2,8 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { ChannelOperations } = require('../channelOperations');
+const { SystemResponseFrames } = require('../systemResponseFrames');
 
-function createPlotter() {
+function createPlotter(responseFrames = null) {
     const labels = [];
     const canvasEvents = new Map();
     const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
@@ -31,13 +33,86 @@ function createPlotter() {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
-    const plotter = new Plotter('waveform-canvas', new FrameBuffer(1, 1024));
-    plotter.setChannelCount(1);
+    const plotter = new Plotter('waveform-canvas', responseFrames ?? new FrameBuffer(1, 1024),
+        { viewOnly: !!responseFrames });
+    plotter.setChannelCount(responseFrames?.channelCount ?? 1);
     plotter.setChannelVisible(0, true);
-    for (let i = 0; i < 1024; i++) plotter.addFrame([Math.sin(2 * Math.PI * 100 * i / 1024)]);
+    if (!responseFrames) for (let i = 0; i < 1024; i++)
+        plotter.addFrame([Math.sin(2 * Math.PI * 100 * i / 1024)]);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     return { plotter, labels, canvasEvents };
 }
+
+function createResponsePlotter(expression) {
+    const frames = new SystemResponseFrames();
+    frames.configure({ channelCount: 2, engine: new ChannelOperations(1, [
+        { number: 2, type: 'constant', expression }
+    ]) }, 64);
+    const result = createPlotter(frames);
+    result.plotter.setChannelVisible(0, false);
+    result.plotter.setChannelVisible(1, true);
+    result.plotter.vp.frequency.displayCount = frames.frequencyForChannel(1).mags.length;
+    result.plotter.setDisplayOptions({ displayMode: 'frequency', magnitudeUnit: 'amplitude',
+        freqXUnit: 'hz', freqXScale: 'log', freqYScale: 'linear' });
+    return result;
+}
+
+test('automatic linear magnitude fits the visible system response instead of forcing zero', () => {
+    const { plotter } = createResponsePlotter('[0]=1,[1]=0.001');
+    plotter.draw();
+    const magnitudes = plotter.frames.frequencyForChannel(1).mags.slice(1);
+    const low = Math.min(...magnitudes), high = Math.max(...magnitudes);
+    assert.ok(plotter._drawState.min > 0.9);
+    assert.ok(plotter._drawState.min < low && plotter._drawState.max > high);
+    assert.ok(plotter._drawState.max < 1.1);
+});
+
+test('automatic logarithmic magnitude also fits a nearly flat response', () => {
+    const { plotter, labels } = createResponsePlotter('[0]=1,[1]=0.001');
+    plotter.setDisplayOptions({ freqYScale: 'log' });
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(plotter._drawState.min > 0.95);
+    assert.ok(plotter._drawState.max < 1.05);
+    assert.equal(new Set(labels.slice(0, 9)).size, 9, 'narrow logarithmic ticks remain distinct');
+});
+
+test('automatic magnitude ticks keep useful precision after fitting a tiny variation', () => {
+    const { plotter, labels } = createResponsePlotter('[0]=1,[1]=0.00000001');
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(plotter._drawState.min > 0.999);
+    assert.equal(new Set(labels.slice(0, 9)).size, 9);
+});
+
+test('a narrow time-domain auto range also keeps distinct Y tick labels', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.clear();
+    for (let i = 0; i < 64; i++) plotter.addFrame([1 + i * 1e-8]);
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    labels.length = 0;
+    plotter.draw();
+    assert.equal(new Set(labels.slice(0, 9)).size, 9);
+});
+
+test('automatic linear magnitude fits a positive-only sampled spectrum window', () => {
+    const { plotter } = createPlotter();
+    plotter.clear();
+    for (let i = 0; i < 64; i++) plotter.addFrame([i === 0 ? 1 : 0]);
+    plotter.setDisplayOptions({ fftWindow: 'rectangular', freqYScale: 'linear' });
+    Object.assign(plotter.vp.frequency, { scrollOffset: 1, displayCount: 30, autoFollow: false });
+    plotter.draw();
+    assert.ok(plotter._drawState.min > 0);
+    assert.ok(plotter._drawState.max > plotter._drawState.min);
+});
+
+test('sampled logarithmic spectra keep their numerical-noise floor', () => {
+    const { plotter } = createPlotter();
+    plotter.setDisplayOptions({ freqYScale: 'log' });
+    plotter.draw();
+    const peak = Math.max(...plotter._frequencyForChannel(0).mags);
+    assert.ok(plotter._drawState.min >= peak / 1e6 / 1.3);
+});
 
 test('phase radians convert FFT series after unwrapping and label the axis and hover', () => {
     const { plotter, labels } = createPlotter();

@@ -1274,8 +1274,16 @@ class Plotter {
                     maxPositive = Math.max(maxPositive, value);
                 }
             }
-            min = maxPositive > 0 ? Math.max(maxPositive / 1e6, minPositive / 1.3) : 1e-6;
-            max = maxPositive > 0 ? Math.max(maxPositive * 1.1, min * 1.1) : 1;
+            if (maxPositive > 0) {
+                const visibleFloor = this.frames.responseMode ? minPositive
+                    : Math.max(minPositive, maxPositive / 1e6);
+                const logSpan = Math.log(maxPositive) - Math.log(visibleFloor);
+                const padding = logSpan > 1e-9 ? Math.min(Math.log(1.3), logSpan * 0.08) : Math.log(1.1);
+                const factor = Math.exp(padding);
+                min = Math.max(Number.MIN_VALUE, visibleFloor / factor);
+                max = Math.min(Number.MAX_VALUE, maxPositive * factor);
+                if (!(max > min)) max = Math.min(Number.MAX_VALUE, min * 2);
+            } else { min = 1e-6; max = 1; }
         } else {
             min = Infinity;
             max = -Infinity;
@@ -1286,8 +1294,12 @@ class Plotter {
                 max = this.phaseUnit === 'radians' ? Math.PI : 180;
                 min = -max;
             } else if (this.displayMode === 'frequency' && this.magnitudeUnit !== 'db') {
-                min = 0;
-                max = Number.isFinite(max) && max > 0 ? max * 1.08 : 1;
+                if (Number.isFinite(min) && Number.isFinite(max) && max > 0) {
+                    const pad = (max > min ? max - min : max) * 0.08;
+                    min = Math.max(0, min - pad);
+                    max = Math.min(Number.MAX_VALUE, max + pad);
+                    if (!(max > min)) { min = 0; max = 1; }
+                } else { min = 0; max = 1; }
             } else {
                 if (!Number.isFinite(min) || !Number.isFinite(max)) { min = -1; max = 1; }
                 if (max === min) { max += 1; min -= 1; }
@@ -1311,10 +1323,19 @@ class Plotter {
         // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
         this.ctx.fillStyle = '#aaaaaa'; this.ctx.font = `10px ${this.fontFamily}`;
         this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
+        const yTicks = Array.from({ length: 9 }, (_, i) =>
+            globalThis.SerialPlotter.axisValueAtFraction(i / 8, min, max, yScale));
+        let tickPrecision = 0;
+        if (logY) tickPrecision = 3;
+        else if (new Set(yTicks.map(value => value.toFixed(6))).size < yTicks.length) tickPrecision = 7;
+        if (tickPrecision) {
+            while (tickPrecision < 15 && new Set(yTicks.map(value =>
+                Number(value.toPrecision(tickPrecision)).toString())).size < yTicks.length) tickPrecision++;
+        }
         for (let i = 0; i <= 8; i++) {
             const py = plotH - (i/8) * plotH;
-            const v = globalThis.SerialPlotter.axisValueAtFraction(i / 8, min, max, yScale);
-            const label = logY ? Number(v.toPrecision(3)).toString() : v.toFixed(6);
+            const v = yTicks[i];
+            const label = tickPrecision ? Number(v.toPrecision(tickPrecision)).toString() : v.toFixed(6);
             this.ctx.fillText(label + this._phaseSuffix(), plotW + 6, py);
             // Tick: draw leftward into the plot area, not rightward into the label area
             this.ctx.beginPath(); this.ctx.moveTo(plotW, py); this.ctx.lineTo(plotW - 4, py);
