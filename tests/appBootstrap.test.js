@@ -457,6 +457,68 @@ test('both sidebar resizers update their CSS width constraint and stop on pointe
     }
 });
 
+test('sidebar controls preserve panel width and scroll position while giving the workspace room', t => {
+    const f = boot(t);
+    const left = f.get('sidebar'), right = f.get('channel-sidebar');
+    left.scrollTop = 42; right.scrollTop = 27;
+    left.style.setProperty('--sidebar-w', '355px');
+    f.click('workspace-toggle-left');
+    assert.equal(f.get('workspace-toggle-left').getAttribute('aria-expanded'), 'false');
+    assert.equal(f.get('app-container').classList.contains('left-collapsed'), true);
+    f.click('workspace-toggle-right');
+    assert.equal(f.get('app-container').classList.contains('right-collapsed'), true);
+    f.click('workspace-toggle-left'); f.click('workspace-toggle-right');
+    assert.equal(f.get('workspace-toggle-left').getAttribute('aria-expanded'), 'true');
+    assert.equal(f.get('workspace-toggle-right').getAttribute('aria-expanded'), 'true');
+    assert.equal(left.style['--sidebar-w'], '355px');
+    assert.equal(left.scrollTop, 42);
+    assert.equal(right.scrollTop, 27);
+});
+
+test('workspace help is initially visible and can be dismissed and reopened', t => {
+    const f = boot(t);
+    assert.equal(f.get('workspace-help').hidden, false);
+    f.click('workspace-help-dismiss');
+    assert.equal(f.get('workspace-help').hidden, true);
+    assert.equal(f.get('workspace-help-toggle').getAttribute('aria-expanded'), 'false');
+    f.click('workspace-help-toggle');
+    assert.equal(f.get('workspace-help').hidden, false);
+});
+
+test('narrow layout collapses both panels and reopening one keeps the other closed', t => {
+    const f = boot(t);
+    f.window.innerWidth = 900;
+    f.window.dispatchEvent({ type: 'resize' });
+    const shell = f.get('app-container');
+    assert.equal(shell.classList.contains('compact-layout'), true);
+    assert.equal(shell.classList.contains('left-collapsed'), true);
+    assert.equal(shell.classList.contains('right-collapsed'), true);
+    f.click('workspace-toggle-left');
+    assert.equal(shell.classList.contains('left-collapsed'), false);
+    f.click('sidebar-close-left');
+    assert.equal(shell.classList.contains('left-collapsed'), true);
+    f.click('workspace-toggle-left');
+    f.click('workspace-toggle-right');
+    assert.equal(shell.classList.contains('left-collapsed'), true);
+    assert.equal(shell.classList.contains('right-collapsed'), false);
+    f.click('sidebar-close-right');
+    assert.equal(shell.classList.contains('right-collapsed'), true);
+    f.window.innerWidth = 1600;
+    f.window.dispatchEvent({ type: 'resize' });
+    assert.equal(shell.classList.contains('compact-layout'), false);
+    assert.equal(shell.classList.contains('left-collapsed'), false);
+    assert.equal(shell.classList.contains('right-collapsed'), true, 'an explicitly closed panel stays closed');
+});
+
+test('widened sidebars trigger compact layout before the workspace becomes unreadable', t => {
+    const f = boot(t);
+    f.window.innerWidth = 1360;
+    f.get('sidebar').style.setProperty('--sidebar-w', '600px');
+    f.get('channel-sidebar').style.setProperty('--channel-sidebar-w', '600px');
+    f.window.dispatchEvent({ type: 'resize' });
+    assert.equal(f.get('app-container').classList.contains('compact-layout'), true);
+});
+
 test('the global sender resizes upward while reserving workspace space and supports cancellation', t => {
     const f = boot(t), input = f.get('send-input'), handle = f.get('send-resizer');
     assert.ok(handle, 'the global sender needs its own separator');
@@ -470,7 +532,7 @@ test('the global sender resizes upward while reserving workspace space and suppo
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 400 });
     assert.equal(input.style.height, '260px');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: -1000 });
-    assert.equal(input.style.height, '310px', 'leave the 150px workspace minimum available');
+    assert.equal(input.style.height, '290px', 'reserve space for the workspace toolbar and visible help');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 1000 });
     assert.equal(input.style.height, '60px', 'retain the original four-line minimum');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 400 });
@@ -482,7 +544,7 @@ test('the global sender resizes upward while reserving workspace space and suppo
     f.get('global-send').clientHeight = 350;
     f.get('main-display').clientHeight = 400;
     f.window.dispatchEvent({ type: 'resize' });
-    assert.equal(input.style.height, '90px', 'a smaller window must account for all fixed toolbars, not overflowing flex children');
+    assert.equal(input.style.height, '70px', 'a smaller window must reserve the toolbar and visible help');
 });
 
 test('importing malformed JSON or overlapping rectangles never destroys the current view', async t => {

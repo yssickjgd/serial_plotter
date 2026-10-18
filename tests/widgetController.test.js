@@ -114,6 +114,22 @@ test('workspace shortcuts do not intercept title editing and Ctrl A works after 
     assert.equal(f.app.workspace.activeId, second.id);
 });
 
+test('inspector names the selected widget type and updates its context after renaming', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    assert.match(f.get('widget-selection-prompt').textContent, /选择/);
+    const wave = f.app.widgets.create({ type: 'wave' });
+    assert.equal(f.get('active-monitor-caption').textContent, wave.title);
+    assert.equal(f.get('active-widget-type').textContent, '波形控件');
+    f.get('widget-title').value = '主频分析';
+    f.get('widget-title').dispatchEvent({ type: 'blur' });
+    assert.equal(f.get('active-monitor-caption').textContent, '主频分析');
+    const byte = f.app.widgets.create({ type: 'byte' });
+    assert.equal(f.get('active-widget-type').textContent, '字节流控件');
+    f.app.widgets.activate(null);
+    assert.equal(f.get('active-widget-type').hidden, true);
+    assert.equal(byte.title.startsWith('字节流'), true);
+});
+
 test('leaving the title editor commits to the original widget without Enter', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const first = f.app.widgets.create({ type: 'wave' });

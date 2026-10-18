@@ -47,6 +47,46 @@ test('monitor properties stay on the right while export is a peer left sidebar c
     assert.ok(!html.includes('id="tab-channel-config"'));
 });
 
+test('export and shared parsing settings make their scope visible without changing controls', () => {
+    const exportPanel = panel('export-panel');
+    assert.match(exportPanel, /格式与范围/);
+    assert.match(exportPanel, /导出文件/);
+    assert.match(panel('frame-numeric-settings'), /scope-badge[^>]*>全局共用/);
+    assert.match(panel('frame-raw-settings'), /scope-badge[^>]*>全局共用/);
+});
+
+test('sidebar export settings use peer cards with conditional format settings and compact controls', () => {
+    const exportPanel = panel('export-panel');
+    for (const id of ['wrap-export-text-parsing', 'wrap-export-numeric-parsing', 'export-channels-wrap']) {
+        assert.match(exportPanel, new RegExp(`<div id="${id}" class="control-group(?: [^"]+)?"`));
+    }
+    assert.match(exportPanel, /id="export-scope-panel"[^>]*>[\s\S]*?class="section-title">格式与范围/);
+    assert.match(exportPanel, /class="section-title">文本帧解析/);
+    assert.match(exportPanel, /class="section-title">数值帧解析/);
+    assert.match(exportPanel, /id="export-confirm-panel"[^>]*>[\s\S]*?class="section-title">导出文件/);
+    assert.match(panel('export-confirm-panel'), /id="export-text-metadata"/);
+    assert.match(panel('export-confirm-panel'), /id="export-parse-status"/);
+    assert.match(panel('frame-text-settings'), /id="frame-text-settings"[^>]*class="sidebar-stack"/);
+    assert.match(panel('wrap-response-options'), /id="wrap-response-options"[^>]*class="sidebar-stack"/);
+    assert.match(panel('config-serial'), /id="config-serial"[^>]*class="sidebar-stack"/);
+    assert.match(panel('config-net'), /id="config-net"[^>]*class="sidebar-stack"/);
+    assert.doesNotMatch(html, /margin-top:\s*-4px/);
+    assert.match(css, /--ui-group-gap:\s*6px/);
+    assert.match(css, /--ui-section-gap:\s*8px/);
+    assert.match(css, /\.chk-label\s*\{[^}]*font-size:\s*var\(--ui-label-size\)/);
+    assert.match(css, /\.sidebar \.btn, \.channel-sidebar \.btn\s*\{[^}]*font-size:\s*var\(--ui-label-size\)/);
+    assert.match(css, /\.widget-library-item\s*>\s*small\s*\{[^}]*font-size:\s*var\(--ui-note-size\)/);
+});
+
+test('sidebar checkbox groups show one choice per line', () => {
+    const metadata = panel('export-text-metadata');
+    assert.match(metadata, /id="export-timestamps"/);
+    assert.match(metadata, /id="export-markers"/);
+    assert.match(css, /\.export-metadata\s*\{[^}]*flex-direction:\s*column/);
+    assert.match(css, /\.monitor-checkboxes\s*\{[^}]*flex-direction:\s*column/);
+    assert.match(css, /\.export-channel-list\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+});
+
 test('byte display settings have no configurable refresh rate', () => {
     assert.doesNotMatch(html, /monitor-refresh-rate/);
     assert.doesNotMatch(panel('monitor-display-panel'), /刷新率/);

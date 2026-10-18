@@ -61,7 +61,7 @@
             this._listen(viewport, 'contextmenu', event => {
                 if (this._fromWidget(event) || interactive(event)) return;
                 event.preventDefault();
-                this.focusState = null;
+                this._setFocusState(null);
                 if (this.contextFitNext) {
                     const area = viewport.getBoundingClientRect();
                     this.fitAll({ x: event.clientX - area.left, y: event.clientY - area.top });
@@ -138,6 +138,11 @@
             for (const entry of this.entries.values())
                 entry.element.classList[this.selectedIds.has(entry.id) ? 'add' : 'remove']('workspace-panel-selected');
         }
+        _setFocusState(state) {
+            if (this.focusState?.id) this.entries.get(this.focusState.id)?.element.classList.remove('workspace-panel-focused');
+            this.focusState = state;
+            if (state?.id) this.entries.get(state.id)?.element.classList.add('workspace-panel-focused');
+        }
         _contentBounds() {
             const rects = this._obstacles();
             if (!rects.length) return null;
@@ -150,7 +155,7 @@
                 this.viewport.clientWidth / (bounds.width + 20), this.viewport.clientHeight / (bounds.height + 20)) + 1e-9) / 100)) : 1;
         }
         fitAll(fallbackAnchor) {
-            this.focusState = null;
+            this._setFocusState(null);
             this._fitBounds(this._contentBounds(), fallbackAnchor);
         }
         _fitBounds(bounds, fallbackAnchor) {
@@ -180,7 +185,7 @@
             this._select([id]); this.activate(id);
             if (this.focusState?.id === id) {
                 const view = this.focusState.view;
-                this.focusState = null;
+                this._setFocusState(null);
                 this._restoreView(view);
                 return true;
             }
@@ -191,7 +196,7 @@
             const bounds = entry.rect;
             if (!this._fitBounds(bounds))
                 this._centerAt({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
-            this.focusState = { id, view };
+            this._setFocusState({ id, view });
             return true;
         }
         _restoreView(view) {
@@ -571,7 +576,7 @@
         remove(id) {
             const entry = this.entries.get(id);
             if (!entry) return false;
-            if (this.focusState?.id === id) this.focusState = null;
+            if (this.focusState?.id === id) this._setFocusState(null);
             if (this.gesture?.entry === entry || this.gesture?.group?.some(item => item.entry === entry) || this.gesture?.library || this.gesture?.marquee) this._finish(true);
             for (const cleanup of entry.cleanups) cleanup();
             for (const handle of entry.resizeHandles) handle.remove();
@@ -602,7 +607,7 @@
             this.zoom = Math.round(zoom * 100) / 100;
             this.origin = { x: 0, y: 0 };
             this.centerPoint = null;
-            this.focusState = null;
+            this._setFocusState(null);
             this.fitted = false;
             this._select([]);
             for (const [id, entry] of this.entries) entry.rect = { ...layout.rects[id] };
@@ -642,7 +647,7 @@
 
         reset() {
             this._finish(true);
-            this.focusState = null;
+            this._setFocusState(null);
             const obstacles = [];
             for (const entry of this.entries.values()) {
                 const rect = this._place(this._normalize({ x: 0, y: 0, width: 640, height: 300 }, this._minimum(entry), true),

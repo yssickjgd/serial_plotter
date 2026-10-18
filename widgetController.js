@@ -233,6 +233,9 @@ class WidgetController {
         this.element('widget-title-tools').hidden = !widget;
         this.element('monitor-settings-tabs').hidden = !widget;
         this.element('active-monitor-caption').textContent = widget?.title ?? '控件属性';
+        const typeLabel = this.element('active-widget-type');
+        typeLabel.hidden = !widget;
+        typeLabel.textContent = widget ? { wave: '波形控件', byte: '字节流控件', pose: '位姿控件' }[widget.type] : '';
         if (!widget) {
             for (const id of ['channel-config-list', 'monitor-channel-list']) this.channelView.clear(this.element(id));
             this.onActivate(null); return;

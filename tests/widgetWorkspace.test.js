@@ -625,6 +625,7 @@ test('double clicking a title fits that widget by scaling the workspace and pres
     const before = f.workspace.serialize().rects;
     a.handle.fire('dblclick');
     assert.equal(f.workspace.zoom, 2.5);
+    assert.equal(a.element.classList.contains('workspace-panel-focused'), true);
     assert.equal(f.workspace.activeId, 'a');
     assert.deepEqual([...f.workspace.selectedIds], ['a']);
     assert.deepEqual(f.workspace.serialize().rects, before);
@@ -634,6 +635,7 @@ test('double clicking a title fits that widget by scaling the workspace and pres
     assert.ok(parseFloat(f.workspace.scaleLayer.style.height) >= 2800);
     a.handle.fire('dblclick', { target: { closest: () => ({}) } });
     assert.equal(f.workspace.zoom, 2.5);
+    assert.equal(a.element.classList.contains('workspace-panel-focused'), true);
     f.workspace.dispose();
 });
 
@@ -665,6 +667,7 @@ test('double clicking the focused title restores its prior zoom and scroll witho
     assert.equal(f.workspace.zoom, 2.5);
     f.viewport.scrollLeft += 10;
     a.handle.fire('dblclick');
+    assert.equal(a.element.classList.contains('workspace-panel-focused'), false);
     assert.deepEqual(f.workspace.serialize(), before);
     assert.equal(f.viewport.scrollLeft, 1400);
     assert.equal(f.viewport.scrollTop, 700);

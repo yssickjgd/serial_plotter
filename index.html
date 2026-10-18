@@ -10,13 +10,14 @@
 </head>
 
 <body>
-    <div class="app-container">
+    <div class="app-container" id="app-container">
 
         <!-- ══ 左侧：配置侧栏 ══ -->
         <aside class="sidebar" id="sidebar">
             <div class="app-title">
                 <span class="status-dot disconnected" id="connection-indicator"></span>
                 <span>Scientific Plotter</span>
+                <button id="sidebar-close-left" class="sidebar-close" type="button" aria-label="收起通用设置">收起</button>
             </div>
 
             <div class="sidebar-top tab-group" id="sidebar-top">
@@ -39,7 +40,7 @@
                                 <option value="udp">UDP (Bridge)</option>
                             </select>
                         </div>
-                        <div id="config-serial">
+                        <div id="config-serial" class="sidebar-stack">
                             <div class="input-group">
                                 <label>波特率</label>
                                 <input type="text" id="serial-baud" value="115200" />
@@ -69,7 +70,7 @@
                                 </select>
                             </div>
                         </div>
-                        <div id="config-net" style="display:none;">
+                        <div id="config-net" class="sidebar-stack" style="display:none;">
                             <div class="input-group">
                                 <label>远端 Host IP</label>
                                 <input type="text" id="net-host" value="127.0.0.1" />
@@ -123,71 +124,73 @@
                     </div>
                 </div>
                 <div class="tab-content" id="tab-export">
-                    <div class="control-group export-panel" id="export-panel">
-                        <div class="section-title">导出数据</div>
-                        <div class="input-group">
-                            <label for="export-format">导出格式</label>
-                            <select id="export-format">
-                                <option value="binary">原始字节（.bin）</option>
-                                <option value="hex-text">Hex 文本（.hex）</option>
-                                <option value="text">文本（.txt）</option>
-                                <option value="csv" selected>通道表格（.csv）</option>
-                            </select>
+                    <div class="export-panel" id="export-panel">
+                        <div class="control-group" id="export-scope-panel">
+                            <div class="section-title">格式与范围</div>
+                            <div class="input-group">
+                                <label for="export-format">导出格式</label>
+                                <select id="export-format">
+                                    <option value="binary">原始字节（.bin）</option>
+                                    <option value="hex-text">Hex 文本（.hex）</option>
+                                    <option value="text">文本（.txt）</option>
+                                    <option value="csv" selected>通道表格（.csv）</option>
+                                </select>
+                            </div>
+                            <div class="input-group" id="wrap-export-direction" hidden>
+                                <label for="export-direction">数据方向</label>
+                                <select id="export-direction">
+                                    <option value="rx" selected>RX 接收帧</option>
+                                    <option value="tx">TX 发送帧</option>
+                                    <option value="both">RX＋TX（按时间顺序）</option>
+                                </select>
+                            </div>
+                            <div class="input-group" id="wrap-export-source">
+                                <label for="export-source">记录范围</label>
+                                <select id="export-source" aria-label="导出记录范围"></select>
+                            </div>
+                            <span id="export-source-status" class="hint-text" role="status"></span>
+                            <span class="hint-text" id="export-scope-hint">导出所选数据来源的完整保留缓冲区。</span>
                         </div>
-                        <div class="input-group" id="wrap-export-direction" hidden>
-                            <label for="export-direction">数据方向</label>
-                            <select id="export-direction">
-                                <option value="rx" selected>RX 接收帧</option>
-                                <option value="tx">TX 发送帧</option>
-                                <option value="both">RX＋TX（按时间顺序）</option>
-                            </select>
+                        <div id="wrap-export-text-parsing" class="control-group" hidden>
+                            <div class="section-title">文本帧解析（仅用于导出）</div>
+                            <label class="chk-label"><input type="checkbox" id="export-follow-text" checked />跟随当前监视台帧配置</label>
+                            <div class="input-group" id="wrap-export-encoding" hidden>
+                                <label for="export-encoding">源数据字符集</label>
+                                <select id="export-encoding">
+                                    <option value="utf-8" selected>UTF-8</option>
+                                    <option value="ascii">ASCII</option>
+                                    <option value="gbk">GBK（兼容 GB2312）</option>
+                                    <option value="gb18030">GB18030</option>
+                                    <option value="big5">Big5</option>
+                                    <option value="utf-16le">UTF-16LE</option>
+                                    <option value="utf-16be">UTF-16BE</option>
+                                    <option value="shift_jis">Shift-JIS</option>
+                                    <option value="windows-1252">Windows-1252</option>
+                                </select>
+                                <span class="hint-text">用于解码原始字节，与输出文件编码独立。</span>
+                            </div>
+                            <div class="input-group">
+                                <label for="export-text-boundary">断帧方式</label>
+                                <select id="export-text-boundary">
+                                    <option value="records" selected>沿用记录边界</option>
+                                    <option value="idle">空闲间隔（0.001 s）</option>
+                                    <option value="cr">\r</option><option value="lf">\n</option>
+                                    <option value="crlf">\r\n</option><option value="lfcr">\n\r</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label for="export-output-encoding">输出文件编码</label>
+                                <select id="export-output-encoding">
+                                    <option value="utf-8" selected>UTF-8</option><option value="ascii">ASCII</option>
+                                    <option value="gbk">GBK（兼容 GB2312）</option><option value="gb18030">GB18030</option>
+                                    <option value="big5">Big5</option><option value="utf-16le">UTF-16LE</option>
+                                    <option value="utf-16be">UTF-16BE</option><option value="shift_jis">Shift-JIS</option>
+                                    <option value="windows-1252">Windows-1252</option>
+                                </select>
+                                <span class="hint-text">无法用所选编码表示的字符会报错，不会静默替换。</span>
+                            </div>
                         </div>
-                        <div class="input-group" id="wrap-export-source">
-                            <label for="export-source">记录范围</label>
-                            <select id="export-source" aria-label="导出记录范围"></select>
-                        </div>
-                        <span id="export-source-status" class="hint-text" role="status"></span>
-                        <span class="hint-text" id="export-scope-hint">导出所选数据来源的完整保留缓冲区。</span>
-                        <div id="wrap-export-text-parsing" hidden>
-                        <div class="section-title">文本帧解析（仅用于导出）</div>
-                        <label class="chk-label"><input type="checkbox" id="export-follow-text" checked />跟随当前监视台帧配置</label>
-                        <div class="input-group" id="wrap-export-encoding" hidden>
-                            <label for="export-encoding">源数据字符集</label>
-                            <select id="export-encoding">
-                                <option value="utf-8" selected>UTF-8</option>
-                                <option value="ascii">ASCII</option>
-                                <option value="gbk">GBK（兼容 GB2312）</option>
-                                <option value="gb18030">GB18030</option>
-                                <option value="big5">Big5</option>
-                                <option value="utf-16le">UTF-16LE</option>
-                                <option value="utf-16be">UTF-16BE</option>
-                                <option value="shift_jis">Shift-JIS</option>
-                                <option value="windows-1252">Windows-1252</option>
-                            </select>
-                            <span class="hint-text">用于解码原始字节，与输出文件编码独立。</span>
-                        </div>
-                        <div class="input-group">
-                            <label for="export-text-boundary">断帧方式</label>
-                            <select id="export-text-boundary">
-                                <option value="records" selected>沿用记录边界</option>
-                                <option value="idle">空闲间隔（0.001 s）</option>
-                                <option value="cr">\r</option><option value="lf">\n</option>
-                                <option value="crlf">\r\n</option><option value="lfcr">\n\r</option>
-                            </select>
-                        </div>
-                        <div class="input-group">
-                            <label for="export-output-encoding">输出文件编码</label>
-                            <select id="export-output-encoding">
-                                <option value="utf-8" selected>UTF-8</option><option value="ascii">ASCII</option>
-                                <option value="gbk">GBK（兼容 GB2312）</option><option value="gb18030">GB18030</option>
-                                <option value="big5">Big5</option><option value="utf-16le">UTF-16LE</option>
-                                <option value="utf-16be">UTF-16BE</option><option value="shift_jis">Shift-JIS</option>
-                                <option value="windows-1252">Windows-1252</option>
-                            </select>
-                            <span class="hint-text">无法用所选编码表示的字符会报错，不会静默替换。</span>
-                        </div>
-                        </div>
-                        <div id="wrap-export-numeric-parsing" hidden>
+                        <div id="wrap-export-numeric-parsing" class="control-group" hidden>
                             <div class="section-title">数值帧解析（仅用于导出）</div>
                             <label class="chk-label"><input type="checkbox" id="export-follow-numeric" checked />跟随当前监视台帧配置</label>
                             <div class="row">
@@ -218,9 +221,8 @@
                             <label class="chk-label"><input type="checkbox" id="export-chk-checksum" />启用末尾 8-bit 和校验</label>
                             <span class="hint-text">校验只针对数据段，位于帧尾之后。更改通道数后仅导出原始解码通道；通道数一致时包含运算通道。</span>
                         </div>
-                        <span id="export-parse-status" class="hint-text" role="status" hidden></span>
-                        <div id="export-channels-wrap" class="export-channels" hidden>
-                            <div id="export-channel-summary" class="export-channel-heading">导出通道</div>
+                        <div id="export-channels-wrap" class="control-group export-channels" hidden>
+                            <div id="export-channel-summary" class="section-title">导出通道</div>
                             <div class="row">
                                 <button id="btn-export-channels-all-on" type="button" class="btn btn-secondary">全部选择</button>
                                 <button id="btn-export-channels-all-off" type="button" class="btn btn-secondary">全部取消</button>
@@ -228,15 +230,19 @@
                             <div id="export-channel-list" class="export-channel-list" role="group" aria-label="导出通道"></div>
                             <span class="hint-text">独立选择 CSV 列，不受波形或字节流通道可见性影响。</span>
                         </div>
-                        <div class="export-metadata" id="export-text-metadata" hidden>
-                            <label class="chk-label"><input type="checkbox" id="export-timestamps" />带时间戳</label>
-                            <label class="chk-label" id="wrap-export-markers"><input type="checkbox" id="export-markers" />带 RX/TX 标记</label>
+                        <div class="control-group export-confirm" id="export-confirm-panel">
+                            <div class="section-title">导出文件</div>
+                            <div class="export-metadata" id="export-text-metadata" hidden>
+                                <label class="chk-label"><input type="checkbox" id="export-timestamps" />带时间戳</label>
+                                <label class="chk-label" id="wrap-export-markers"><input type="checkbox" id="export-markers" />带 RX/TX 标记</label>
+                            </div>
+                            <span id="export-parse-status" class="hint-text" role="status" hidden></span>
+                            <span class="hint-text" id="export-binary-hint" hidden>仅保存原始字节，不保存断帧边界、时间戳或 RX/TX 标记。</span>
+                            <span class="hint-text" id="export-retention-hint" hidden>RX/TX 各自最多保留“最大帧数量”的记录；仅导出成功发送的 TX 数据。</span>
+                            <span class="hint-text" id="export-availability" role="status" hidden></span>
+                            <p class="hint-text export-range-summary" id="export-range-summary" role="status"></p>
+                            <button id="btn-export" class="btn btn-success">导出数据</button>
                         </div>
-                        <span class="hint-text" id="export-binary-hint" hidden>仅保存原始字节，不保存断帧边界、时间戳或 RX/TX 标记。</span>
-                        <span class="hint-text" id="export-retention-hint" hidden>RX/TX 各自最多保留“最大帧数量”的记录；仅导出成功发送的 TX 数据。</span>
-                        <span class="hint-text" id="export-availability" role="status" hidden></span>
-                        <p class="hint-text export-range-summary" id="export-range-summary" role="status"></p>
-                        <button id="btn-export" class="btn btn-success">导出数据</button>
                     </div>
                 </div>
                 <!-- ── Tab: 导出数据 ── -->
@@ -255,16 +261,29 @@
 
             <section class="monitor-workspace" id="monitor-workspace" aria-label="监视台工作区">
                 <div class="workspace-toolbar" id="workspace-toolbar">
-                    <span class="workspace-label" title="Ctrl＋滚轮或 Ctrl＋= / Ctrl＋- 缩放工作区；Shift＋滚轮横向滚动">工作区</span>
-                    <label class="workspace-zoom-input"><input id="workspace-zoom-percent" type="number" min="25" max="500" step="1" value="100" aria-label="工作区缩放百分比" />%</label>
-                    <button id="workspace-zoom-reset" type="button" title="恢复工作区缩放至 100%" aria-label="恢复工作区缩放至 100%">100%</button>
-                    <label for="workspace-step">对齐步进</label>
-                    <select id="workspace-step" aria-label="监视台对齐步进">
-                        <option value="10" selected>10 px</option>
-                        <option value="20">20 px</option>
-                        <option value="40">40 px</option>
-                    </select>
-                    <button id="workspace-reset" type="button" title="整理现有控件的位置与大小">恢复布局</button>
+                    <div class="workspace-toolbar-group workspace-panel-controls">
+                        <button id="workspace-toggle-left" type="button" aria-controls="sidebar" aria-expanded="true">通用设置</button>
+                        <span class="workspace-label">工作区</span>
+                        <button id="workspace-toggle-right" type="button" aria-controls="channel-sidebar" aria-expanded="true">控件设置</button>
+                    </div>
+                    <div class="workspace-toolbar-group" aria-label="工作区缩放">
+                        <label class="workspace-zoom-input">缩放 <input id="workspace-zoom-percent" type="number" min="25" max="500" step="1" value="100" aria-label="工作区缩放百分比" />%</label>
+                        <button id="workspace-zoom-reset" type="button" title="恢复工作区缩放至 100%" aria-label="恢复工作区缩放至 100%">100%</button>
+                    </div>
+                    <div class="workspace-toolbar-group" aria-label="工作区对齐与布局">
+                        <label for="workspace-step">对齐步进</label>
+                        <select id="workspace-step" aria-label="监视台对齐步进">
+                            <option value="10" selected>10 px</option>
+                            <option value="20">20 px</option>
+                            <option value="40">40 px</option>
+                        </select>
+                        <button id="workspace-reset" type="button" title="整理现有控件的位置与大小">恢复布局</button>
+                    </div>
+                    <button id="workspace-help-toggle" type="button" aria-controls="workspace-help" aria-expanded="true">操作提示</button>
+                </div>
+                <div class="workspace-help" id="workspace-help">
+                    <span>拖动标题移动控件，拖动边缘调整尺寸；Ctrl＋点击多选，双击标题聚焦；Ctrl＋滚轮缩放工作区，Shift＋滚轮横向滚动。</span>
+                    <button id="workspace-help-dismiss" type="button" aria-label="关闭工作区操作提示">关闭</button>
                 </div>
                 <div class="workspace-viewport" id="workspace-viewport">
                     <div class="workspace-surface" id="workspace-surface">
@@ -283,16 +302,20 @@
                     <span class="tool-label">时间定位</span>
                     <div class="jump-toolbar" id="nav-jump-toolbar">
                         <div class="jump-selection-row">
-                            <select id="nav-jump-mode" aria-label="时间类型">
-                                <option value="absolute" selected>系统时间</option>
-                                <option value="relative">相对时间</option>
-                            </select>
-                            <div class="jump-time-value">
-                                <input id="nav-jump-absolute" type="datetime-local" step="0.001" aria-label="系统时间，精确到毫秒" />
-                                <input id="nav-jump-relative" type="number" min="0" step="0.001" aria-label="相对时间（s）" hidden />
-                                <span id="nav-jump-relative-unit" hidden>s</span>
+                            <div class="jump-control-group">
+                                <select id="nav-jump-mode" aria-label="时间类型">
+                                    <option value="absolute" selected>系统时间</option>
+                                    <option value="relative">相对时间</option>
+                                </select>
+                                <div class="jump-value-action">
+                                    <div class="jump-time-value">
+                                        <input id="nav-jump-absolute" type="datetime-local" step="0.001" aria-label="系统时间，精确到毫秒" />
+                                        <input id="nav-jump-relative" type="number" min="0" step="0.001" aria-label="相对时间（s）" hidden />
+                                        <span id="nav-jump-relative-unit" hidden>s</span>
+                                    </div>
+                                    <button id="nav-jump-button" type="button">跳转</button>
+                                </div>
                             </div>
-                            <button id="nav-jump-button" type="button">跳转</button>
                             <span id="nav-jump-status" class="jump-status" role="status"></span>
                         </div>
                     </div>
@@ -352,8 +375,8 @@
         </main>
         <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-orientation="vertical" aria-label="调整监视台配置宽度"></div>
         <aside class="channel-sidebar" id="channel-sidebar" aria-label="监视台配置">
-            <div class="sidebar-section-header" id="active-monitor-caption" aria-live="polite">控件属性</div>
-            <div id="widget-selection-prompt" class="widget-selection-prompt">点击控件以查看和修改其配置。</div>
+            <div class="inspector-heading"><div class="sidebar-section-header" id="active-monitor-caption" aria-live="polite">控件属性</div><span id="active-widget-type" class="active-widget-type" hidden></span><button id="sidebar-close-right" class="sidebar-close" type="button" aria-label="收起控件设置">收起</button></div>
+            <div id="widget-selection-prompt" class="widget-selection-prompt"><strong>选择一个控件</strong><span>点击工作区中的波形、字节流或位姿控件，右侧将显示该控件的设置。也可从左侧“控件”添加新控件。</span></div>
             <div id="widget-title-tools" class="widget-title-tools" hidden><input id="widget-title" aria-label="控件标题" /><button id="widget-delete" type="button" class="btn btn-danger">删除</button></div>
             <div class="channel-settings-content tab-group" id="monitor-settings-tabs" hidden>
                 <div class="tab-bar settings-tabs">
@@ -387,7 +410,7 @@
                     </div>
                     <div id="shared-numeric-settings" class="numeric-frame-settings">
                         <div class="control-group" id="frame-numeric-settings">
-                            <div class="section-title">数值解码（所有数值控件共用）</div>
+                            <div class="section-title">数值解码 <span class="scope-badge">全局共用</span></div>
                             <div class="row">
                                 <div class="input-group">
                                     <label>数据类型</label>
@@ -437,7 +460,7 @@
                         <div class="control-group" id="frame-checksum-settings">
                             <div class="section-title">校验位</div>
                             <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
-                            <span class="hint-text" style="margin-top:-4px;">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
+                            <span class="hint-text">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
                         </div>
                     </div>
                 </div>
@@ -461,8 +484,8 @@
                     </div>
                     <div id="byte-numeric-settings" hidden></div>
                     <div class="control-group" id="frame-raw-settings" hidden>
-                        <div class="section-title">原始数据断帧（全局共用）</div>
-                        <div id="frame-text-settings" hidden>
+                        <div class="section-title">原始数据断帧 <span class="scope-badge">全局共用</span></div>
+                        <div id="frame-text-settings" class="sidebar-stack" hidden>
                             <div class="input-group">
                                 <label for="text-encoding">文本字符集</label>
                                 <select id="text-encoding">
@@ -513,7 +536,7 @@
                                 <label id="plot-window-label" for="plot-window-points">采样点数（全局共用）</label>
                                 <input type="number" step="100" min="2" max="1000" id="plot-window-points" value="1000" />
                             </div>
-                            <div id="wrap-response-options" hidden>
+                            <div id="wrap-response-options" class="sidebar-stack" hidden>
                                 <div class="input-group"><label for="plot-response-sample-rate">响应采样率（Hz，0 表示未设置）</label><input id="plot-response-sample-rate" type="number" min="0" step="any" value="0" /></div>
                                 <p class="hint-text">时域为零状态单位脉冲响应，左侧固定为 [0]，向右递增。未设置采样率时，频率单位为 cycles/sample。</p>
                             </div>

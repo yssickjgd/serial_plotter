@@ -546,6 +546,39 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const item of document.querySelectorAll('[data-widget-type]')) listen(item, 'pointerdown', event => {
         if (!event.target.closest('button')) workspace.beginLibraryDrag(item.dataset.widgetType, event);
     });
+    const shell = el('app-container');
+    const sidebars = { left: 'workspace-toggle-left', right: 'workspace-toggle-right' };
+    const preferredSidebarOpen = { left: true, right: true };
+    let compactSidebarLayout = false;
+    function setSidebarOpen(side, open, remember = true) {
+        if (remember) preferredSidebarOpen[side] = open;
+        shell.classList.toggle(`${side}-collapsed`, !open);
+        el(sidebars[side]).setAttribute('aria-expanded', String(open));
+        resizeViews();
+    }
+    function syncSidebarLayout() {
+        const panelWidth = (id, variable, fallback) => {
+            const style = el(id).style;
+            return parseFloat(style.getPropertyValue?.(variable) || style[variable]) || fallback;
+        };
+        const requiredWidth = panelWidth('sidebar', '--sidebar-w', 268) +
+            panelWidth('channel-sidebar', '--channel-sidebar-w', 320) + 480 + 26;
+        const compact = Number(window.innerWidth) > 0 && window.innerWidth < Math.max(1100, requiredWidth);
+        if (compact === compactSidebarLayout) return;
+        compactSidebarLayout = compact;
+        shell.classList.toggle('compact-layout', compact);
+        for (const side of ['left', 'right']) setSidebarOpen(side, compact ? false : preferredSidebarOpen[side], false);
+    }
+    for (const side of ['left', 'right']) listen(el(sidebars[side]), 'click', () => {
+        const open = shell.classList.contains(`${side}-collapsed`);
+        if (compactSidebarLayout && open) setSidebarOpen(side === 'left' ? 'right' : 'left', false, false);
+        setSidebarOpen(side, open);
+    });
+    for (const side of ['left', 'right']) listen(el(`sidebar-close-${side}`), 'click', () => setSidebarOpen(side, false));
+    const help = el('workspace-help'), helpToggle = el('workspace-help-toggle');
+    function setWorkspaceHelp(open) { help.hidden = !open; helpToggle.setAttribute('aria-expanded', String(open)); resizeViews(); }
+    listen(helpToggle, 'click', () => setWorkspaceHelp(help.hidden));
+    listen(el('workspace-help-dismiss'), 'click', () => setWorkspaceHelp(false));
     listen(el('workspace-step'), 'change', () => { workspace.setStep(Number(el('workspace-step').value)); saveSoon(); });
     listen(el('workspace-reset'), 'click', () => workspace.reset());
     listen(el('workspace-zoom-reset'), 'click', () => workspace.setZoom(1));
@@ -556,6 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     let panelDrag = null;
     const resizeViews = () => { workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
+    syncSidebarLayout();
     const sendMinimum = () => parseFloat(window.getComputedStyle?.(el('send-input')).minHeight) || el('send-input').offsetHeight;
     function setPanelSize(drag, size) {
         if (drag.variable) drag.panel.style.setProperty(drag.variable, Math.min(700, Math.max(240, size)) + 'px');
@@ -571,7 +605,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const fixedHeight = [...main.children].filter(node => node !== area && node !== el('global-send'))
                 .reduce((height, node) => height + outerHeight(node), 0);
             const sendChrome = outerHeight(el('global-send')) - input.getBoundingClientRect().height;
-            const minimumWorkspace = Math.max(150, el('workspace-toolbar').offsetHeight + 122);
+            const minimumWorkspace = Math.max(150, el('workspace-toolbar').offsetHeight +
+                (el('workspace-help').hidden ? 0 : el('workspace-help').offsetHeight) + 122);
             const max = Math.max(drag.minimum, main.clientHeight - padding - fixedHeight - sendChrome - minimumWorkspace);
             input.style.height = Math.max(drag.minimum, Math.min(max, size)) + 'px';
         }
@@ -584,6 +619,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cancelled) setPanelSize(drag, drag.size);
         Object.assign(document.body.style, { cursor: drag.cursor, userSelect: drag.userSelect });
         try { drag.handle.releasePointerCapture?.(drag.pointerId); } catch { /* Capture may already be released. */ }
+        if (drag.variable) syncSidebarLayout();
     }
     for (const [handleId, panelId, sign, variable] of [
         ['h-resizer', 'sidebar', 1, '--sidebar-w'], ['right-resizer', 'channel-sidebar', -1, '--channel-sidebar-w'],
@@ -621,6 +657,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     listen(window, 'blur', () => endPanelResize(null, true));
     listen(window, 'resize', () => {
+        syncSidebarLayout();
         if (el('send-input').style.height) setPanelSize({ minimum: sendMinimum() }, el('send-input').getBoundingClientRect().height);
     });
     S.bindAllSelectWheels(document);
