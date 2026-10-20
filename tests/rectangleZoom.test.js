@@ -8,9 +8,11 @@ function createPlotter(canvasScale = 1) {
     const documentEvents = new Map();
     const overlays = [];
     const transforms = [];
+    const labels = [];
     const context2d = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? () => ({ width: 20 })
-        : key === 'strokeRect' ? (...args) => { overlays.push(args); }
+        : key === 'fillText' ? text => { labels.push(String(text)); }
+            : key === 'strokeRect' ? (...args) => { overlays.push(args); }
             : key === 'setTransform' ? (...args) => { transforms.push(args); }
             : () => {} });
     const element = () => ({ style: {}, listeners: {}, offsetHeight: 0, offsetWidth: 100,
@@ -53,8 +55,158 @@ function createPlotter(canvasScale = 1) {
     const fireDocument = (name, event) => {
         for (const callback of documentEvents.get(name) || []) callback(event);
     };
-    return { plotter, fire, fireDocument, nodes, events, overlays, transforms, context };
+    return { plotter, fire, fireDocument, nodes, events, overlays, transforms, labels, context };
 }
+
+function statisticsLayout(gpuEnabled = false, scale = 1) {
+    const f = createPlotter(scale), plot = f.plotter, info = { hidden: true };
+    const layout = { width: 800, height: 400, statsHeight: 96 };
+    const header = { get offsetHeight() { return 32 + (info.hidden ? 0 : layout.statsHeight); } };
+    plot.plotHeader = header; plot.plotInfoRow = info;
+    plot.canvas.closest = () => ({ dataset: { workspaceZoom: String(scale) } });
+    plot.canvas.parentElement.getBoundingClientRect = () =>
+        ({ width: layout.width * scale, height: layout.height * scale, left: 10, top: 20 });
+    plot.canvas.getBoundingClientRect = () => ({ width: layout.width * scale,
+        height: Math.max(0, layout.height - header.offsetHeight) * scale,
+        left: 10, top: 20 + header.offsetHeight * scale });
+    Object.defineProperties(plot.canvas, {
+        offsetWidth: { get: () => layout.width },
+        offsetHeight: { get: () => Math.max(0, layout.height - header.offsetHeight) },
+        offsetTop: { get: () => header.offsetHeight }
+    });
+    const gpu = { available: true, resize(...size) { this.size = size; this.top = header.offsetHeight; },
+        render(traces, width, height, plotW, plotH) { this.frame = { traces, width, height, plotW, plotH }; return true; } };
+    if (gpuEnabled) plot.gpuRenderer = gpu;
+    plot.onStatsUpdate = data => { info.hidden = !data; };
+    plot.resize();
+    return { ...f, info, header, layout, gpu };
+}
+
+test('single-channel statistics synchronize axes, traces and pixel density within the same draw in every plot mode', () => {
+    for (const accelerated of [false, true]) {
+        const f = statisticsLayout(accelerated, 2), plot = f.plotter;
+        f.context.window.devicePixelRatio = 2;
+        for (const mode of ['time', 'frequency', 'phase']) {
+            plot.setDisplayOptions({ displayMode: mode }); plot.draw();
+            assert.equal(f.info.hidden, false);
+            assert.equal(plot.height, 272);
+            assert.equal(plot.canvas.height, 1088);
+            assert.equal(plot._drawState.plotH, 250);
+            if (accelerated) {
+                assert.deepEqual(f.gpu.size, [800, 272, 3200, 1088]);
+                assert.equal(f.gpu.top, 128);
+                assert.equal(f.gpu.frame.height, 272);
+                assert.equal(f.gpu.frame.plotH, plot._drawState.plotH);
+            }
+        }
+    }
+});
+
+test('hover uses the actual canvas and stays under a stationary pointer when statistics wrap', () => {
+    const f = statisticsLayout(true), plot = f.plotter;
+    plot.isPaused = true; plot.draw();
+    const rect = plot.canvas.getBoundingClientRect(), state = plot._drawState;
+    const event = { clientX: rect.left + state.plotW / 2, clientY: rect.top + state.plotH / 2 };
+    f.labels.length = 0;
+    f.events.get('pointermove')(event);
+    assert.ok(f.labels.some(text => /Time:.*Sample 50/.test(text)));
+    assert.ok(f.labels.includes(`Value: ${((state.min + state.max) / 2).toFixed(6)}`));
+    f.layout.statsHeight += 40; plot.draw();
+    assert.equal(plot.height, 232);
+    assert.equal(plot.mousePos.y, event.clientY - plot.canvas.getBoundingClientRect().top);
+    assert.equal(f.gpu.top, f.header.offsetHeight);
+    f.events.get('pointerleave')(); plot.resize();
+    assert.equal(plot.mousePos, null, 'a resize must not restore a pointer that already left');
+});
+
+test('statistics collapse on multichannel and empty data without recursive paused draws or stale GPU offsets', () => {
+    const f = statisticsLayout(true), plot = f.plotter;
+    plot.setChannelCount(2);
+    for (let i = 0; i < 100; i++) plot.frames.append([i, -i]);
+    plot.isPaused = true;
+    const before = plot.completedDraws;
+    plot.draw();
+    assert.equal(plot.completedDraws, before + 1);
+    assert.equal(plot.height, 272);
+    plot.setChannelVisible(1, true); plot.draw();
+    assert.equal(f.info.hidden, true);
+    assert.equal(plot.height, 368);
+    assert.equal(f.gpu.top, 32);
+    plot.setChannelVisible(1, false); plot.draw();
+    assert.equal(plot.height, 272);
+    plot.frames.clear(); plot.draw();
+    assert.equal(f.info.hidden, true);
+    assert.equal(plot.height, 368);
+    assert.equal(f.gpu.frame.height, 368);
+});
+
+test('tall statistics in a short widget keep drawing bounds inside the remaining canvas', () => {
+    const f = statisticsLayout(true), plot = f.plotter;
+    f.layout.height = 180; f.layout.statsHeight = 120;
+    plot.draw();
+    assert.equal(plot.height, 28);
+    assert.equal(plot.canvas.height, 28);
+    assert.equal(plot._drawState.plotH, 6);
+    assert.equal(f.gpu.frame.height, 28);
+});
+
+test('rectangle zoom, Y scrolling and reset share the post-statistics plot coordinates', () => {
+    const f = statisticsLayout(true, 1.55), plot = f.plotter;
+    plot.isPaused = true; plot.draw();
+    const fire = (name, x, y) => {
+        const rect = plot.canvas.getBoundingClientRect();
+        f.events.get(name)({ button: 0, pointerId: 1, preventDefault() {},
+            clientX: rect.left + x * 1.55, clientY: rect.top + y * 1.55 });
+    };
+    const state = plot._drawState;
+    fire('pointerdown', state.plotW * .2, state.plotH * .2);
+    fire('pointerup', state.plotW * .8, state.plotH * .8);
+    assert.equal(plot.vp.time.scrollOffset, 20);
+    assert.equal(plot.vp.time.displayCount, 61);
+    const scroll = f.nodes.get('plot-y-scrollbar-wrap');
+    assert.equal(parseFloat(scroll.style.top), 128);
+    assert.equal(parseFloat(scroll.style.height), plot._drawState.plotH);
+    assert.equal(scroll.hidden, false);
+    fire('contextmenu', 20, 20);
+    assert.equal(scroll.hidden, true);
+    assert.equal(plot.vp.time.autoFollow, true);
+    assert.equal(plot.height, 272);
+});
+
+test('statistics reflow cancels a stale rectangle instead of applying its old coordinates', () => {
+    const f = statisticsLayout(true), plot = f.plotter;
+    plot.isPaused = true; plot.draw();
+    const rect = plot.canvas.getBoundingClientRect();
+    f.events.get('pointerdown')({ button: 0, pointerId: 1, preventDefault() {},
+        clientX: rect.left + 20, clientY: rect.top + 20 });
+    f.layout.statsHeight += 40; plot.draw();
+    assert.equal(plot._selection, null);
+    assert.equal(plot.vp.time.autoFollow, true);
+    const count = plot.vp.time.displayCount;
+    f.events.get('pointerup')({ pointerId: 1 });
+    assert.equal(plot.vp.time.displayCount, count);
+});
+
+test('pointer release cannot apply a rectangle invalidated by an unobserved statistics reflow', () => {
+    for (const paused of [true, false]) {
+        const f = statisticsLayout(true), plot = f.plotter;
+        plot.isPaused = paused; plot.draw();
+        const rect = plot.canvas.getBoundingClientRect();
+        const count = plot.vp.time.displayCount;
+        let releases = 0;
+        plot.canvas.releasePointerCapture = () => { releases++; };
+        f.events.get('pointerdown')({ button: 0, pointerId: 1, preventDefault() {},
+            clientX: rect.left + 20, clientY: rect.top + 20 });
+        f.layout.statsHeight += 40;
+        f.events.get('pointerup')({ pointerId: 1,
+            clientX: rect.left + 200, clientY: rect.top + 150 });
+        assert.equal(plot.vp.time.displayCount, count, `paused=${paused}`);
+        assert.equal(plot._boxZoomY.time, null);
+        assert.equal(plot._selection, null);
+        assert.equal(plot.vp.time.autoFollow, true);
+        assert.equal(releases, 1);
+    }
+});
 
 test('resizing a workspace panel excludes its padding and border from the canvas dimensions', () => {
     const { plotter, nodes, context } = createPlotter();

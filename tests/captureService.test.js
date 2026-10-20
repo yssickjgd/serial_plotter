@@ -12,6 +12,125 @@ function service(options = {}) {
 }
 const bytes = source => Array.from({ length: source.frames.length }, (_, i) => [...source.frames.rawBytesAt(i)]);
 
+test('a byte budget evicts oldest data across sources and keeps receiving with aligned raw samples', t => {
+    const limit = 4 * 1048576, notices = [];
+    const s = service({ capacity: 100000, memoryLimitBytes: limit, maxRawFrameBytes: 96,
+        numericFormat: { ...numericFormat, dataType: 'float32', channelsCount: 23 },
+        onMemoryPressure: state => notices.push(state) });
+    t.after(() => s.dispose());
+    const frame = new Uint8Array(92), view = new DataView(frame.buffer);
+    for (let i = 0; i < 20000; i++) {
+        view.setFloat32(0, i, true);
+        s.receive(frame, { arrival: i, timestamp: i });
+    }
+    s.endStream();
+    const frames = s.numericSource.frames;
+    assert.equal(s.paused, false);
+    assert.equal(frames.getValue(0, frames.length - 1), 19999);
+    assert.ok(frames.length < 20000 && frames.length > 0);
+    assert.ok(notices.length > 0);
+    assert.ok(s.memoryUsage().usedBytes <= limit);
+    for (let i = 0; i < frames.length; i++) {
+        const raw = frames.rawBytesAt(i);
+        assert.equal(new DataView(raw.buffer, raw.byteOffset, raw.length).getFloat32(0, true), frames.getValue(0, i));
+    }
+    assert.equal(s.capacity, 100000, 'the frame limit remains independent from the byte budget');
+    s.clear();
+    assert.equal(s.history.byteLength, 0);
+    assert.equal(s.memoryUsage().evictedFrames, 0);
+});
+
+test('an old valid numeric frame cannot pin unlimited invalid receive history under a byte budget', t => {
+    const limit = 3 * 1048576;
+    const s = service({ capacity: 100000, memoryLimitBytes: limit, maxRawFrameBytes: 1024,
+        numericFormat: { ...numericFormat, enableHeader: true, headerHex: 'AB' } });
+    t.after(() => s.dispose());
+    s.receive(Uint8Array.of(0xab, 1));
+    const invalid = new Uint8Array(1024);
+    for (let i = 0; i < 6000; i++) s.receive(invalid, { arrival: i, timestamp: i });
+    s.endStream();
+    assert.ok(s.history.startByte > 0);
+    assert.ok(s.memoryUsage().usedBytes <= limit);
+    assert.equal(s.paused, false);
+    s.receive(Uint8Array.of(0xab, 2)); s.endStream();
+    assert.equal(s.numericSource.frames.getValue(0, s.numericSource.frames.length - 1), 2);
+});
+
+test('lowering the byte budget reclaims TX records too and clear drops the shared FFT cache', t => {
+    const s = service({ capacity: 10000 }); t.after(() => s.dispose());
+    for (let i = 0; i < 2000; i++) s.appendTx(new Uint8Array(4096).fill(i % 256), i);
+    s.setMemoryLimit(2 * 1048576);
+    assert.ok(s.txFrames.length < 2000);
+    assert.equal(s.txFrames.timestampAt(s.txFrames.length - 1), 1999);
+    assert.ok(s.memoryUsage().usedBytes <= 2 * 1048576);
+    let clears = 0;
+    s.workerPool.clearFftCache = () => { clears++; };
+    s.clear();
+    assert.ok(clears > 0);
+    assert.equal(s.txFrames.estimatedMemoryBytes, 0);
+});
+
+test('memory eviction during independent history rebuilding cannot resurrect expired bytes or stop live capture', async t => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const s = service({ capacity: 100000, memoryLimitBytes: 4 * 1048576,
+        maxRawFrameBytes: 1024, yieldControl: () => gate });
+    t.after(() => { release(); s.dispose(); });
+    s.receive(new Uint8Array(20000).fill(65));
+    const line = s.acquireSource({ captureMode: 'text', textBoundary: 'lf' });
+    assert.equal(line.rebuilding, true);
+    for (let i = 0; i < 200; i++) s.receive(new Uint8Array(4096).fill(66));
+    const retainedStart = s.history.startByte;
+    assert.ok(retainedStart > 0);
+    release(); await line.ready;
+    s.endStream();
+    assert.equal(s.paused, false);
+    assert.ok(s.memoryUsage().usedBytes <= 4 * 1048576);
+    assert.ok(line.frames.rawByteOffsetAt(0) >= s.history.startByte);
+    assert.equal(line.frames.rawByteOffsetAt(line.frames.length - 1) + line.frames.rawBytesAt(line.frames.length - 1).length, s.history.endByte);
+    s.receive(Uint8Array.of(67, 10));
+    assert.deepEqual([...line.frames.rawBytesAt(line.frames.length - 1)], [67, 10]);
+});
+
+test('large formula lookbacks reserve their memory before sampling and reject edits that exceed the budget', t => {
+    const definitions = Array.from({ length: 8 }, (_, i) =>
+        ({ number: i + 2, type: 'formula', expression: `CH${i + 1}[-65536]` }));
+    const s = service({ memoryLimitBytes: 2 * 1048576 }); t.after(() => s.dispose());
+    s.receive(Uint8Array.of(1));
+    assert.throws(() => s.updateChannelDefinitions(definitions), /内存预算/);
+    assert.equal(s.numericSource.frames.getValue(0, 0), 1);
+    assert.deepEqual(s.channelDefinitions, []);
+});
+
+test('an unstoreable TX record reports pressure without allocating or deleting the retained history', t => {
+    const notices = [];
+    const s = service({ memoryLimitBytes: 2 * 1048576, onMemoryPressure: state => notices.push(state) });
+    t.after(() => s.dispose());
+    s.appendTx(Uint8Array.of(1), 100);
+    const input = new Uint8Array(4 * 1048576).fill(123);
+    const result = s.appendTx(input, 1234);
+    assert.equal(s.stats.txBytes, input.length + 1);
+    assert.ok(s.memoryUsage().usedBytes <= 2 * 1048576);
+    assert.deepEqual([...s.txFrames.rawBytesAt(0)], [1]);
+    assert.equal(s.txFrames.length, 1);
+    assert.equal(result.stored, false);
+    assert.equal(notices.at(-1).blocked, true);
+    assert.equal(s.paused, true);
+});
+
+test('large numeric batches shrink their processing slices to fit a small budget with many formulas', t => {
+    const s = service({ capacity: 100000, memoryLimitBytes: 4 * 1048576, maxRawFrameBytes: 1024,
+        channelDefinitions: Array.from({ length: 20 }, (_, i) =>
+            ({ number: i + 2, type: 'formula', expression: `CH01+${i}` })) });
+    t.after(() => s.dispose());
+    s.receive(new Uint8Array(65536).fill(3)); s.endStream();
+    assert.equal(s.paused, false);
+    assert.equal(s.numericSource.parser.frameCount, 65536);
+    const frames = s.numericSource.frames;
+    assert.equal(frames.getValue(20, frames.length - 1), 22);
+    assert.ok(s.memoryUsage().usedBytes <= 4 * 1048576);
+});
+
 test('one-kilohertz numeric input retains every raw byte with per-source frame capacity', t => {
     const s = service({ capacity: 1000, numericFormat: { ...numericFormat, dataType: 'float32', channelsCount: 23 } });
     t.after(() => s.dispose());

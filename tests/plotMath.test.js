@@ -106,6 +106,17 @@ test('decimated trace retains breaks inside a pixel bucket', () => {
     assert.ok(points.every(point => Number.isFinite(point.value)));
 });
 
+test('dense time decimation reads its input in place and preserves exact samples and gap endpoints', () => {
+    const { bucketTraceExtrema } = require('../plotMath');
+    const values = Float64Array.from([NaN, 1, 9, -7, 2, NaN, 3, 8, -6, 4, Infinity]);
+    values.slice = () => { throw new Error('decimation must not copy sample segments'); };
+    const points = bucketTraceExtrema(values, 2);
+    assert.deepEqual(points.map(point => point.index), [1, 2, 3, 4, 6, 7, 8, 9]);
+    assert.deepEqual(points.filter(point => point.break).map(point => point.index), [1, 6]);
+    assert.ok(points.every(point => point.value === values[point.index]));
+    assert.deepEqual(bucketTraceExtrema(Float64Array.of(NaN, Infinity), 20), []);
+});
+
 test('CSV channel names with separators, quotes or line breaks are escaped', () => {
     assert.equal(csvField('a,b'), '"a,b"');
     assert.equal(csvField('a"b'), '"a""b"');

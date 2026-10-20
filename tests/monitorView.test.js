@@ -12,6 +12,20 @@ function monitorFixture(frames, width = 800, height = 100, extra = {}) {
     return new MonitorView(container, frames);
 }
 
+test('decoded text caches are bounded by token volume as well as record count', t => {
+    const oldDocument = global.document; global.document = monitorDocument();
+    t.after(() => { global.document = oldDocument; });
+    const frames = new FrameBuffer(1, 1000), shared = new WeakMap();
+    const view = monitorFixture(frames); view.decodeCache = shared;
+    for (let i = 0; i < 100; i++) view._rememberText(String(i), Array(4096).fill({ text: '�' }));
+    for (const cache of [view.textCache, shared.get(frames)]) {
+        const total = [...cache.values()].reduce((sum, tokens) => sum + tokens.length, 0);
+        assert.ok(total <= 65536, 'hundreds of medium records must not retain millions of token objects');
+        assert.ok(cache.has('99'));
+    }
+    view.dispose();
+});
+
 test('numeric history stays at the same screen position despite rounded scrolling and ongoing capture', () => {
     const oldDocument = global.document; global.document = monitorDocument();
     try {

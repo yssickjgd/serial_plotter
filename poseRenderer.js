@@ -26,7 +26,7 @@
             for (let i = 0; i < 3; i++) {
                 const direction = [basis[i], basis[i + 3], basis[i + 6]];
                 axes.push({ frame, label: 'XYZ'[i], showLabel: settings.axes[frame].showLabels === true,
-                    color: frame === 'odom' ? ['#800000', '#008000', '#00ffff'][i] : ['#ff0000', '#00ff00', '#00ffff'][i],
+                    color: frame === 'odom' ? ['#800000', '#008000', '#008080'][i] : ['#ff0000', '#00ff00', '#00ffff'][i],
                     end: scale(direction, frame === 'odom' ? 2.4 : 2) });
             }
         }

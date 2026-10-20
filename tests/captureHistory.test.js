@@ -1,5 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+test('archive memory estimates include chunk objects and release evicted backing storage', () => {
+    const { CaptureHistory } = require('../captureHistory');
+    const history = new CaptureHistory();
+    assert.equal(history.estimatedMemoryBytes, 0);
+    history.append(new Uint8Array(1024));
+    const first = history.estimatedMemoryBytes;
+    history.append(new Uint8Array(1024));
+    assert.ok(history.estimatedMemoryBytes >= first + 1024);
+    history.pruneBefore(1536);
+    assert.ok(history.estimatedMemoryBytes < first);
+    history.clear();
+    assert.equal(history.estimatedMemoryBytes, 0);
+});
 const fs = require('node:fs');
 const path = require('node:path');
 const historyModule = fs.existsSync(path.join(__dirname, '../captureHistory.js'))
@@ -433,4 +447,20 @@ test('batched numeric replay joins asynchronous decoding in source order and ret
     result.parser.onFrameParsed = values => { liveValues = values; };
     result.parser.appendData(Uint8Array.of(19, 20));
     assert.deepEqual(liveValues, [19, 20]);
+});
+
+test('Hex batch assembly advances byte positions when pressure evicts an awaited batch prefix', async () => {
+    const capture = history();
+    capture.append(Uint8Array.of(11, 22, 33));
+    const result = await historyModule.replayCaptureHistory(capture,
+        { captureMode: 'hex', maxRawFrameBytes: 1 }, 10, {
+            yieldControl: async () => {},
+            assembleRawBatch(records) {
+                const bytes = Uint8Array.from(records.flatMap(record => record.parts.flatMap(part => [...part])));
+                capture.pruneBefore(1);
+                return bytes;
+            }
+        });
+    assert.deepEqual(Array.from({ length: result.frames.length }, (_, i) =>
+        [result.frames.rawByteOffsetAt(i), ...result.frames.rawBytesAt(i)]), [[1, 22], [2, 33]]);
 });

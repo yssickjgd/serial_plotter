@@ -153,6 +153,7 @@ function compactLineStarts(data, columns) {
     const lines = Uint32Array.from(starts);
     if (data.layouts.size >= 4) data.layouts.delete(data.layouts.keys().next().value);
     data.layouts.set(columns, lines);
+    while (data.layouts.size > 8) data.layouts.delete(data.layouts.keys().next().value);
     return lines;
 }
 
@@ -1167,8 +1168,13 @@ class MonitorView {
     _rememberText(key, tokens) {
         for (const cache of [this.textCache, this._sharedTextCache()]) {
             if (!cache) continue;
-            if (cache.size >= 256) cache.delete(cache.keys().next().value);
             cache.set(key, tokens);
+            let count = 0;
+            for (const value of cache.values()) count += value.length;
+            while (cache.size > 256 || count > 65536) {
+                const first = cache.keys().next().value;
+                count -= cache.get(first).length; cache.delete(first);
+            }
         }
         return tokens;
     }
@@ -1298,6 +1304,7 @@ class MonitorView {
             const pending = decoder.pending.map(entry => ({ ...entry }));
             if (this.textStates.size >= 256) this.textStates.delete(this.textStates.keys().next().value);
             this.textStates.set(order, pending);
+            while (this.textStates.size > 2048) this.textStates.delete(this.textStates.keys().next().value);
             if (order % 256 === 0) {
                 let low = 0, high = this.textCheckpoints.length;
                 while (low < high) {
@@ -1308,6 +1315,7 @@ class MonitorView {
                 const checkpoint = { order, pending };
                 if (this.textCheckpoints[low]?.order === order) this.textCheckpoints[low] = checkpoint;
                 else this.textCheckpoints.splice(low, 0, checkpoint);
+                if (this.textCheckpoints.length > 4096) this.textCheckpoints.shift();
             }
         }
         let needed = row.streamEnded ? 0 : 4;

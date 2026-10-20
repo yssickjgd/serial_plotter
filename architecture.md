@@ -14,6 +14,7 @@
 | --- | --- |
 | `app.js` | 装配服务与控件，通讯连接，全局操作、统计、配置及独立缓冲区导出绑定 |
 | `captureService.js` | 统一接收入口、原始归档、共享数据源、暂停、清空、局部重建和共享任务池 |
+| `captureMemory.js` | 跨数据源的采集内存估算与预算、最旧记录淘汰、缓存释放和无法继续采集时的安全暂停 |
 | `sampleRate.js` | 按接收块单调到达时刻与有效数值帧计数估计共享采样率，过滤短时抖动并隔离暂停间隔 |
 | `captureHistory.js` | 按原始字节位置保存输入块和断流检查点，异步重放及增量追赶 |
 | `dataParser.js` / `numericCodec.js` | 数值帧重同步、校验与解码 |
@@ -23,7 +24,7 @@
 | `computedFrames.js` | 共享数值读取视图及派生列存储，历史保留、异步局部重建与实时追赶 |
 | `channelConfigView.js` | 波形与数值字节流共用通道编辑器，新增通道拖动排序、独立可见性、全局名称/颜色/定义及内联错误 |
 | `systemResponse.js` / `systemResponseFrames.js` | 零状态单位脉冲响应、线性系统传递函数、幅相与 dB 换算、独立静态缓存及只读绘图数据视图 |
-| `historyWorkers.js` / `textHistory.js` | 共用后台任务调度、数值解码、Hex 拼装及字符统计 |
+| `historyWorkers.js` / `textHistory.js` | 共用后台任务调度、数值解码、Hex 拼装、字符统计与 FFT；共享有界频谱缓存及空闲线程回收 |
 | `widgetWorkspace.js` | 多控件位置、栅格步进、碰撞、双向滚动、局部缩放、拖入预览、键盘操作及销毁 |
 | `monitorWorkspace.js` | 旧布局兼容及可复用的纯几何约束 |
 | `widgetController.js` | 控件类型注册、工厂、稳定编号、实例生命周期、右侧属性绑定 |
@@ -32,12 +33,14 @@
 | `poseMath.js` / `poseConfig.js` / `poseData.js` | 旋转约定与正交化、独立实例配置、同帧标量绑定和原始位置读取 |
 | `poseModelData.js` / `poseRenderer.js` / `poseView.js` / `poseConfigView.js` | STL 飞机网格与双坐标轴正交投影、相机/历史/30 FPS 调度、位姿属性面板 |
 | `plotter.js` / `spectrum.js` / `plotMath.js` | 只读波形视图、FFT/窗归一化、像素分桶、坐标轴、缩放与标记 |
+| `waveGpuRenderer.js` | WebGL 网格及波形绘制、高性能显卡请求、上下文丢失回退与显卡资源释放；文字及交互仍由 2D 画布绘制 |
 | `monitorView.js` / `monitorDisplay.js` / `numberMonitor.js` | 可见记录虚拟渲染、文本映射、Hex 对照、数值对齐、复制和高亮 |
 | `monitorDisplayView.js` | 字节流实例的显示属性，与统一通道编辑器协作 |
 | `workspaceTools.js` / `monitorSearch.js` / `frameNavigation.js` | 当前激活控件的定位、异步搜索及原始字节区间跨视图映射 |
 | `exportSettingsView.js` / `csvExport.js` / `captureExport.js` | 数据来源与格式独立的导出选项、通道选择及分块文件写入 |
 | `exportParsing.js` / `textEncoder.js` | 导出副本的流式数值/文本断帧、独立运算状态、分批字符编码与严格输出校验 |
 | `serialEngine.js` / `netEngine.js` / `sendController.js` | 通讯、连接收尾、全局发送和定时发送生命周期 |
+| `commandLibrary.js` / `commandRunner.js` / `commandSendView.js` | 可持久化的多层指令树、发送前校验、顺序执行与取消，以及一键发送编辑界面；共用 SendController 串行写入与 TX 记录 |
 | `configValidation.js` / `configView.js` / `configStore.js` | 兼容旧配置字段及通用校验和保存工具 |
 | `bridge.js` / `bridgeSession.js` | 本地 WebSocket 至 TCP/UDP 的二进制数据转发 |
 

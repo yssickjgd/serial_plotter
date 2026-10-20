@@ -208,6 +208,14 @@ test('independent text ranges occupy the worker budget and reduce completed jobs
     assert.equal(progress.at(-1), 8192);
 });
 
+test('text replay queue follows the memory worker limit rather than the machine core count', async () => {
+    const history = historyFromStreams([{ bytes: new Uint8Array(8192).fill(65) }], { chunkSize: 8192 });
+    const pool = localPool({ maxWorkers: 128 }); pool.workerLimit = 2;
+    const actual = await countCaptureText(history, 'ascii', pool, { maxBatchBytes: 256 });
+    assert.equal(actual.total, 8192);
+    assert.ok(pool.stats.peak <= 2);
+});
+
 test('cancellation stops scheduling more work and discards its historical result', async () => {
     assert.equal(typeof countCaptureText, 'function');
     const history = historyFromStreams([{ bytes: new Uint8Array(65536).fill(0x41) }], { chunkSize: 65536 });

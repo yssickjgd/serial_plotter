@@ -3,7 +3,7 @@ const captureServiceDependencies = typeof module !== 'undefined'
     ? { ...require('./captureHistory'), ...require('./rawFrameParser'), ...require('./dataParser'),
         ...require('./frameBuffer'), ...require('./historyWorkers'), ...require('./textHistory'),
         ...require('./computedFrames'), ...require('./channelOperations'), ...require('./sampleRate'),
-        TextCodec: require('./textCodec') } : globalThis.SerialPlotter;
+        ...require('./captureMemory'), TextCodec: require('./textCodec') } : globalThis.SerialPlotter;
 
 class CaptureService {
     constructor(options = {}) {
@@ -22,6 +22,7 @@ class CaptureService {
         this.onChange = options.onChange ?? (() => {});
         this.onProgress = options.onProgress ?? (() => {});
         this.onError = options.onError ?? (() => {});
+        this.onMemoryPressure = options.onMemoryPressure ?? (() => {});
         this.history = new CaptureHistory();
         this.workerPool = options.workerPool ?? new HistoryWorkerPool(options.workerOptions);
         this.sources = new Set();
@@ -43,6 +44,7 @@ class CaptureService {
         const baseFormat = this._rawFormat({ captureMode: 'hex' });
         const baseKey = this._sourceKey(baseFormat, true);
         this.baseSource = this._createSource(baseFormat, true, baseKey, 0);
+        this.memory = new captureServiceDependencies.CaptureMemoryBudget(this, options.memoryLimitBytes);
     }
 
     _validateLimit(bytes) {
@@ -85,12 +87,12 @@ class CaptureService {
         if (!numeric) frames.setRawMode(true);
         const source = { id: `source-${this.nextSource++}`, kind: numeric ? 'numeric' : 'raw',
             frames, parser, format: { ...format }, refs: 0, persistent, key, startByte,
-            generation: 0, rebuilding: false, progress: null, errors: [], ready: null, pin: null };
+            generation: 0, rebuilding: false, progress: null, errors: [], errorBytes: 0, ready: null, pin: null };
         if (numeric) source.sampleRate = new captureServiceDependencies.SampleRateEstimator();
         source.ready = Promise.resolve(source);
         if (numeric) {
             frames.onChange = () => this._safeNotify(this.onChange, source);
-            frames.onProgress = () => this._safeNotify(this.onProgress, source);
+            frames.onProgress = () => { this.memory?.enforce(); this._safeNotify(this.onProgress, source); };
         }
         this.sources.add(source);
         this.sourceKeys.set(key, source);
@@ -108,7 +110,8 @@ class CaptureService {
         error.timestamp ??= this.wallNow();
         error.order ??= this.nextOrder++;
         source.errors.push(error);
-        if (source.errors.length > this.capacity) source.errors.splice(0, source.errors.length - this.capacity);
+        source.errorBytes += error.bytes?.length ?? 0;
+        while (source.errors.length > this.capacity) source.errorBytes -= source.errors.shift().bytes?.length ?? 0;
         this._safeNotify(this.onError, error, source);
     }
 
@@ -119,7 +122,7 @@ class CaptureService {
         parser.onCallbackError = error => this._error(source, error);
         const changed = () => {
             this._safeNotify(this.onChange, source);
-            if (!this.receiving) this._prune();
+            if (!this.receiving) { this._prune(); this.memory?.check(); }
         };
         if (source.kind === 'numeric') parser.onFrameParsed = (values, time, bytes, timestamp, metadata) => {
             source.frames.append(values, bytes, time, metadata.order, timestamp, metadata);
@@ -136,6 +139,27 @@ class CaptureService {
         if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
         this.stats.rxBytes += bytes.length;
         if (this.paused || !bytes.length) return;
+        // Bound transient parser/archive allocations even if the transport delivers a huge block.
+        const timestamp = metadata.timestamp ?? this.wallNow(), arrival = metadata.arrival ?? this.now();
+        for (let offset = 0; offset < bytes.length;) {
+            let length = Math.min(bytes.length - offset, 65536);
+            let fits = this.memory.beforeReceive(length);
+            while (!fits && length > 1) {
+                length = Math.max(1, Math.floor(length / 2));
+                fits = this.memory.beforeReceive(length);
+            }
+            if (!fits) {
+                this.memory.blockedReason = '预算无法容纳下一数据块，已安全暂停，请提高预算或减少数据源';
+                this.pause(true);
+                this._safeNotify(this.onMemoryPressure, { ...this.memoryUsage(), blocked: true });
+                break;
+            }
+            this._receivePart(bytes.subarray(offset, offset + length), { timestamp, arrival });
+            offset += length;
+        }
+    }
+
+    _receivePart(bytes, metadata) {
         const stamp = this.history.append(bytes, { timestamp: metadata.timestamp ?? this.wallNow(),
             arrival: metadata.arrival ?? this.now(), order: this.nextOrder++ });
         this.receiving = true;
@@ -184,6 +208,8 @@ class CaptureService {
             source.generation++;
             source.parser.reset();
             source.pin = null;
+            source.frames.dispose?.(); source.frames.clear(); source.errors.length = 0; source.errorBytes = 0;
+            source.replayStorage = null;
             this.sources.delete(source);
             if (this.sourceKeys.get(source.key) === source) this.sourceKeys.delete(source.key);
             this._prune();
@@ -202,6 +228,11 @@ class CaptureService {
     }
 
     updateChannelDefinitions(definitions, { rebuild = this.rebuildHistory, reapply = [], numberMap = null } = {}) {
+        const engine = new captureServiceDependencies.ChannelOperations(this.numericSource.frames.rawChannelCount, definitions);
+        const reserve = engine.requiredMemoryBytes * (rebuild && this.numericSource.frames.length ? 2 : 1);
+        if (reserve > this.memory.limitBytes)
+            throw new RangeError('运算通道的历史状态超过内存预算，请缩短历史索引、提高预算或关闭历史重建');
+        this.memory.enforce(reserve);
         const result = this.numericSource.frames.updateDefinitions(definitions, { rebuild, reapply, numberMap });
         this.channelDefinitions = this.numericSource.frames.definitions.map(value => ({ ...value }));
         return result;
@@ -213,6 +244,8 @@ class CaptureService {
         source.generation++;
         source.parser.reset();
         source.errors.length = 0;
+        source.errorBytes = 0;
+        source.replayStorage = null;
         const start = rebuild ? this.history.startByte : this.history.endByte;
         source.startByte = start;
         if (rebuild && this.history.endByte > start) return this._rebuild(source, start);
@@ -229,7 +262,7 @@ class CaptureService {
     _workerReplayOptions(source, length) {
         const pool = this.workerPool;
         if (length < 524288 || !pool.available) return {};
-        const options = { maxPendingDecodes: Math.max(1, pool.maxWorkers) };
+        const options = { maxPendingDecodes: Math.max(1, pool.workerLimit ?? pool.maxWorkers) };
         if (source.kind === 'numeric') options.decodeBatch = records => {
             const format = source.format, frameLength = records[0].bytes.length;
             const bytes = new Uint8Array(records.length * frameLength);
@@ -252,8 +285,14 @@ class CaptureService {
         source.progress = { processedBytes: 0, totalBytes: snapshotEnd - startByte };
         const cancelled = () => this.disposed || epoch !== this.epoch || generation !== source.generation || !this.sources.has(source);
         const options = { startByte, stopByte: snapshotEnd, flushPending: false, isCancelled: cancelled,
+            onStorage: storage => {
+                if (!cancelled()) { source.replayStorage = storage; source.replayGeneration = generation; }
+            },
             onProgress: progress => {
-                if (!cancelled()) { source.progress = progress; this._safeNotify(this.onProgress, source); }
+                if (!cancelled()) {
+                    this.memory.enforce();
+                    source.progress = progress; this._safeNotify(this.onProgress, source);
+                }
             }, ...this._workerReplayOptions(source, snapshotEnd - startByte) };
         if (this.yieldControl) options.yieldControl = this.yieldControl;
         source.ready = (async () => {
@@ -279,6 +318,7 @@ class CaptureService {
                 }
                 source.errors = result.errors.slice(-this.capacity).map(error =>
                     ({ ...error, reason: error.reason ?? error.type ?? 'error' }));
+                source.errorBytes = source.errors.reduce((sum, error) => sum + (error.bytes?.length ?? 0), 0);
                 source.pin = null; source.rebuilding = false;
                 this._attach(source);
                 if (source.kind === 'raw' && !this.paused) source.parser.resumeTimers();
@@ -297,6 +337,7 @@ class CaptureService {
                     this._attach(source);
                 }
             }
+            finally { if (source.replayGeneration === generation) source.replayStorage = null; }
             return source;
         })();
         return source.ready;
@@ -305,15 +346,26 @@ class CaptureService {
     setCapacity(capacity) {
         // FrameBuffer validates before any window is resized.
         new captureServiceDependencies.FrameBuffer(1, capacity);
+        let reserve = 0;
+        for (const frames of [...this.sources].map(source => source.frames).concat(this.txFrames))
+            if (capacity > frames.storageCapacity || capacity < frames.storageCapacity / 4)
+                reserve += frames.estimatedMemoryBytes * Math.min(1, capacity / Math.max(1, frames.length));
+        this.memory.enforce(reserve);
         this.capacity = capacity;
         for (const source of this.sources) {
             source.frames.resize(capacity);
-            if (source.errors.length > capacity) source.errors.splice(0, source.errors.length - capacity);
+            if (source.errors.length > capacity) {
+                for (const error of source.errors.splice(0, source.errors.length - capacity)) source.errorBytes -= error.bytes?.length ?? 0;
+            }
         }
         this.txFrames.resize(capacity);
         this._prune();
+        this.memory.enforce();
         this._safeNotify(this.onChange, null);
     }
+
+    memoryUsage() { return this.memory.measure(); }
+    setMemoryLimit(bytes) { this.memory.setLimit(bytes); }
 
     setMaxRawFrameBytes(bytes) {
         this._validateLimit(bytes);
@@ -334,6 +386,7 @@ class CaptureService {
 
     pause(paused = true) {
         if (this.paused === Boolean(paused)) return;
+        if (!paused) this.memory.blockedReason = '';
         this.endStream();
         this.paused = Boolean(paused);
     }
@@ -363,11 +416,19 @@ class CaptureService {
 
     appendTx(bytes, timestamp = this.wallNow()) {
         if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-        const frame = { bytes: bytes.slice(), timestamp, time: captureServiceDependencies.RawFrameParser.formatTime(timestamp),
+        const frame = { bytes, timestamp, time: captureServiceDependencies.RawFrameParser.formatTime(timestamp),
             order: this.nextOrder++, kind: 'tx' };
-        this.txFrames.appendRaw(bytes, frame.time, frame.order, timestamp, { kind: 'tx' });
         this.stats.txBytes += bytes.length;
+        const reserve = this.txFrames.estimateAppendMemory(1, bytes.length);
+        if (reserve > this.memory.limitBytes || !this.memory.enforce(reserve)) {
+            this.memory.blockedReason = 'TX 已发送，但本条记录无法放入内存预算，未缓存本条记录；已安全暂停';
+            this.pause(true);
+            this._safeNotify(this.onMemoryPressure, { ...this.memoryUsage(), blocked: true });
+            return { ...frame, stored: false };
+        }
+        this.txFrames.appendRaw(bytes, frame.time, frame.order, timestamp, { kind: 'tx' });
         this._safeNotify(this.onChange, null);
+        this.memory.enforce();
         return frame;
     }
 
@@ -442,6 +503,8 @@ class CaptureService {
         this.txFrames.clear();
         this.stats.rxBytes = 0; this.stats.txBytes = 0;
         this.sourceKeys.clear();
+        this.workerPool.clearFftCache?.();
+        this.memory.reset();
         for (const source of this.sources) {
             source.key = source.kind === 'numeric' ? 'numeric' : this._sourceKey(source.format, true);
             this.sourceKeys.set(source.key, source);
@@ -453,7 +516,11 @@ class CaptureService {
     dispose() {
         if (this.disposed) return;
         this.disposed = true; this.epoch++;
-        for (const source of this.sources) { source.generation++; source.parser.reset(); source.frames.dispose?.(); }
+        for (const source of this.sources) {
+            source.generation++; source.parser.reset(); source.frames.dispose?.(); source.frames.clear();
+            source.replayStorage = null; source.errors.length = 0; source.errorBytes = 0;
+        }
+        this.history.clear(); this.txFrames.clear();
         this.sources.clear(); this.sourceKeys.clear(); this.textStats.clear();
         this.workerPool.dispose();
     }

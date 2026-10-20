@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
         initial = S.WidgetConfig.migrateWorkspaceConfig(raw ? JSON.parse(raw) : null, layout ? JSON.parse(layout) : null);
     } catch (error) { initial = S.WidgetConfig.migrateWorkspaceConfig(null); report(error); }
     const globals = { ...initial.global, channelNames: [...initial.global.channelNames] };
+    const uiLayout = { ...initial.uiLayout };
     let exportSourceId = initial.tools.exportSourceId, exportProfiles = initial.tools.exportProfiles;
     let exportFormat = initial.tools.exportFormat, exportRecordSourceId = initial.tools.exportRecordSourceId;
     let exportRecordSource = null;
@@ -63,6 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     const service = new S.CaptureService({ capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes,
+        memoryLimitBytes: Number(globals.captureMemoryMiB) * 1048576,
         rebuildHistory: globals.rebuildHistory, numericFormat: globals, channelDefinitions: globals.channelDefinitions,
         onChange(source) {
             if (disposed) return;
@@ -71,6 +73,11 @@ document.addEventListener('DOMContentLoaded', () => {
             scheduleSourceUi();
         },
         onProgress: showProgress,
+        onMemoryPressure(state) {
+            tools?.invalidate();
+            if (state.blocked) setPaused(true);
+            updateMemoryStatus(state); scheduleSourceUi();
+        },
         onError(error, source) {
             if (error.bytes) widgets?.appendExtra(error, source);
             else status('format-apply-status', error.message ?? error.reason);
@@ -371,7 +378,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function applyGlobalFields() {
         for (const [key, id] of Object.entries(connectionIds)) el(id).value = globals[key];
         el('max-points').value = globals.maxPoints; el('max-raw-frame-bytes').value = String(globals.maxRawFrameBytes);
+        el('capture-memory-mib').value = String(globals.captureMemoryMiB);
         el('max-points-label').textContent = '每个来源最大帧数';
+        updateMemoryStatus();
         widgets.syncGlobals(); syncConnection();
     }
     for (const [key, id] of Object.entries(connectionIds)) listen(el(id), 'change', () => {
@@ -379,18 +388,30 @@ document.addEventListener('DOMContentLoaded', () => {
         try { S.validateConfig(candidate); Object.assign(globals, candidate); syncConnection(); saveSoon(); }
         catch (error) { report(error); }
     });
-    for (const [key, id] of [['maxPoints', 'max-points'], ['maxRawFrameBytes', 'max-raw-frame-bytes']]) listen(el(id), 'change', () => {
+    for (const [key, id] of [['maxPoints', 'max-points'], ['maxRawFrameBytes', 'max-raw-frame-bytes'],
+        ['captureMemoryMiB', 'capture-memory-mib']]) listen(el(id), 'change', () => {
         const candidate = getConfig(); candidate.global[key] = key === 'maxPoints' ? el(id).value : Number(el(id).value);
         try {
             const validated = S.WidgetConfig.validateWorkspaceConfig(candidate); Object.assign(globals, validated.global);
             if (key === 'maxPoints') { service.setCapacity(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints)); }
-            else void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+            else if (key === 'maxRawFrameBytes') void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+            else service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
+            updateMemoryStatus();
             tools.invalidate(); saveSoon(); status('cfg-save-status', '');
         } catch (error) { report(error); }
     });
+    const commandLibrary = new S.CommandLibrary(initial.send.commands);
+    let commandView = null, sendTab = 'regular';
+    const commandRunner = new S.CommandRunner({ library: commandLibrary,
+        getEngine: () => disposed ? null : activeEngine,
+        send: (bytes, isCurrent) => sendController.sendBytes(bytes, isCurrent),
+        beforeStart: () => sendController.stop(),
+        onState: state => commandView?.setState(state),
+        onError: error => commandView?.showError(error) });
     const sendController = new S.SendController({ mode: el('send-mode'), input: el('send-input'), fileInput: el('send-file-input'),
         interval: el('send-interval'), intervalUnit: el('send-interval-unit'), button: el('btn-send'), loadButton: el('btn-load-file'),
         getEngine: () => disposed ? null : activeEngine,
+        onStart: () => commandRunner.stop(),
         onSent(bytes) { const record = service.appendTx(bytes); widgets.appendExtra(record); syncExportAvailability(); },
         onInputError: report,
         onSendError(error, bytes) {
@@ -398,13 +419,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 time: S.RawFrameParser.formatTime(Date.now()) }); status('connection-status', error.message);
         }
     });
+    commandView = new S.CommandSendView({ library: commandLibrary, runner: commandRunner, tree: el('command-tree'),
+        addButton: el('command-add'), groupButton: el('command-add-group'), stopButton: el('command-stop'),
+        status: el('command-status'), error: el('command-error'), onChange: saveSoon });
+    function setSendTab(tab, save = true) {
+        sendTab = tab;
+        el('send-panel').hidden = tab !== 'regular'; el('command-panel').hidden = tab !== 'commands';
+        for (const name of ['regular', 'commands']) {
+            const button = el(`send-tab-${name}`), active = name === tab;
+            button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1;
+        }
+        el('send-resizer').setAttribute('aria-controls', 'global-send');
+        workspace.refresh();
+        for (const id of widgets.widgets.keys()) widgets.resize(id);
+        if (save) saveSoon();
+    }
+    for (const name of ['regular', 'commands']) {
+        const button = el(`send-tab-${name}`);
+        listen(button, 'click', () => setSendTab(name));
+        listen(button, 'keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? 'regular' : event.key === 'End' ? 'commands'
+                : name === 'regular' ? 'commands' : 'regular';
+            setSendTab(next); el(`send-tab-${next}`).focus?.();
+        });
+    }
     for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) listen(el(id), 'change', saveSoon);
     for (const adapter of [serialAdapter, netAdapter]) {
         adapter.onData(bytes => service.receive(bytes));
         adapter.onStatusChange((connected, error) => {
             if (disposed) return;
             if (connected) activeEngine = adapter;
-            else if (activeEngine === adapter || connecting) { activeEngine = null; sendController.stop(); service.endStream(); }
+            else if (activeEngine === adapter || connecting) { activeEngine = null; sendController.stop(); commandRunner.stop(); service.endStream(); }
             status('connection-status', error ? error.message : connected ? '已连接' : '已断开'); syncConnection();
         });
     }
@@ -415,7 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (activeEngine) {
                 const adapter = activeEngine;
                 try { await adapter.disconnect(); } catch { await adapter.forceDisconnect?.(); }
-                activeEngine = null; sendController.stop(); service.endStream(); status('connection-status', '已断开');
+                activeEngine = null; sendController.stop(); commandRunner.stop(); service.endStream(); status('connection-status', '已断开');
             } else if (globals.connType === 'serial') {
                 await serialAdapter.connect({ baudRate: S.parseIntInRange(globals.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率'),
                     dataBits: Number(globals.serialData), stopBits: Number(globals.serialStop), parity: globals.serialParity });
@@ -449,8 +496,16 @@ document.addEventListener('DOMContentLoaded', () => {
         for (const row of progressRows.values()) row.remove(); progressRows.clear();
         el('history-rebuild-progress').hidden = true; tools.syncPaused(); updateStats(); syncExportAvailability();
     });
+    function updateMemoryStatus(state = service.memoryUsage()) {
+        const used = (state.usedBytes / 1048576).toFixed(1), limit = Math.round(state.limitBytes / 1048576);
+        let message = `采集估算：${used} / ${limit} MiB`;
+        if (state.evictedFrames) message += `；已按预算淘汰 ${state.evictedFrames.toLocaleString()} 条来源记录`;
+        if (state.blockedReason) message += '；' + state.blockedReason;
+        status('capture-memory-status', message);
+    }
     function updateStats() {
         if (disposed) return;
+        service.memory.enforce(); updateMemoryStatus();
         const now = performance.now(), elapsed = Math.max(0.001, (now - previousStats.time) / 1000);
         const sameEpoch = previousStats.epoch === service.epoch;
         const rxRate = sameEpoch ? Math.max(0, service.stats.rxBytes - previousStats.rx) / elapsed : 0;
@@ -470,6 +525,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const fps = previous?.mode === mode ? Math.max(0, count - previous.count) / elapsed : 0;
                 draws.set(widget.id, { count, mode });
                 widget.refs['stat-plot-fps'].textContent = '绘图帧率: ' + Math.round(fps) + ' FPS';
+                if (widget.type === 'wave') {
+                    const gpu = widget.view.gpuRenderer;
+                    widget.refs['stat-plot-fps'].title = gpu?.available
+                        ? `实际 WebGL 渲染器：${gpu.rendererName || '浏览器未提供设备名称'}。\n已请求高性能显卡，实际选择由浏览器和系统决定。`
+                        : '波形曲线使用 Canvas 2D；显卡不可用时自动回退。';
+                }
                 const rate = widget.source.sampleRate?.rate;
                 if (widget.type === 'wave' && !service.paused && rate > 0 && !widget.view.frames.responseMode) widget.view.setSampleRateHz(rate);
             } else {
@@ -492,10 +553,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function getConfig() {
         saveExportProfile();
         return { version: 2, global: { ...globals, channelNames: [...globals.channelNames] }, widgets: widgets.serialize(),
-            workspace: workspace.serialize(), nextNumber: widgets.nextNumber,
+            workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
             tools: { ...tools.serialize(), exportSourceId, exportRecordSourceId, exportCsvSourceId, exportFormat,
                 exportProfiles: JSON.parse(JSON.stringify(exportProfiles)) },
-            send: { mode: el('send-mode').value, interval: el('send-interval').value, unit: el('send-interval-unit').value } };
+            send: { mode: el('send-mode').value, interval: el('send-interval').value, unit: el('send-interval-unit').value,
+                tab: sendTab, commands: commandLibrary.serialize() } };
     }
     function installWidgets(config) {
         exportSourceId = config.tools.exportSourceId;
@@ -511,15 +573,19 @@ document.addEventListener('DOMContentLoaded', () => {
         tools.syncSources(config.tools);
         el('send-mode').value = config.send.mode; sendController.previousMode = config.send.mode;
         el('send-interval').value = config.send.interval; el('send-interval-unit').value = config.send.unit;
-        widgets.activate(null); workspace.activate(null); applyGlobalFields();
+        commandLibrary.replace(config.send.commands); commandView.selectedId = null; commandView.render();
+        commandView.error.hidden = true; commandView.status.textContent = '拖动排序，名称直接修改';
+        setSendTab(config.send.tab, false);
+        widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout);
     }
     function applyConfig(input) {
         const config = S.WidgetConfig.migrateWorkspaceConfig(input), wasRestoring = restoring; restoring = true;
         try {
             tools.invalidate();
-            sendController.stop();
+            sendController.stop(); commandRunner.stop();
             for (const id of [...widgets.widgets.keys()]) widgets.remove(id);
             Object.assign(globals, config.global); service.rebuildHistory = globals.rebuildHistory;
+            service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
             // Install validated definitions against the incoming raw count atomically.
             service.channelDefinitions = globals.channelDefinitions;
             service.setCapacity(Number(globals.maxPoints)); void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
@@ -551,12 +617,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const preferredSidebarOpen = { left: true, right: true };
     let compactSidebarLayout = false;
     function setSidebarOpen(side, open, remember = true) {
-        if (remember) preferredSidebarOpen[side] = open;
+        if (remember) {
+            preferredSidebarOpen[side] = open;
+            uiLayout[`${side}Open`] = open; saveSoon();
+        }
         shell.classList.toggle(`${side}-collapsed`, !open);
         el(sidebars[side]).setAttribute('aria-expanded', String(open));
         resizeViews();
     }
-    function syncSidebarLayout() {
+    function syncSidebarLayout(force = false) {
         const panelWidth = (id, variable, fallback) => {
             const style = el(id).style;
             return parseFloat(style.getPropertyValue?.(variable) || style[variable]) || fallback;
@@ -564,7 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const requiredWidth = panelWidth('sidebar', '--sidebar-w', 268) +
             panelWidth('channel-sidebar', '--channel-sidebar-w', 320) + 480 + 26;
         const compact = Number(window.innerWidth) > 0 && window.innerWidth < Math.max(1100, requiredWidth);
-        if (compact === compactSidebarLayout) return;
+        if (!force && compact === compactSidebarLayout) return;
         compactSidebarLayout = compact;
         shell.classList.toggle('compact-layout', compact);
         for (const side of ['left', 'right']) setSidebarOpen(side, compact ? false : preferredSidebarOpen[side], false);
@@ -590,11 +659,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let panelDrag = null;
     const resizeViews = () => { workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
     syncSidebarLayout();
-    const sendMinimum = () => parseFloat(window.getComputedStyle?.(el('send-input')).minHeight) || el('send-input').offsetHeight;
+    const sendSizeTarget = () => el('global-send');
+    const sendMinimum = (target = sendSizeTarget()) => parseFloat(window.getComputedStyle?.(target).minHeight) || 160;
     function setPanelSize(drag, size) {
         if (drag.variable) drag.panel.style.setProperty(drag.variable, Math.min(700, Math.max(240, size)) + 'px');
         else {
-            const input = el('send-input'), area = el('monitor-workspace'), main = el('main-display');
+            const input = drag.panel ?? sendSizeTarget(), area = el('monitor-workspace'), main = el('main-display');
             const css = window.getComputedStyle?.(main);
             const padding = (parseFloat(css?.paddingTop) || 0) + (parseFloat(css?.paddingBottom) || 0);
             const outerHeight = node => {
@@ -604,13 +674,21 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             const fixedHeight = [...main.children].filter(node => node !== area && node !== el('global-send'))
                 .reduce((height, node) => height + outerHeight(node), 0);
-            const sendChrome = outerHeight(el('global-send')) - input.getBoundingClientRect().height;
+            const sendMargin = outerHeight(input) - input.getBoundingClientRect().height;
             const minimumWorkspace = Math.max(150, el('workspace-toolbar').offsetHeight +
                 (el('workspace-help').hidden ? 0 : el('workspace-help').offsetHeight) + 122);
-            const max = Math.max(drag.minimum, main.clientHeight - padding - fixedHeight - sendChrome - minimumWorkspace);
+            const max = Math.max(drag.minimum, main.clientHeight - padding - fixedHeight - sendMargin - minimumWorkspace);
             input.style.height = Math.max(drag.minimum, Math.min(max, size)) + 'px';
         }
         resizeViews();
+    }
+    function applyUiLayout(layout) {
+        Object.assign(uiLayout, layout);
+        preferredSidebarOpen.left = layout.leftOpen; preferredSidebarOpen.right = layout.rightOpen;
+        el('sidebar').style.setProperty('--sidebar-w', layout.leftWidth + 'px');
+        el('channel-sidebar').style.setProperty('--channel-sidebar-w', layout.rightWidth + 'px');
+        syncSidebarLayout(true);
+        setPanelSize({ minimum: sendMinimum() }, layout.sendHeight);
     }
     function endPanelResize(event, cancelled = false) {
         const drag = panelDrag;
@@ -620,18 +698,25 @@ document.addEventListener('DOMContentLoaded', () => {
         Object.assign(document.body.style, { cursor: drag.cursor, userSelect: drag.userSelect });
         try { drag.handle.releasePointerCapture?.(drag.pointerId); } catch { /* Capture may already be released. */ }
         if (drag.variable) syncSidebarLayout();
+        if (!cancelled) {
+            if (drag.variable) uiLayout[drag.variable === '--sidebar-w' ? 'leftWidth' : 'rightWidth'] =
+                parseFloat(drag.panel.style.getPropertyValue?.(drag.variable) || drag.panel.style[drag.variable]);
+            else uiLayout.sendHeight = parseFloat(sendSizeTarget().style.height);
+            saveSoon();
+        }
     }
     for (const [handleId, panelId, sign, variable] of [
         ['h-resizer', 'sidebar', 1, '--sidebar-w'], ['right-resizer', 'channel-sidebar', -1, '--channel-sidebar-w'],
-        ['send-resizer', 'send-input', -1, null]
+        ['send-resizer', 'global-send', -1, null]
     ]) {
         const handle = el(handleId), panel = el(panelId);
         listen(handle, 'pointerdown', event => {
             if (event.button !== 0 || panelDrag) return;
             event.preventDefault();
-            panelDrag = { handle, panel, sign, variable, pointerId: event.pointerId,
+            const target = variable ? panel : sendSizeTarget();
+            panelDrag = { handle, panel: target, sign, variable, pointerId: event.pointerId,
                 start: variable ? event.clientX : event.clientY,
-                size: panel.getBoundingClientRect()[variable ? 'width' : 'height'], minimum: variable ? 240 : sendMinimum(),
+                size: target.getBoundingClientRect()[variable ? 'width' : 'height'], minimum: variable ? 240 : sendMinimum(target),
                 cursor: document.body.style.cursor, userSelect: document.body.style.userSelect };
             Object.assign(document.body.style, { cursor: variable ? 'ew-resize' : 'ns-resize', userSelect: 'none' });
             try { handle.setPointerCapture?.(event.pointerId); } catch { /* Document listeners still finish the drag. */ }
@@ -652,13 +737,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key) || panelDrag) return;
         event.preventDefault();
         const minimum = sendMinimum();
-        setPanelSize({ minimum }, event.key === 'Home' ? minimum : el('send-input').getBoundingClientRect().height +
+        setPanelSize({ minimum }, event.key === 'Home' ? minimum : sendSizeTarget().getBoundingClientRect().height +
             (event.key === 'ArrowUp' ? 20 : -20));
+        uiLayout.sendHeight = parseFloat(sendSizeTarget().style.height); saveSoon();
     });
     listen(window, 'blur', () => endPanelResize(null, true));
     listen(window, 'resize', () => {
         syncSidebarLayout();
-        if (el('send-input').style.height) setPanelSize({ minimum: sendMinimum() }, el('send-input').getBoundingClientRect().height);
+        setPanelSize({ minimum: sendMinimum() }, uiLayout.sendHeight);
     });
     S.bindAllSelectWheels(document);
     function dispose() {
@@ -667,7 +753,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (saveTimer !== null) saveNow();
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
-        clearInterval(statsTimer); sendController.stop(); sendController.dispose?.(); exportView.dispose?.();
+        clearInterval(statsTimer); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose?.();
         tools.dispose(); widgets.dispose(); workspace.dispose(); service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
         for (const adapter of [serialAdapter, netAdapter]) {
@@ -677,6 +763,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
     const statsTimer = setInterval(updateStats, 1000);
-    S.application = { service, widgets, workspace, tools, serialAdapter, netAdapter, sendController, getConfig, applyConfig, dispose, exportData, updateStats };
+    S.application = { service, widgets, workspace, tools, serialAdapter, netAdapter, sendController,
+        commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, updateStats };
     listen(window, 'pagehide', dispose);
 });

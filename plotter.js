@@ -15,8 +15,11 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 const FFT_REFRESH_INTERVAL_MS = 100;
+const WORKER_FFT_REFRESH_INTERVAL_MS = 1000 / 30;
 const plotterLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
+const PlotWaveGpuRenderer = typeof module !== 'undefined'
+    ? require('./waveGpuRenderer').WaveGpuRenderer : globalThis.SerialPlotter.WaveGpuRenderer;
 
 class Plotter {
     /** 初始化画布、通道数组、视口状态、事件监听与滚动条 */
@@ -25,6 +28,7 @@ class Plotter {
         this.document = this.canvas.ownerDocument ?? document;
         this.window = this.document.defaultView ?? window;
         this.viewOnly = options.viewOnly === true;
+        this.fftWorkerPool = options.fftWorkerPool ?? null;
         this._listeners = [];
         this._raf = null;
         this._disposed = false;
@@ -32,6 +36,8 @@ class Plotter {
         this._sourceFirstOrder = frames.orderAt(0);
         this._timeWindowStartOrder = null;
         this.ctx    = this.canvas.getContext('2d');
+        this.gpuRenderer = options.gpuRenderer ?? (PlotWaveGpuRenderer
+            ? new PlotWaveGpuRenderer(this.canvas, () => this._markViewDirty()) : null);
         // 画布文本与 DOM 共用同一字体策略：英文/数字等宽，中文回退黑体
         this.fontFamily = typeof getComputedStyle === 'function'
             ? getComputedStyle(this.canvas).fontFamily : 'Consolas, monospace';
@@ -39,10 +45,16 @@ class Plotter {
         this.channels = []; // display metadata; samples live in FrameBuffer
         this.frames = frames;
         this._fftCache = new Map();
+        this._spectrumDisplayCache = new WeakMap();
+        this._frequencyPositions = null;
+        this._timeSeriesCache = null;
         this._fftVersion = -1;
         this._fftInputRange = null;
         this._fftSourceMode = null;
         this._fftRevision = 0;
+        this._fftGeneration = 0;
+        this._fftPending = null;
+        this._lastPresentedFftRevision = -1;
         this._fftAt = 0;
         this._lastDraw = 0;
         this._dirty = true;
@@ -131,12 +143,13 @@ class Plotter {
         if (typeof ResizeObserver !== 'undefined') {
             this.resizeObserver = new ResizeObserver(() => this.resize());
             this.resizeObserver.observe(this.canvas.parentElement);
+            if (this.plotHeader) this.resizeObserver.observe(this.plotHeader);
         }
         if (typeof IntersectionObserver !== 'undefined') {
             this.intersectionObserver = new IntersectionObserver(entries => {
                 this._inViewport = entries.at(-1)?.isIntersecting !== false;
-                if (this._inViewport) this._scheduleRender();
-                else this._cancelRender();
+                if (this._inViewport && this.isVisible) this.resize();
+                else this._releaseBackingStore();
             });
             this.intersectionObserver.observe(this.canvas);
         }
@@ -170,7 +183,8 @@ class Plotter {
 
     _scheduleRender() {
         if (this._disposed || !this.isVisible || !this._inViewport || this._raf !== null ||
-            !(this._dirty || this._scrollbarDirty) || (this.isPaused && !this._viewDirty)) return;
+            !(this._dirty || this._scrollbarDirty) || (this.isPaused && !this._viewDirty) ||
+            (this.displayMode !== 'time' && this._fftPending && !this._viewDirty)) return;
         this._raf = requestAnimationFrame(() => {
             this._raf = null;
             this.renderLoop();
@@ -183,11 +197,31 @@ class Plotter {
         this._scheduleRender();
     }
 
+    _invalidateFft() {
+        this._fftGeneration++;
+        this._fftVersion = -1;
+        this._fftInputRange = null;
+        this._fftCache.clear();
+        this._timeSeriesCache = null;
+    }
+
     setVisible(visible) {
         if (this._disposed) return;
         this.isVisible = !!visible;
-        if (this.isVisible) this._markViewDirty();
-        else this._cancelRender();
+        if (this.isVisible && this._inViewport) this.resize();
+        else this._releaseBackingStore();
+    }
+
+    _releaseBackingStore() {
+        this._cancelRender();
+        // CSS keeps the logical size. Hidden high-DPI layers need no large bitmaps.
+        this.canvas.width = this.canvas.height = 1;
+        this.gpuRenderer?.resize(this.width, this.height, 1, 1);
+        this.gpuRenderer?.releaseTransientData?.();
+        this._invalidateFft();
+        this._drawState = null;
+        this._frequencyPositions = null;
+        this._spectrumDisplayCache = new WeakMap();
     }
 
     setFrames(frames) {
@@ -195,9 +229,7 @@ class Plotter {
         this.frames = frames;
         this._sourceFirstOrder = frames.orderAt(0);
         this._timeWindowStartOrder = null;
-        this._fftCache.clear();
-        this._fftVersion = -1;
-        this._fftInputRange = null;
+        this._invalidateFft();
         this._drawState = null;
         this._timeCenterOrder = null;
         this._cachedScrollTotal = 0;
@@ -224,13 +256,20 @@ class Plotter {
     dispose() {
         if (this._disposed) return;
         this._disposed = true;
+        this._fftGeneration++;
         this._cancelRender();
         for (const remove of this._listeners.splice(0)) remove();
         this.resizeObserver?.disconnect();
         this.intersectionObserver?.disconnect();
+        this.canvas.width = this.canvas.height = 1;
+        this.gpuRenderer?.dispose();
         if (this._selection && this.canvas.hasPointerCapture?.(this._selection.pointerId))
             this.canvas.releasePointerCapture?.(this._selection.pointerId);
         this._selection = null;
+        this._timeSeriesCache = null;
+        this._frequencyPositions = null;
+        this._spectrumDisplayCache = new WeakMap();
+        this._fftCache.clear();
         this.onStatsUpdate = null;
         this.onViewportChange = null;
         this.onStatusUpdate = null;
@@ -282,6 +321,13 @@ class Plotter {
             this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
         this._selection = null;
         this._markViewDirty();
+        this._syncCanvasSize();
+        this._updateScrollbar();
+        if (this.isPaused) this.draw();
+    }
+
+    /** Measure without drawing: statistics can change the flex layout during a draw. */
+    _syncCanvasSize() {
         const rect = this.canvas.parentElement.getBoundingClientRect();
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(this.canvas.parentElement) : null;
         const inset = names => names.reduce((sum, name) => sum + (parseFloat(css?.[name]) || 0), 0);
@@ -291,23 +337,30 @@ class Plotter {
         const headH = this.plotHeader ? this.plotHeader.offsetHeight : 0;
         const displayScale = this._displayScale();
         this.width = Math.max(100, Math.floor(rect.width / displayScale - insetX));
-        this.height = Math.max(60, Math.floor(rect.height / displayScale - sbH - headH - insetY));
+        this.height = Math.max(1, Math.floor(rect.height / displayScale - sbH - headH - insetY));
+        this._layoutHeaderHeight = headH;
+        if (this._selection) {
+            this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
+            this._selection = null;
+        }
         const deviceRatio = Number(this.window.devicePixelRatio);
         const density = Math.max(1, displayScale *
             (Number.isFinite(deviceRatio) && deviceRatio > 0 ? deviceRatio : 1));
         // Drawing and pointer coordinates stay logical; only the backing bitmap grows.
-        const pixelWidth = Math.ceil(this.width * density);
-        const pixelHeight = Math.ceil(this.height * density);
+        const visible = this.isVisible && this._inViewport;
+        const pixelWidth = visible ? Math.ceil(this.width * density) : 1;
+        const pixelHeight = visible ? Math.ceil(this.height * density) : 1;
         if (this.canvas.width !== pixelWidth) this.canvas.width = pixelWidth;
         if (this.canvas.height !== pixelHeight) this.canvas.height = pixelHeight;
-        this._updateScrollbar();
-        if (this.isPaused) this.draw();
+        this.gpuRenderer?.resize(this.width, this.height, pixelWidth, pixelHeight);
+        if (this.mousePos && this._pointerClient) this.mousePos = this._pointFromPointer(this._pointerClient);
     }
 
     /* ── 通道管理 ── */
     /** 调整通道数量，不足时按默认色板补全，超出时裁剪 */
     setChannelCount(count) {
         if (!this.viewOnly) this.frames.setChannelCount(count);
+        if (this.channels.length !== count) this._invalidateFft();
         this._cachedScrollTotal = 0;
         while (this.channels.length < count) {
             const idx = this.channels.length;
@@ -342,7 +395,7 @@ class Plotter {
     setChannelVisible(index, visible) {
         if (this.channels[index]) {
             this.channels[index].visible = visible;
-            this._fftVersion = -1;
+            this._invalidateFft();
             this._markViewDirty();
             this._clampScroll();
             this._updateScrollbar();
@@ -368,14 +421,14 @@ class Plotter {
             gainEnabled: settings.gainEnabled === true, gain,
             offsetEnabled: settings.offsetEnabled === true, offset
         });
-        this._fftVersion = -1;
+        this._invalidateFft();
         this._markViewDirty();
         if (this.isPaused) this.draw();
     }
     /** 批量设置所有通道的可见性 */
     setAllChannelsVisible(visible) {
         this.channels.forEach(ch => { ch.visible = visible; });
-        this._fftVersion = -1;
+        this._invalidateFft();
         this._markViewDirty();
         this._clampScroll();
         this._updateScrollbar();
@@ -396,7 +449,7 @@ class Plotter {
             channel.offsetEnabled = setting.offsetEnabled === true;
             channel.offset = setting.offset === undefined ? 0 : Number(setting.offset);
         });
-        this._fftVersion = -1;
+        this._invalidateFft();
         this._markViewDirty();
         this._clampScroll();
         this._updateScrollbar();
@@ -459,7 +512,7 @@ class Plotter {
                 this._clearYZoom(mode);
         }
         if (oldMode !== this.displayMode || oldDc !== this.removeDcForFft ||
-            oldWindow !== this.fftWindow) this._fftVersion = -1;
+            oldWindow !== this.fftWindow) this._invalidateFft();
         this._markViewDirty();
         if (this.isPaused) this.draw();
     }
@@ -497,7 +550,7 @@ class Plotter {
         this._clearYZoom('frequency');
         if (!this.viewOnly) this.frames.clear();
         this.sampleRateHz = 0;
-        this._fftVersion = -1;
+        this._invalidateFft();
         this._cachedScrollTotal = 0;
         for (const mode of ['time', 'frequency', 'phase']) {
             this.vp[mode].scrollOffset = 0;
@@ -697,11 +750,18 @@ class Plotter {
     }
 
     _transformedChannelSlice(index, start = 0, end = this.frames.length) {
-        const values = this.frames.channelSlice(index, start, end);
+        const first = Math.max(0, start);
+        const last = Math.min(end, this.frames.length);
+        const bulk = typeof this.frames.copyChannel === 'function';
+        const values = bulk ? this.frames.copyChannel(index, first, last) : new Float64Array(Math.max(0, last - first));
         const channel = this.channels[index];
-        if (!channel.gainEnabled && !channel.offsetEnabled) return values;
-        for (let i = 0; i < values.length; i++)
-            values[i] = globalThis.SerialPlotter.transformChannelValue(values[i], channel);
+        const transform = channel.gainEnabled || channel.offsetEnabled;
+        if (bulk && !transform) return values;
+        for (let i = first; i < last; i++) {
+            const value = bulk ? values[i - first] : this.frames.getValue(index, i);
+            values[i - first] = transform
+                ? globalThis.SerialPlotter.transformChannelValue(value, channel) : value;
+        }
         return values;
     }
 
@@ -726,6 +786,12 @@ class Plotter {
             : { start: Math.max(0, total - this.plotWindowPoints), end: total };
     }
 
+    _fftRefreshInterval() {
+        if (this.fftWorkerPool?.available === false) return FFT_REFRESH_INTERVAL_MS;
+        if (this.fftWorkerPool && this.gpuRenderer?.available) return 0;
+        return this.fftWorkerPool ? WORKER_FFT_REFRESH_INTERVAL_MS : FFT_REFRESH_INTERVAL_MS;
+    }
+
     /** 对所有可见通道的当前输入范围执行 FFT，结果缓存在 Map 中供 draw 复用。 */
     _computeFftForVisibleChannels() {
         if (this.frames.rawMode) { this._fftCache.clear(); return this._fftCache; }
@@ -737,7 +803,53 @@ class Plotter {
         if ((this._fftVersion === this.frames.version && sameRange) ||
             (this._fftVersion >= 0 && sourceMode === 'live' &&
                 this._fftSourceMode === 'live' &&
-                now - this._fftAt < FFT_REFRESH_INTERVAL_MS)) return this._fftCache;
+                now - this._fftAt < this._fftRefreshInterval())) return this._fftCache;
+        if (this._fftPending) return this._fftCache;
+        if (this.fftWorkerPool && !this.frames.responseMode) {
+            const frames = this.frames, version = frames.version, generation = this._fftGeneration;
+            const inputs = [];
+            for (let idx = 0; idx < this.channels.length; idx++) {
+                if (!this.channels[idx].visible || !frames.length) continue;
+                const channel = this.channels[idx];
+                inputs.push({ idx, options: { channel: idx, start: range.start, end: range.end,
+                    removeDc: this.removeDcForFft, windowType: this.fftWindow,
+                    gain: channel.gainEnabled ? channel.gain : 1,
+                    offset: channel.offsetEnabled ? channel.offset : 0 } });
+            }
+            if (inputs.length) {
+                const request = {};
+                this._fftPending = request;
+                this._fftAt = now;
+                Promise.all(inputs.map(({ idx, options }) => {
+                    const readValues = () => this._transformedChannelSlice(idx, range.start, range.end);
+                    const task = this.fftWorkerPool.requestFft
+                        ? this.fftWorkerPool.requestFft(frames, options, readValues)
+                        : this.fftWorkerPool.runTask({ kind: 'fft', values: readValues(),
+                            removeDc: options.removeDc, windowType: options.windowType });
+                    return task.then(result => [idx, result]);
+                })).then(entries => {
+                    if (this._fftPending !== request) return;
+                    this._fftPending = null;
+                    if (this._disposed || this.frames !== frames || this._fftGeneration !== generation) {
+                        if (!this._disposed) this._markViewDirty();
+                        return;
+                    }
+                    this._fftCache = new Map(entries);
+                    this._fftVersion = version;
+                    this._fftInputRange = range;
+                    this._fftSourceMode = sourceMode;
+                    this._fftAt = performance.now();
+                    this._fftRevision++;
+                    this._markViewDirty();
+                }).catch(() => {
+                    if (this._fftPending !== request) return;
+                    this._fftPending = null;
+                    this.fftWorkerPool = null;
+                    if (!this._disposed) this._markViewDirty();
+                });
+                return this._fftCache;
+            }
+        }
         const results = new Map();
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
@@ -760,12 +872,42 @@ class Plotter {
         return results.get(index) || { mags: [], dominantBin: 0, fftSize: 0 };
     }
 
+    _spectrumValues(freq, start, end) {
+        const key = [this.displayMode, this.magnitudeUnit, this.dbFactor, this.phaseUnwrap,
+            this.phaseUnit, start, end].join(':');
+        const cached = this._spectrumDisplayCache.get(freq) ?? {};
+        if (cached.key === key) return cached.values;
+        let source = freq.mags, factor = 1;
+        if (this.displayMode === 'phase') {
+            if (this.phaseUnwrap) {
+                cached.unwrapped ??= freq.unwrappedPhases ?? globalThis.SerialPlotter.unwrapPhaseDegrees(freq.phases ?? []);
+                source = cached.unwrapped;
+            } else source = freq.phases ?? [];
+        } else if (this.magnitudeUnit === 'db' && freq.logMags) {
+            source = freq.logMags;
+            factor = this.dbFactor;
+        }
+        let values = source.subarray ? source.subarray(start, end) : source.slice(start, end);
+        if (this.displayMode === 'phase' && this.phaseUnit === 'radians') {
+            values = Float64Array.from(values, value => value * Math.PI / 180);
+        } else if (this.displayMode !== 'phase' && this.magnitudeUnit === 'db') {
+            values = freq.logMags ? Float64Array.from(values, value => value * factor)
+                : Float64Array.from(values, value => globalThis.SerialPlotter.decibelMagnitude(value, this.dbFactor));
+        }
+        Object.assign(cached, { key, values });
+        this._spectrumDisplayCache.set(freq, cached);
+        return values;
+    }
+
     /**
      * 收集可见通道的数据：
      *   - 时域模式：取视口范围 [startIdx, actualEnd) 内的数据
      *   - 频域模式：取预计算的 FFT 结果中 [startIdx, actualEnd) 范围的频谱 bins
      */
     _collectWindowSeries(startIdx, actualEnd, fftResults) {
+        const cached = this._timeSeriesCache;
+        if (this.displayMode === 'time' && cached?.frames === this.frames && cached.version === this.frames.version &&
+            cached.start === startIdx && cached.end === actualEnd) return cached.series;
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
@@ -774,14 +916,7 @@ class Plotter {
                 const freq = fftResults.get(idx);
                 if (!freq || freq.mags.length === 0) continue;
                 // 取视口范围内的频谱 bins
-                let values = freq.mags;
-                if (this.displayMode === 'phase') {
-                    values = this.phaseUnwrap
-                        ? globalThis.SerialPlotter.unwrapPhaseDegrees(freq.phases ?? []) : freq.phases ?? [];
-                    if (this.phaseUnit === 'radians') values = values.map(value => value * Math.PI / 180);
-                }
-                else if (this.magnitudeUnit === 'db') values = freq.mags.map(value => globalThis.SerialPlotter.decibelMagnitude(value, this.dbFactor));
-                const mags = values.slice(startIdx, actualEnd);
+                const mags = this._spectrumValues(freq, startIdx, actualEnd);
                 if (mags.length === 0) continue;
                 series.push({
                     channelIndex: idx, ch,
@@ -795,7 +930,39 @@ class Plotter {
                 series.push({ channelIndex: idx, ch, rawValues, mags: rawValues, dominantBin: 0, fftSize: rawValues.length });
             }
         }
+        if (this.displayMode === 'time') this._timeSeriesCache = {
+            frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd, series
+        };
         return series;
+    }
+
+    _prepareTracePoints(series, start, end, width, scale) {
+        let positions;
+        if (this.displayMode !== 'time') {
+            const cached = this._frequencyPositions;
+            if (cached?.start === start && cached.end === end && cached.width === width && cached.scale === scale) {
+                positions = cached.values;
+            } else {
+                positions = new Float64Array(Math.max(0, end - start));
+                const first = scale === 'log' ? Math.log(start) : start;
+                const span = (scale === 'log' ? Math.log(end - 1) : end - 1) - first;
+                for (let i = 0; i < positions.length; i++) positions[i] = positions.length > 1
+                    ? ((scale === 'log' ? Math.log(start + i) : start + i) - first) / span * width : 0;
+                this._frequencyPositions = { start, end, width, scale, values: positions };
+            }
+        }
+        for (const item of series) {
+            if (this.displayMode === 'time') {
+                if (item.points && item.pointWidth === width) continue;
+                item.points = globalThis.SerialPlotter.bucketTraceExtrema(item.rawValues, width);
+                const step = width / Math.max(1, end - start - 1);
+                for (const point of item.points) point.x = point.index * step;
+                item.pointWidth = width;
+            } else {
+                item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.mags, positions);
+                for (const point of item.points) point.x = positions[point.index];
+            }
+        }
     }
 
     /* ── 交互事件 ── */
@@ -899,14 +1066,15 @@ class Plotter {
     _onMouseLeave() {
         this._markViewDirty();
         this.mousePos = null;
+        this._pointerClient = null;
         if (this.isPaused) this.draw();
     }
 
     _pointFromPointer(event) {
         const rect = this.canvas.getBoundingClientRect();
         return {
-            x: (event.clientX - rect.left) * this.width / rect.width,
-            y: (event.clientY - rect.top) * this.height / rect.height
+            x: rect.width > 0 ? (event.clientX - rect.left) * this.width / rect.width : -1,
+            y: rect.height > 0 ? (event.clientY - rect.top) * this.height / rect.height : -1
         };
     }
 
@@ -923,6 +1091,7 @@ class Plotter {
         };
         this._vp.autoFollow = false;
         this.mousePos = null;
+        this._pointerClient = null;
         if (this.canvas.setPointerCapture) this.canvas.setPointerCapture(event.pointerId);
         this._markViewDirty();
         if (this.isPaused) this.draw();
@@ -938,6 +1107,7 @@ class Plotter {
             this.mousePos = null;
         } else {
             this.mousePos = point;
+            this._pointerClient = { clientX: event.clientX, clientY: event.clientY };
         }
         this._markViewDirty();
         if (this.isPaused) this.draw();
@@ -947,11 +1117,15 @@ class Plotter {
         const previousViewport = this._viewportState();
         const selection = this._selection;
         if (!selection || event.pointerId !== selection.pointerId) return;
-        this._onPointerMove(event);
+        // Layout may have changed before ResizeObserver gets its next delivery.
+        if ((this.plotHeader?.offsetHeight ?? 0) !== this._layoutHeaderHeight) this.draw();
+        if (this._selection === selection) this._onPointerMove(event);
+        const selectionValid = this._selection === selection;
         this._selection = null;
         if (this.canvas.releasePointerCapture &&
             (!this.canvas.hasPointerCapture || this.canvas.hasPointerCapture(event.pointerId)))
             this.canvas.releasePointerCapture(event.pointerId);
+        if (!selectionValid) return;
         const state = this._drawState;
         const zoom = state && selection.mode === this.displayMode
             ? globalThis.SerialPlotter.zoomRectToBounds({
@@ -1142,7 +1316,7 @@ class Plotter {
 
     /* ── 渲染 ── */
 
-    /** Process dirty visible work, with a 30 FPS ceiling and no idle animation loop. */
+    /** GPU plots follow display refresh; Canvas fallback retains its 30 FPS ceiling. */
     renderLoop() {
         if (this._disposed || !this.isVisible || !this._inViewport) return;
         const now = performance.now();
@@ -1150,9 +1324,10 @@ class Plotter {
             this._updateScrollbar();
             this._scrollbarDirty = false;
         }
-        const spectrumDue = this._fftVersion < 0 ||
-            (this._fftVersion !== this.frames.version && now - this._fftAt >= FFT_REFRESH_INTERVAL_MS);
-        if ((!this.isPaused || this._viewDirty) && this._dirty && now - this._lastDraw >= 1000 / 30 &&
+        const spectrumDue = !this._fftPending && (this._fftVersion < 0 ||
+            (this._fftVersion !== this.frames.version && now - this._fftAt >= this._fftRefreshInterval()));
+        if ((!this.isPaused || this._viewDirty) && this._dirty &&
+            (this.gpuRenderer?.available || now - this._lastDraw >= 1000 / 30) &&
             (this.displayMode === 'time' || this._viewDirty || spectrumDue)) {
             this.draw();
         }
@@ -1162,12 +1337,14 @@ class Plotter {
     /** Count only completed Canvas redraws, including explicit redraws while paused. */
     draw() {
         if (this._disposed || !this.isVisible || !this._inViewport) return;
-        const spectrumRevision = this._fftRevision;
         this._renderFrame();
         this._updateYScrollbar();
         this.completedDraws++;
-        if (this.displayMode !== 'time' && this._fftRevision !== spectrumRevision)
+        if (this.displayMode !== 'time' && this._fftCache.size > 0 &&
+            this._fftRevision !== this._lastPresentedFftRevision) {
             this.completedSpectrumDraws++;
+            this._lastPresentedFftRevision = this._fftRevision;
+        }
         this._lastDraw = performance.now();
         this._sourceFirstOrder = this.frames.orderAt(0);
         this._timeWindowStartOrder = this.frames.orderAt(Math.floor(this.vp.time.scrollOffset));
@@ -1178,7 +1355,24 @@ class Plotter {
         else this._cancelRender();
     }
 
-    /** 主绘制方法：背景 → 网格 → 坐标轴 → 波形 → 十字光标 */
+    _startCanvasFrame(stats) {
+        this._emitStats(stats);
+        if ((this.plotHeader?.offsetHeight ?? 0) !== this._layoutHeaderHeight) this._syncCanvasSize();
+        const W = this.width, H = this.height;
+        this.ctx.setTransform(this.canvas.width / W, 0, 0, this.canvas.height / H, 0, 0);
+        const plotW = Math.max(1, W - this.pX), plotH = Math.max(1, H - this.pY);
+
+        // —— 背景与网格 ——
+        const gpuAvailable = this.gpuRenderer?.available;
+        if (gpuAvailable) this.ctx.clearRect(0, 0, W, H);
+        else {
+            this.ctx.fillStyle = '#111111'; this.ctx.fillRect(0, 0, W, H);
+            this._drawGrid2D(plotW, plotH);
+        }
+        return { W, H, plotW, plotH, gpuAvailable };
+    }
+
+    /** Prepare statistics and layout before drawing background, axes, traces and hover. */
     _renderFrame() {
         if (this.onStatusUpdate) this.onStatusUpdate(this.frames.responseMode && this.displayMode !== 'time' ? this.channels
             .flatMap((channel, index) => {
@@ -1187,29 +1381,14 @@ class Plotter {
             }).join('；') : '');
         this._drawState = null;
         this._updateScrollbar();
-        const W = this.width, H = this.height;
-        this.ctx.setTransform(this.canvas.width / W, 0, 0, this.canvas.height / H, 0, 0);
-        const plotW = W - this.pX, plotH = H - this.pY;
-
-        // —— 背景与网格 ——
-        this.ctx.fillStyle = '#111111';
-        this.ctx.fillRect(0, 0, W, H);
-
-        // Grid
-        this.ctx.lineWidth = 1;
-        this.ctx.strokeStyle = '#1e1e1e';
-        this.ctx.beginPath();
-        for (let x = 0; x <= plotW; x += 20) { this.ctx.moveTo(x,0); this.ctx.lineTo(x,plotH); }
-        for (let y = 0; y <= plotH; y += 20) { this.ctx.moveTo(0,y); this.ctx.lineTo(plotW,y); }
-        this.ctx.stroke();
-        this.ctx.strokeStyle = '#2e2e2e';
-        this.ctx.beginPath();
-        for (let x = 0; x <= plotW; x += 100) { this.ctx.moveTo(x,0); this.ctx.lineTo(x,plotH); }
-        for (let y = 0; y <= plotH; y += 100) { this.ctx.moveTo(0,y); this.ctx.lineTo(plotW,y); }
-        this.ctx.stroke();
 
         const total = this._total();
-        if (total < 1) { this._emitStats(''); return; }
+        if (total < 1) {
+            const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(null);
+            if (gpuAvailable && !this.gpuRenderer.render([], W, H, plotW, plotH))
+                this._drawGrid2D(plotW, plotH);
+            return;
+        }
 
         // 频域模式：预先计算全量 FFT，包含 Nyquist 频点
         let fftResults = null;
@@ -1247,13 +1426,17 @@ class Plotter {
         const dataEnd = Math.min(scrollTotal, actualEnd);
         const series = this._collectWindowSeries(dataStart, dataEnd, fftResults);
         if (series.length === 0) {
-            this._emitStats('');
+            const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(null);
+            if (gpuAvailable && !this.gpuRenderer.render([], W, H, plotW, plotH))
+                this._drawGrid2D(plotW, plotH);
             this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
             return;
         }
 
         const summaryText = this._buildSummary(series, this.displayMode);
-        this._emitStats(summaryText);
+        const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(summaryText);
+        const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
+        this._prepareTracePoints(series, startIdx, actualEnd, plotW, xScale);
 
         let min, max, bounded;
         const logY = this._logY;
@@ -1287,7 +1470,7 @@ class Plotter {
         } else {
             min = Infinity;
             max = -Infinity;
-            for (const item of series) for (const value of item.mags) {
+            for (const item of series) for (const { value } of item.points) {
                 if (Number.isFinite(value)) { min = Math.min(min, value); max = Math.max(max, value); }
             }
             if (this.displayMode === 'phase' && !this.phaseUnwrap) {
@@ -1308,13 +1491,12 @@ class Plotter {
             }
         }
         bounded = max - min;
-        const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
         let yScale = logY ? 'log' : 'linear';
         if (zoomY && this._zoomBaseY[this.displayMode]?.yScale) {
             yScale = this._zoomBaseY[this.displayMode].yScale;
         } else if (logY && min === 0) {
             let peak = 0;
-            for (const item of series) for (const value of item.mags)
+            for (const item of series) for (const { value } of item.points)
                 if (Number.isFinite(value) && value > peak) peak = value;
             yScale = globalThis.SerialPlotter.adaptiveLogScale(peak, max);
         }
@@ -1364,60 +1546,22 @@ class Plotter {
         }
 
         // —— 波形绘制（频域曲线 / 时域折线+散点）——
-        if (this.displayMode !== 'time') {
-            const xPositions = new Float64Array(visibleCnt);
-            for (let i = 0; i < visibleCnt; i++) {
-                const ratio = visibleCnt > 1
-                    ? globalThis.SerialPlotter.axisFraction(startIdx + i, startIdx, actualEnd - 1, xScale) : 0;
-                xPositions[i] = ratio * plotW;
-            }
-            for (const item of series) {
-                const mags = item.mags;
-                if (!mags || mags.length === 0) continue;
-                this.ctx.strokeStyle = item.ch.color; this.ctx.lineWidth = 1.2;
-                this.ctx.beginPath();
-                const points = globalThis.SerialPlotter.bucketAxisExtrema(mags, xPositions);
-                for (let i = 0; i < points.length; i++) {
-                    const x = xPositions[points[i].index];
+        const traces = [];
+        for (const item of series) {
+            const points = item.points;
+            for (let i = 0; i < points.length; i++) {
+                if (this.displayMode !== 'time') {
                     const yRatio = globalThis.SerialPlotter.axisFraction(
                         logY ? Math.max(points[i].value, min) : points[i].value, min, max, yScale);
-                    const y = plotH - yRatio * plotH;
-                    if (i === 0 || points[i].break) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
-                }
-                this.ctx.stroke();
-                if (points.length === 1) {
-                    const x = xPositions[points[0].index];
-                    const ratio = globalThis.SerialPlotter.axisFraction(
-                        logY ? Math.max(points[0].value, min) : points[0].value,
-                        min, max, yScale);
-                    this.ctx.fillStyle = item.ch.color;
-                    this.ctx.fillRect(x - 1.5, plotH - ratio * plotH - 1.5, 3, 3);
-                }
+                    points[i].y = plotH - yRatio * plotH;
+                } else points[i].y = plotH - ((points[i].value - min) / bounded) * plotH;
             }
-        } else {
-            const stepX = plotW / Math.max(1, visibleCnt - 1);
-            for (const item of series) {
-                const vals = item.rawValues;
-                if (!vals || vals.length === 0) continue;
-                this.ctx.strokeStyle = item.ch.color; this.ctx.lineWidth = 1.2;
-                this.ctx.beginPath();
-                const points = globalThis.SerialPlotter.bucketTraceExtrema(vals, plotW);
-                for (let i = 0; i < points.length; i++) {
-                    const x = (points[i].index + dataStart - startIdx) * stepX;
-                    const y = plotH - ((points[i].value - min) / bounded) * plotH;
-                    if (i === 0 || points[i].break) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
-                }
-                this.ctx.stroke();
-                if (vals.length <= plotW) {
-                    this.ctx.fillStyle = item.ch.color;
-                    for (let i = 0; i < vals.length; i++) {
-                        if (!Number.isFinite(vals[i])) continue;
-                        const x = (i + dataStart - startIdx) * stepX;
-                        const y = plotH - ((vals[i] - min) / bounded) * plotH;
-                        this.ctx.fillRect(x-1.5, y-1.5, 3, 3);
-                    }
-                }
-            }
+            traces.push({ points, color: item.ch.color,
+                dots: this.displayMode === 'time' ? item.rawValues.length <= plotW : points.length === 1 });
+        }
+        if (!gpuAvailable || !this.gpuRenderer.render(traces, W, H, plotW, plotH)) {
+            if (gpuAvailable) this._drawGrid2D(plotW, plotH);
+            for (const trace of traces) this._drawTrace2D(trace);
         }
 
         // —— 十字光标 ——
@@ -1426,6 +1570,36 @@ class Plotter {
             this._drawSelection(plotW, plotH);
         } else if (this.mousePos) {
             this._drawCrosshair(plotW, plotH, min, max, startIdx, visibleCnt, total, series);
+        }
+    }
+
+    _drawGrid2D(plotW, plotH) {
+        this.ctx.lineWidth = 1;
+        for (const [step, color] of [[20, '#1e1e1e'], [100, '#2e2e2e']]) {
+            this.ctx.strokeStyle = color;
+            this.ctx.beginPath();
+            for (let x = 0; x <= plotW; x += step) { this.ctx.moveTo(x, 0); this.ctx.lineTo(x, plotH); }
+            for (let y = 0; y <= plotH; y += step) { this.ctx.moveTo(0, y); this.ctx.lineTo(plotW, y); }
+            this.ctx.stroke();
+        }
+    }
+
+    _drawTrace2D({ points, color, dots }) {
+        if (!points.length) return;
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 1.2;
+        this.ctx.beginPath();
+        for (let i = 0; i < points.length; i++) {
+            const { x, y } = points[i];
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            if (i === 0 || points[i].break) this.ctx.moveTo(x, y);
+            else this.ctx.lineTo(x, y);
+        }
+        this.ctx.stroke();
+        if (dots) {
+            this.ctx.fillStyle = color;
+            for (const { x, y } of points) if (Number.isFinite(x) && Number.isFinite(y))
+                this.ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
         }
     }
 

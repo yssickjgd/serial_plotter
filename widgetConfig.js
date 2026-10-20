@@ -4,11 +4,12 @@ const widgetDisplayUtils = typeof module !== 'undefined' ? require('./monitorDis
 const widgetChannelUtils = typeof module !== 'undefined' ? require('./channelOperations') : globalThis.SerialPlotter;
 const widgetViewportUtils = () => typeof module !== 'undefined' ? require('./widgetViewport') : globalThis.SerialPlotter.WidgetViewport;
 const widgetPoseUtils = () => typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : globalThis.SerialPlotter.PoseConfig;
+const widgetCommandUtils = () => typeof module !== 'undefined' ? require('./commandLibrary') : globalThis.SerialPlotter;
 
 const GLOBAL_DEFAULTS = {
     connType: 'serial', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
     netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
-    maxRawFrameBytes: 1048576, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
+    maxRawFrameBytes: 1048576, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
     endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
     footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH01'], channelColors: [], channelDefinitions: []
 };
@@ -25,6 +26,7 @@ const WAVE_DEFAULTS = {
 const BYTE_DEFAULTS = {
     captureMode: 'hex', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
 };
+const UI_LAYOUT_DEFAULTS = { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200 };
 const copy = value => JSON.parse(JSON.stringify(value));
 const isValidWidgetId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]+$/.test(id) && !['numeric', 'base'].includes(id);
 const pick = (object, defaults) => Object.fromEntries(Object.keys(defaults)
@@ -232,16 +234,24 @@ function validateWorkspaceConfig(config) {
     if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) throw new Error('控件序号无效');
     if (config.send !== undefined && (!config.send || typeof config.send !== 'object' || Array.isArray(config.send)))
         throw new Error('发送设置无效');
-    const send = { interval: '0', unit: 's', mode: 'hex', ...config.send };
+    const send = { interval: '0', unit: 's', mode: 'hex', tab: 'regular', ...config.send };
     if (!['hex', 'text'].includes(send.mode) || !['s', 'hz'].includes(send.unit) ||
         !['string', 'number'].includes(typeof send.interval) || String(send.interval).trim() === '' ||
-        !Number.isFinite(Number(send.interval)) || Number(send.interval) < 0)
+        !Number.isFinite(Number(send.interval)) || Number(send.interval) < 0 || !['regular', 'commands'].includes(send.tab))
         throw new Error('发送模式、间隔或单位无效');
+    send.commands = widgetCommandUtils().normalizeCommands(send.commands);
     if (!globals.channelColors.length) {
         const colors = widgets.find(widget => widget.type === 'wave')?.settings.channels ?? [];
         globals.channelColors = colors.map(channel => channel.color ?? '#ff0000');
     }
-    return { version: 2, global: globals, widgets, workspace, nextNumber, tools, send };
+    if (config.uiLayout !== undefined && (!config.uiLayout || typeof config.uiLayout !== 'object' || Array.isArray(config.uiLayout)))
+        throw new Error('界面布局配置无效');
+    const uiLayout = pick(config.uiLayout ?? {}, UI_LAYOUT_DEFAULTS);
+    if (['leftWidth', 'rightWidth'].some(key => !Number.isFinite(uiLayout[key]) || uiLayout[key] < 240 || uiLayout[key] > 700) ||
+        ['leftOpen', 'rightOpen'].some(key => typeof uiLayout[key] !== 'boolean') ||
+        !Number.isFinite(uiLayout.sendHeight) || uiLayout.sendHeight < 160 || uiLayout.sendHeight > 1e7)
+        throw new Error('界面布局尺寸或收起状态无效');
+    return { version: 2, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout };
 }
 
 function migrateWorkspaceConfig(legacy, legacyLayout) {

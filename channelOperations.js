@@ -143,7 +143,7 @@ function compileChannelSystem(definition) {
 
 class SampleHistory {
     constructor(size, initial) {
-        this.size = size; this.data = new Float64Array(size); this.count = 0; this.head = 0; this.initial = initial;
+        this.size = size; this.data = null; this.count = 0; this.head = 0; this.initial = initial;
     }
     previous(lag, missing = NaN) {
         if (lag > this.count) return this.initial?.get(lag - this.count) ?? missing;
@@ -151,6 +151,7 @@ class SampleHistory {
     }
     push(value) {
         if (!this.size) return;
+        this.data ??= new Float64Array(this.size);
         this.data[this.head] = value; this.head = (this.head + 1) % this.size; this.count++;
     }
 }
@@ -195,6 +196,21 @@ class ChannelOperations {
         };
         for (const number of this.entries.keys()) visit(number);
         for (const [number, size] of this.lookbacks) this.history.set(number, new SampleHistory(size));
+    }
+
+    /** Reserve state arrays before the first sample; validation itself stays allocation-light. */
+    get requiredMemoryBytes() {
+        const histories = new Set(this.history.values()), nodes = [...this.entries.values()].map(entry => entry.ast).filter(Boolean);
+        let bytes = 0;
+        for (const entry of this.entries.values()) if (entry.kernel) bytes += entry.kernel.length * 8;
+        while (nodes.length) {
+            const node = nodes.pop();
+            for (const state of [node.history, node.inputs, node.outputs]) if (state) histories.add(state);
+            for (const child of node.args ?? [node.left, node.right, node.value].filter(value => typeof value === 'object'))
+                nodes.push(child);
+        }
+        for (const state of histories) bytes += state.size * 8;
+        return bytes;
     }
 
     _check(node, entry, parameter) {

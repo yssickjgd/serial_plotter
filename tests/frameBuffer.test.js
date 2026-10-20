@@ -1,6 +1,68 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+test('memory accounting includes allocated sample chunks raw payload and retained metadata', () => {
+    const frames = new FrameBuffer(23, 10000);
+    assert.equal(frames.estimatedMemoryBytes, 0);
+    frames.append(Array(23).fill(1), new Uint8Array(96), '12:00:00.000');
+    assert.ok(frames.estimatedMemoryBytes >= 4096 * (23 * 8 + 96 + 36));
+    const first = frames.estimatedMemoryBytes;
+    frames.append(Array(23).fill(2), new Uint8Array(96), '12:00:00.001');
+    assert.ok(frames.estimatedMemoryBytes >= first);
+    frames.clear();
+    assert.equal(frames.estimatedMemoryBytes, 0);
+    frames.appendRaw(new Uint8Array(1024));
+    const raw = frames.estimatedMemoryBytes;
+    frames.appendRaw(new Uint8Array(1024));
+    assert.ok(frames.estimatedMemoryBytes >= raw + 1024);
+    frames.clear();
+    assert.equal(frames.estimatedMemoryBytes, 0);
+});
+
+test('memory eviction releases whole chunks and preserves remaining absolute records across ring wrap', () => {
+    for (const raw of [false, true]) {
+        const frames = new FrameBuffer(1, 10000);
+        for (let i = 0; i < 14000; i++) {
+            const args = [Uint8Array.of(i % 256), 't', i, i, { byteOffset: i }];
+            if (raw) frames.appendRaw(...args); else frames.append([i], ...args);
+        }
+        const before = frames.estimatedMemoryBytes;
+        assert.equal(frames.discardOldest(7000), 7000);
+        assert.equal(frames.length, 3000);
+        assert.equal(frames.rawByteOffsetAt(0), 11000);
+        assert.equal(frames.orderAt(0), 11000);
+        assert.deepEqual([...frames.rawBytesAt(2999)], [13999 % 256]);
+        assert.ok(frames.estimatedMemoryBytes < before);
+        const args = [Uint8Array.of(3), 't', 14000, 14000, { byteOffset: 14000 }];
+        if (raw) frames.appendRaw(...args); else frames.append([14000], ...args);
+        assert.equal(frames.orderAt(frames.length - 1), 14000);
+        frames.discardOldest(Infinity);
+        assert.equal(frames.estimatedMemoryBytes, 0);
+        assert.equal(frames.capacity, 10000);
+    }
+});
 const { FrameBuffer } = require('../frameBuffer');
+
+test('bulk channel snapshots preserve chunk boundaries, circular order, invalid values and resizing', () => {
+    const frames = new FrameBuffer(2, 5003);
+    for (let i = 0; i < 12000; i++) frames.append([i, i % 101 === 0 ? NaN : -i]);
+    for (const channel of [0, 1]) {
+        const snapshot = frames.copyChannel(channel, 37, 4987);
+        assert.ok(snapshot instanceof Float64Array);
+        assert.deepEqual([...snapshot], frames.channelSlice(channel, 37, 4987));
+        snapshot.fill(999);
+        assert.notEqual(frames.getValue(channel, 37), 999, 'a snapshot cannot mutate retained samples');
+    }
+    frames.resize(10001);
+    frames.append([12000, -12000]);
+    assert.deepEqual([...frames.copyChannel(0)], frames.channelSlice(0));
+    frames.resize(7);
+    assert.deepEqual([...frames.copyChannel(1, -2, 100)], frames.channelSlice(1));
+    assert.equal(frames.copyChannel(0, 5, 2).length, 0);
+    frames.clear();
+    frames.appendRaw(Uint8Array.of(1));
+    assert.ok([...frames.copyChannel(0)].every(Number.isNaN));
+});
 
 test('retained byte count follows overwrite shrink rebuild and clear in both storage modes', () => {
     for (const raw of [false, true]) {

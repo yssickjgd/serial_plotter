@@ -37,6 +37,36 @@ test('resuming capture clears navigation and makes every retained widget follow 
 });
 const { bootApplication } = require('./helpers/widgetAppHarness');
 
+test('amplitude and phase widgets share one FFT and deleting a subscriber preserves the other result', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const amplitude = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'frequency' } });
+    const phase = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'phase' } });
+    for (let i = 0; i < 64; i++) f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 128, 63));
+    await f.settle();
+    const pool = f.app.service.workerPool;
+    const run = pool.runTask.bind(pool);
+    let fftJobs = 0;
+    pool.runTask = task => { if (task.kind === 'fft') fftJobs++; return run(task); };
+    for (const widget of [amplitude, phase]) {
+        widget.view.fftWorkerPool = pool;
+        widget.view.setChannelVisible(0, true);
+        widget.view.draw();
+    }
+    assert.equal(fftJobs, 1, 'two views of one numeric snapshot must dispatch only one FFT');
+    await f.tick(10);
+    amplitude.view.draw(); phase.view.draw();
+    assert.equal(amplitude.view._fftCache.get(0), phase.view._fftCache.get(0));
+    assert.equal(fftJobs, 1);
+    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0, 64));
+    for (const widget of [amplitude, phase]) { widget.view._fftAt -= 200; widget.view.draw(); }
+    assert.equal(fftJobs, 2);
+    const before = phase.view.completedSpectrumDraws;
+    f.app.widgets.remove(amplitude.id);
+    await f.tick(10); phase.view.draw();
+    assert.ok(phase.view.completedSpectrumDraws > before);
+    assert.equal(pool.disposed, false, 'removing one view cannot destroy the shared compute pool');
+});
+
 test('inspector deletion waits for confirmation, cancellation preserves the widget, and confirmed deletion keeps capture', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const widget = f.app.widgets.create({ type: 'wave', title: '待确认的波形' });

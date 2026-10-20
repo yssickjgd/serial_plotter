@@ -4,7 +4,7 @@ const sendByteUtils = typeof module !== 'undefined'
 /** Owns send-panel state, file bytes, and repeated-send lifecycle. */
 class SendController {
     constructor({ mode, input, fileInput, interval, intervalUnit, button, loadButton,
-        getEngine, onSent, onInputError, onSendError }) {
+        getEngine, onSent, onInputError, onSendError, onStart = () => {} }) {
         this.mode = mode;
         this.input = input;
         this.fileInput = fileInput;
@@ -16,6 +16,7 @@ class SendController {
         this.onSent = onSent;
         this.onInputError = onInputError || (() => {});
         this.onSendError = onSendError || (() => {});
+        this.onStart = onStart;
         this.loadedBytes = null;
         this.previewBytes = null;
         this.previousMode = mode.value;
@@ -25,6 +26,8 @@ class SendController {
         this.disposed = false;
         this.listeners = [];
         this.fileGeneration = 0;
+        this.sendGeneration = 0;
+        this.pendingWrite = null;
 
         this.listen(mode, 'change', () => this.changeMode());
         this.listen(input, 'input', () => {
@@ -51,6 +54,7 @@ class SendController {
     }
 
     stop() {
+        this.sendGeneration++;
         this.starting = false;
         if (this.timer !== null) clearInterval(this.timer);
         this.timer = null;
@@ -66,10 +70,9 @@ class SendController {
         return value;
     }
 
-    async sendOnce() {
-        if (this.disposed || this.inFlight) return false;
-        const engine = this.getEngine();
-        if (!engine) { this.stop(); return false; }
+    async sendOnce({ queue = false } = {}) {
+        if (this.disposed || this.inFlight && !queue) return false;
+        if (!this.getEngine()) { this.stop(); return false; }
         let bytes;
         try {
             bytes = this.loadedBytes || this.previewBytes || (this.mode.value === 'hex'
@@ -81,28 +84,46 @@ class SendController {
             this.stop();
             return false;
         }
-        this.inFlight = true;
-        try {
-            await engine.send(bytes);
-            if (!this.disposed) this.onSent(bytes);
-            return true;
-        } catch (error) {
-            if (!this.disposed) this.onSendError(error, bytes);
-            this.stop();
-            return false;
-        } finally {
-            this.inFlight = false;
-        }
+        const generation = this.sendGeneration;
+        const sent = await this.sendBytes(bytes, () => generation === this.sendGeneration);
+        if (!sent && generation === this.sendGeneration) this.stop();
+        return sent;
+    }
+
+    /** Both sending modes share this serialized physical transport and TX accounting. */
+    sendBytes(bytes, isCurrent = () => true) {
+        const engine = this.getEngine();
+        const queued = this.pendingWrite !== null;
+        const write = async () => {
+            const currentEngine = this.getEngine();
+            if (this.disposed || !engine || !currentEngine || queued && currentEngine !== engine || !isCurrent()) return false;
+            this.inFlight = true;
+            try {
+                await engine.send(bytes);
+                if (!this.disposed) this.onSent(bytes);
+                return true;
+            } catch (error) {
+                if (!this.disposed) this.onSendError(error, bytes);
+                return false;
+            } finally { this.inFlight = false; }
+        };
+        const result = this.pendingWrite ? this.pendingWrite.then(write) : write();
+        const tail = result.catch(() => {}).then(() => { if (this.pendingWrite === tail) this.pendingWrite = null; });
+        this.pendingWrite = tail;
+        return result;
     }
 
     async handleClick() {
         if (this.disposed) return;
         if (this.timer !== null || this.starting) { this.stop(); return; }
+        this.onStart();
         const period = this.periodMs();
+        const generation = this.sendGeneration;
         if (period > 0) {
             if (!this.getEngine()) return;
             this.starting = true;
-            const sent = await this.sendOnce();
+            const sent = await this.sendOnce({ queue: true });
+            if (generation !== this.sendGeneration) return;
             if (!sent || !this.starting || !this.getEngine()) {
                 this.starting = false;
                 return;
@@ -112,7 +133,7 @@ class SendController {
             this.button.textContent = '停止';
             this.button.className = 'btn btn-danger';
         } else {
-            await this.sendOnce();
+            await this.sendOnce({ queue: true });
         }
     }
 

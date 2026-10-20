@@ -6,6 +6,10 @@ const { PoseMath: M } = require('../poseMath');
 const identity = { valid: true, matrix: M.identity() };
 test('aircraft mesh and body axes rotate together while odom remains fixed', () => {
     const s = C.defaults(), a = R.buildScene(s, identity);
+    assert.deepEqual(a.axes.filter(axis => axis.frame === 'odom').map(axis => axis.color),
+        ['#800000', '#008000', '#008080'], 'all ODOM axes use strength 128');
+    assert.deepEqual(a.axes.filter(axis => axis.frame === 'body').map(axis => axis.color),
+        ['#ff0000', '#00ff00', '#00ffff'], 'BODY axes retain strength 255');
     assert.equal(a.faces.length, 3892, 'use every triangle of model_plane.STL instead of the cube');
     const b = R.buildScene(s, M.fromEuler([Math.PI / 2, 0, 0]));
     assert.deepEqual(b.axes.filter(axis => axis.frame === 'odom'), a.axes.filter(axis => axis.frame === 'odom'));

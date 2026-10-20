@@ -25,6 +25,62 @@ class FrameBuffer {
         this.retainedByteLength = 0;
     }
 
+    /** Typed storage is exact; strings, object headers and array slots are conservative estimates. */
+    get estimatedMemoryBytes() {
+        let bytes = this.length * (this.rawMode ? 192 : 64);
+        if (this.rawMode) bytes += this.retainedByteLength;
+        for (const chunks of this.values) for (const chunk of chunks) if (chunk) bytes += chunk.byteLength;
+        for (const chunk of this.frames) if (chunk) for (const value of Object.values(chunk)) {
+            if (ArrayBuffer.isView(value)) bytes += value.byteLength;
+            else if (Array.isArray(value)) bytes += value.length * 8;
+        }
+        return bytes;
+    }
+
+    estimateAppendMemory(count, byteLength, frameLength = 0) {
+        count = Math.min(this.capacity, Math.max(1, Math.ceil(count)));
+        let bytes = byteLength + count * (this.rawMode ? 192 : 64);
+        const start = (this.head + this.length) % this.storageCapacity;
+        for (let offset = 0; offset < count;) {
+            const slot = (start + offset) % this.storageCapacity, index = Math.floor(slot / FRAME_CHUNK_SIZE);
+            const chunk = this.frames[index];
+            if (!chunk) bytes += FRAME_CHUNK_SIZE * (this.rawMode ? 67 : 44 + this.channelCount * 8);
+            if (!this.rawMode && frameLength > (chunk?.stride ?? 0))
+                bytes += FRAME_CHUNK_SIZE * frameLength;
+            offset += Math.min(count - offset, FRAME_CHUNK_SIZE - slot % FRAME_CHUNK_SIZE, this.storageCapacity - slot);
+        }
+        return bytes;
+    }
+
+    /** Release oldest records under memory pressure without changing the configured frame limit. */
+    discardOldest(count) {
+        count = Math.min(this.length, Math.max(0, Math.floor(count)));
+        if (!count) return 0;
+        const touched = new Set();
+        for (let i = 0; i < count; i++) {
+            const slot = (this.head + i) % this.storageCapacity, index = Math.floor(slot / FRAME_CHUNK_SIZE);
+            const chunk = this.frames[index], offset = slot % FRAME_CHUNK_SIZE;
+            this.retainedByteLength -= this.rawMode ? chunk.rawRecords[offset].length : chunk.lengths[offset];
+            if (this.rawMode) this._releaseRawSlot(slot);
+            else { chunk.times[offset] = undefined; chunk.lengths[offset] = 0; }
+            touched.add(index);
+        }
+        this.head = (this.head + count) % this.storageCapacity;
+        this.length -= count;
+        const end = this.head + this.length;
+        for (const index of touched) {
+            const first = index * FRAME_CHUNK_SIZE, last = Math.min(first + FRAME_CHUNK_SIZE, this.storageCapacity);
+            const live = this.length && (first < Math.min(end, this.storageCapacity) && last > this.head ||
+                end > this.storageCapacity && first < end - this.storageCapacity);
+            if (!live) {
+                delete this.frames[index];
+                for (const chunks of this.values) delete chunks[index];
+            }
+        }
+        this.version++;
+        return count;
+    }
+
     _frameChunk(chunkIndex, byteLength) {
         let chunk = this.frames[chunkIndex];
         if (!chunk) {
@@ -149,6 +205,25 @@ class FrameBuffer {
         if (this.rawMode) return undefined;
         const slot = (this.head + index) % this.storageCapacity;
         return this.values[channel][Math.floor(slot / FRAME_CHUNK_SIZE)][slot % FRAME_CHUNK_SIZE];
+    }
+
+    /** Copy a chronological column in contiguous chunks, without per-sample lookup. */
+    copyChannel(channel, start = 0, end = this.length) {
+        const first = Math.max(0, Math.min(this.length, Math.floor(start)));
+        const last = Math.max(first, Math.min(this.length, Math.floor(end)));
+        const result = new Float64Array(last - first);
+        const chunks = !this.rawMode && this.values[channel];
+        if (!chunks) { result.fill(NaN); return result; }
+        for (let offset = 0; offset < result.length;) {
+            const slot = (this.head + first + offset) % this.storageCapacity;
+            const within = slot % FRAME_CHUNK_SIZE;
+            const count = Math.min(result.length - offset, FRAME_CHUNK_SIZE - within, this.storageCapacity - slot);
+            const chunk = chunks[Math.floor(slot / FRAME_CHUNK_SIZE)];
+            if (chunk) result.set(chunk.subarray(within, within + count), offset);
+            else result.fill(NaN, offset, offset + count);
+            offset += count;
+        }
+        return result;
     }
 
     frameAt(index) {

@@ -98,6 +98,8 @@
                             <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
                         </div>
                         <div class="input-group"><label for="max-raw-frame-bytes">原始帧分段上限（字节）</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1024" value="1048576" /><span class="hint-text">超限分段保留全部字节，默认 1 MiB。</span></div>
+                        <div class="input-group"><label for="capture-memory-mib">采集内存预算（MiB）</label><input id="capture-memory-mib" type="number" min="64" max="4096" step="64" value="4096" /><span class="hint-text">所有来源、接收历史与 TX 共用；达到预算提前淘汰最旧帧，继续采集。浏览器总内存还包括画布及其它开销。</span></div>
+                        <div class="hint-text" id="capture-memory-status" role="status" aria-live="polite"></div>
                         <div class="row buffer-actions">
                             <button id="btn-pause" class="btn btn-secondary" title="快捷键：P（输入时不触发）">暂停捕捉</button>
                             <button id="btn-clear" class="btn btn-danger">清空缓冲</button>
@@ -346,14 +348,21 @@
                 </div>
             </section>
             <section class="global-send box-border" id="global-send" aria-labelledby="global-send-title">
-                <div class="send-resizer" id="send-resizer" role="separator" aria-orientation="horizontal" aria-label="调整发送输入框高度" aria-controls="send-input" tabindex="0"></div>
-                <h2 class="global-send-title" id="global-send-title">全局发送</h2><div class="send-panel" id="send-panel">
+                <div class="send-resizer" id="send-resizer" role="separator" aria-orientation="horizontal" aria-label="调整发送区域高度" aria-controls="global-send" tabindex="0"></div>
+                <div class="global-send-heading">
+                    <h2 class="global-send-title" id="global-send-title">全局发送</h2>
+                    <div class="send-tabs" role="tablist" aria-label="发送方式">
+                        <button id="send-tab-regular" type="button" role="tab" aria-controls="send-panel" aria-selected="true">常规发送</button>
+                        <button id="send-tab-commands" type="button" role="tab" aria-controls="command-panel" aria-selected="false" tabindex="-1">一键发送</button>
+                    </div>
+                </div>
+                <div class="send-panel" id="send-panel" role="tabpanel" aria-labelledby="send-tab-regular">
                                 <div class="send-toolbar">
                                     <div class="send-mode-row">
-                                        <label for="send-mode">发送显示</label>
+                                        <label for="send-mode">格式</label>
                                         <select id="send-mode" aria-label="发送框显示格式">
                                             <option value="hex" selected>Hex</option>
-                                            <option value="text">Text</option>
+                                            <option value="text">文本</option>
                                         </select>
                                     </div>
                                     <div class="interval-wrap">
@@ -371,7 +380,20 @@
                                     </div>
                                 </div>
                                 <textarea id="send-input" rows="4" placeholder="输入十六进制或文本内容（如: AB CD EF）..." spellcheck="false"></textarea>
-                            </div></section>
+                </div>
+                <div class="command-panel" id="command-panel" role="tabpanel" aria-labelledby="send-tab-commands" hidden>
+                    <div class="command-toolbar">
+                        <div class="command-create-actions">
+                            <button id="command-add" type="button" class="command-button">新建指令</button>
+                            <button id="command-add-group" type="button" class="command-button">新建指令组</button>
+                        </div>
+                        <span id="command-status" role="status" aria-live="polite">拖动排序，名称直接修改</span>
+                        <button id="command-stop" type="button" class="command-button command-stop" disabled>停止发送</button>
+                    </div>
+                    <p id="command-error" class="command-error" role="alert" hidden></p>
+                    <div id="command-tree" class="command-tree" aria-label="一键发送指令列表"></div>
+                </div>
+            </section>
         </main>
         <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-orientation="vertical" aria-label="调整监视台配置宽度"></div>
         <aside class="channel-sidebar" id="channel-sidebar" aria-label="监视台配置">
@@ -813,6 +835,9 @@
 
     <script src="projectLimits.js"></script>
     <script src="byteUtils.js"></script>
+    <script src="commandLibrary.js"></script>
+    <script src="commandRunner.js"></script>
+    <script src="commandSendView.js"></script>
     <script src="frameBuffer.js"></script>
     <script src="frameNavigation.js"></script>
     <script src="plotMath.js"></script>
@@ -830,6 +855,7 @@
     <script src="monitorDisplayView.js"></script>
     <script src="configView.js"></script>
     <script src="configStore.js"></script>
+    <script src="waveGpuRenderer.js"></script>
     <script src="plotter.js"></script>
     <script src="numericCodec.js"></script>
     <script src="dataParser.js"></script>
@@ -903,6 +929,7 @@
     <script src="systemResponseFrames.js"></script>
     <script src="computedFrames.js"></script>
     <script src="sampleRate.js"></script>
+    <script src="captureMemory.js"></script>
     <script src="captureService.js"></script>
     <script src="widgetConfig.js"></script>
     <script src="widgetViewport.js"></script>

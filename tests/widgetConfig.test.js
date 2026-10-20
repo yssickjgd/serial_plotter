@@ -2,6 +2,35 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { migrateWorkspaceConfig, validateWorkspaceConfig } = require('../widgetConfig');
 
+test('interface layout defaults migrate and custom panel preferences roundtrip with strict validation', () => {
+    const config = migrateWorkspaceConfig(null);
+    assert.deepEqual(config.uiLayout, { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200 });
+    config.uiLayout = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 300 };
+    assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(config))).uiLayout, config.uiLayout);
+    assert.deepEqual(migrateWorkspaceConfig({}).uiLayout, migrateWorkspaceConfig(null).uiLayout);
+    for (const input of [null, [], 'bad', { leftWidth: 239 }, { rightWidth: 701 }, { sendHeight: 159 },
+        { sendHeight: Infinity }, { leftOpen: 'false' }, { rightOpen: 0 }]) {
+        assert.throws(() => validateWorkspaceConfig({ ...config, uiLayout: input }), /界面布局/);
+    }
+});
+
+test('command sending defaults migrate and nested commands roundtrip without weakening import validation', () => {
+    const config = migrateWorkspaceConfig(null);
+    assert.deepEqual(config.send.commands, []);
+    assert.equal(config.send.tab, 'regular');
+    config.send.tab = 'commands';
+    config.send.commands = [{ id: 'g', type: 'group', name: '初始化', children: [
+        { id: 'a', type: 'command', name: '启动', mode: 'hex', content: 'AA', repeat: 2, interval: .1 }
+    ] }];
+    const saved = validateWorkspaceConfig(config);
+    assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(saved))), saved);
+    assert.equal(saved.send.commands[0].children[0].repeat, 2);
+    config.send.commands.push({ ...config.send.commands[0] });
+    assert.throws(() => validateWorkspaceConfig(config), /指令/);
+    config.send.commands = []; config.send.tab = 'bad';
+    assert.throws(() => validateWorkspaceConfig(config), /发送/);
+});
+
 test('legacy separate response counts merge by the previously displayed object and save only the shared count', () => {
     for (const [plotContent, expected] of [['samples', '64'], ['response', '128']]) {
         const config = migrateWorkspaceConfig(null);
@@ -99,7 +128,8 @@ test('import rejects coerced widget identities and malformed send settings befor
         assert.deepEqual(config, before);
     }
     for (const send of [{ interval: '0', unit: 'hz', mode: 'hex' }, { interval: '0.5', unit: 's', mode: 'text' }])
-        assert.deepEqual(validateWorkspaceConfig({ ...migrateWorkspaceConfig(null), send }).send, send);
+        assert.deepEqual(validateWorkspaceConfig({ ...migrateWorkspaceConfig(null), send }).send,
+            { ...send, tab: 'regular', commands: [] });
 });
 
 test('unknown config versions and coordinates outside workspace bounds are rejected', () => {

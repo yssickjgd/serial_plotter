@@ -2,6 +2,97 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
 
+test('panel dimensions and explicit collapse preferences survive save reload and JSON import', async t => {
+    const f = boot(t);
+    f.get('main-display').clientHeight = 1000;
+    f.get('navigation-panel').clientHeight = 70;
+    for (const [handleId, panelId, width, dx] of [
+        ['h-resizer', 'sidebar', 268, 87], ['right-resizer', 'channel-sidebar', 320, -90]
+    ]) {
+        f.get(panelId).clientWidth = width;
+        f.get(handleId).dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 7, clientX: 500 });
+        f.document.dispatchEvent({ type: 'pointermove', pointerId: 7, clientX: 500 + dx });
+        f.document.dispatchEvent({ type: 'pointerup', pointerId: 7 });
+    }
+    f.click('workspace-toggle-left');
+    f.get('global-send').clientHeight = 200;
+    f.get('send-resizer').dispatchEvent({ type: 'keydown', key: 'ArrowUp' });
+    const expected = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 220 };
+    assert.deepEqual(JSON.parse(JSON.stringify(f.app.getConfig().uiLayout)), expected);
+    await f.tick(200);
+    assert.deepEqual(JSON.parse(f.storage.get('serialplot_v3_config')).uiLayout, expected);
+    const restored = boot(t, JSON.parse(f.storage.get('serialplot_v3_config')));
+    assert.equal(restored.get('sidebar').style['--sidebar-w'], '355px');
+    assert.equal(restored.get('channel-sidebar').style['--channel-sidebar-w'], '410px');
+    assert.equal(restored.get('app-container').classList.contains('left-collapsed'), true);
+    assert.equal(restored.get('workspace-toggle-right').getAttribute('aria-expanded'), 'true');
+    restored.get('main-display').clientHeight = 1000;
+    restored.get('navigation-panel').clientHeight = 70;
+    restored.window.dispatchEvent({ type: 'resize' });
+    assert.equal(restored.get('global-send').style.height, '220px');
+    f.app.applyConfig({ ...f.app.getConfig(), uiLayout: { ...expected, leftOpen: true, rightOpen: false, sendHeight: 310 } });
+    assert.equal(f.get('global-send').style.height, '310px');
+    assert.equal(f.get('app-container').classList.contains('left-collapsed'), false);
+    assert.equal(f.get('app-container').classList.contains('right-collapsed'), true);
+    const before = JSON.stringify(f.app.getConfig());
+    assert.throws(() => f.app.applyConfig({ ...f.app.getConfig(), uiLayout: { leftWidth: -1 } }), /界面布局/);
+    assert.equal(JSON.stringify(f.app.getConfig()), before);
+});
+
+test('sender pointer resize saves only the completed drag and cancellation preserves the saved height', async t => {
+    const f = boot(t), sender = f.get('global-send'), handle = f.get('send-resizer');
+    f.get('main-display').clientHeight = 1000;
+    f.get('navigation-panel').clientHeight = 70;
+    sender.clientHeight = 200;
+    const dragTo = end => {
+        handle.dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 9, clientY: 500 });
+        f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 400 });
+        f.document.dispatchEvent({ type: end, pointerId: 9 });
+    };
+    dragTo('pointercancel');
+    assert.equal(f.app.getConfig().uiLayout.sendHeight, 200);
+    dragTo('pointerup');
+    assert.equal(f.app.getConfig().uiLayout.sendHeight, 300);
+    await f.tick(200);
+    assert.equal(JSON.parse(f.storage.get('serialplot_v3_config')).uiLayout.sendHeight, 300);
+});
+
+test('temporary compact layout and sender clamping preserve imported layout preferences', t => {
+    const f = boot(t);
+    const preferred = { leftWidth: 350, rightWidth: 400, leftOpen: true, rightOpen: false, sendHeight: 350 };
+    f.window.innerWidth = 900;
+    f.get('main-display').clientHeight = 380;
+    f.get('navigation-panel').clientHeight = 70;
+    f.app.applyConfig({ ...f.app.getConfig(), uiLayout: preferred });
+    assert.equal(f.get('app-container').classList.contains('left-collapsed'), true);
+    assert.equal(f.get('global-send').style.height, '160px');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.app.getConfig().uiLayout)), preferred);
+    f.window.innerWidth = 1800;
+    f.get('main-display').clientHeight = 1000;
+    f.window.dispatchEvent({ type: 'resize' });
+    assert.equal(f.get('global-send').style.height, '350px');
+    assert.equal(f.get('app-container').classList.contains('left-collapsed'), false);
+    assert.equal(f.get('app-container').classList.contains('right-collapsed'), true);
+});
+
+test('buffer memory budget defaults to 4096 MiB validates input and survives config import', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    assert.equal(f.get('capture-memory-mib').value, '4096');
+    assert.equal(f.app.service.memoryUsage().limitBytes, 4096 * 1048576);
+    f.get('capture-memory-mib').value = '64';
+    f.get('capture-memory-mib').dispatchEvent({ type: 'change' });
+    assert.equal(f.app.service.memoryUsage().limitBytes, 64 * 1048576);
+    assert.equal(f.app.getConfig().global.captureMemoryMiB, 64);
+    f.get('capture-memory-mib').value = '-1';
+    f.get('capture-memory-mib').dispatchEvent({ type: 'change' });
+    assert.equal(f.app.service.memoryUsage().limitBytes, 64 * 1048576);
+    const next = f.app.getConfig(); next.global.captureMemoryMiB = 128;
+    f.app.applyConfig(next);
+    assert.equal(f.app.service.memoryUsage().limitBytes, 128 * 1048576);
+    await f.tick(1000);
+    assert.match(f.get('capture-memory-status').textContent, /128 MiB/);
+});
+
 test('P toggles global capture once per press and follows the same pause state as the button', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const widget = f.app.widgets.create({ type: 'wave' });
@@ -43,6 +134,308 @@ const config = widgets => ({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType:
 const wave = id => ({ id, type: 'wave', title: id, settings: {} });
 const bytes = (id, settings = {}) => ({ id, type: 'byte', title: id, settings: { captureMode: 'hex', ...settings } });
 function boot(t, state) { const f = bootApplication(state); t.after(() => f.app?.dispose()); return f; }
+
+test('one-click commands persist nested editing and tab state while ordinary sending remains independent', async t => {
+    const f = boot(t), view = f.app.commandView;
+    assert.ok(view, 'global command view is installed');
+    f.click('send-tab-commands');
+    assert.equal(f.get('send-panel').hidden, true);
+    assert.equal(f.get('command-panel').hidden, false);
+    f.click('command-add-group');
+    const groupId = view.selectedId;
+    view.add('command', groupId);
+    const commandId = view.selectedId;
+    const content = f.get('command-tree').querySelector('[data-field="content"]');
+    content.value = '00 FF'; content.dispatchEvent({ type: 'input' });
+    const saved = f.app.getConfig();
+    assert.equal(saved.send.tab, 'commands');
+    assert.equal(saved.send.commands[0].children[0].content, '00 FF');
+    const transport = [];
+    const adapter = f.app.serialAdapter;
+    adapter.send = async bytes => transport.push([...bytes]);
+    adapter.onConnectStatusChange(true);
+    assert.equal(await f.app.commandRunner.start(groupId), true);
+    assert.deepEqual(transport, [[0, 255]]);
+    assert.equal(f.app.service.stats.txBytes, 2);
+    f.click('send-tab-regular');
+    f.get('send-input').value = 'CC'; await f.app.sendController.handleClick();
+    assert.deepEqual(transport, [[0, 255], [204]]);
+    assert.equal(f.app.commandLibrary.find(commandId).content, '00 FF');
+    f.app.applyConfig(saved);
+    assert.equal(f.get('command-panel').hidden, false);
+    assert.equal(f.app.commandLibrary.find(commandId).content, '00 FF');
+});
+
+test('one-click send stops on disconnect and import rejection preserves the active command tree', async t => {
+    const f = boot(t), adapter = f.app.serialAdapter;
+    const id = f.app.commandLibrary.add('command');
+    f.app.commandLibrary.update(id, { content: 'AA', repeat: 3, interval: 1 });
+    const sent = [];
+    adapter.send = async bytes => sent.push([...bytes]); adapter.onConnectStatusChange(true);
+    const run = f.app.commandRunner.start(id);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    adapter.onConnectStatusChange(false);
+    assert.equal(await run, false);
+    await f.tick(2000); assert.equal(sent.length, 1);
+    const saved = f.app.getConfig(), invalid = JSON.parse(JSON.stringify(saved));
+    invalid.send.commands.push(invalid.send.commands[0]);
+    assert.throws(() => f.app.applyConfig(invalid), /指令/);
+    assert.equal(f.app.commandLibrary.find(id).content, 'AA');
+});
+
+test('one-click editor renders names and text safely and regular send cancels a waiting sequence', async t => {
+    const f = boot(t), adapter = f.app.serialAdapter, view = f.app.commandView;
+    const id = view.add('command');
+    f.app.commandLibrary.update(id, { name: '<script>test</script>', content: 'AA', repeat: 3, interval: 1 });
+    view.render();
+    assert.equal(f.get('command-tree').querySelector('script'), null);
+    assert.equal(f.get('command-tree').querySelector('.command-name').value, '<script>test</script>');
+    const sent = [];
+    adapter.send = async bytes => sent.push([...bytes]); adapter.onConnectStatusChange(true);
+    const run = f.app.commandRunner.start(id);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    f.get('send-input').value = 'CC';
+    await f.app.sendController.handleClick();
+    assert.equal(await run, false);
+    assert.deepEqual(sent, [[170], [204]]);
+    const listeners = f.get('command-add').listeners.get('click').size;
+    assert.ok(listeners > 0); f.app.dispose();
+    assert.equal(f.get('command-add').listeners.get('click').size, 0);
+});
+
+test('command tree editor supports regrouping sorting folding inline errors and busy state', async t => {
+    const f = boot(t), view = f.app.commandView, library = f.app.commandLibrary;
+    const groupId = view.add('group'), a = view.add('command', groupId), b = view.add('command', groupId);
+    library.update(a, { content: 'AA' }); library.update(b, { content: 'BB' }); view.render();
+    const tree = f.get('command-tree');
+    const row = () => tree.querySelector(`[data-command-id="${b}"]`).querySelector('.command-row');
+    const field = name => name === 'parent' || name === 'name' ? row().querySelector(`[data-field="${name}"]`)
+        : tree.querySelector('.command-editor').querySelector(`[data-field="${name}"]`);
+    field('repeat').value = '0'; field('repeat').dispatchEvent({ type: 'change' });
+    assert.equal(f.get('command-error').hidden, false);
+    assert.equal(library.find(b).repeat, 1);
+    field('repeat').value = '2'; field('repeat').dispatchEvent({ type: 'change' });
+    assert.equal(library.find(b).repeat, 2);
+    const action = text => row().querySelector('.command-row-actions').querySelectorAll('button').find(button => button.textContent === text);
+    action('上移').click();
+    assert.equal(library.find(groupId).children[0].id, b);
+    field('parent').value = ''; field('parent').dispatchEvent({ type: 'change' });
+    assert.equal(library.location(b).parent, null);
+    assert.equal(library.find(groupId).children.length, 1);
+    view.selectedId = groupId; view.render();
+    const fold = tree.querySelector(`[data-command-id="${groupId}"]`).querySelector('.command-disclosure');
+    fold.click(); assert.equal(library.find(groupId).collapsed, true);
+    assert.equal(tree.querySelector(`[data-command-id="${a}"]`), null);
+    view.setState({ running: true, currentId: b, message: '发送中' });
+    assert.equal(f.get('command-add').disabled, true);
+    assert.equal(field('name').disabled, true);
+    assert.equal(f.get('command-stop').disabled, false);
+    view.setState({ running: false, message: '完成' });
+    assert.equal(f.get('command-add').disabled, false);
+});
+
+test('command rows expose identity and group run options inline while command payloads still expand', t => {
+    const f = boot(t), view = f.app.commandView, tree = f.get('command-tree');
+    const groupId = view.add('group'), id = view.add('command', groupId);
+    const row = nodeId => tree.querySelector(`[data-command-id="${nodeId}"]`).querySelector('.command-row');
+    const name = row(groupId).querySelector('.command-name');
+    assert.equal(name.tagName, 'INPUT');
+    name.value = '初始化'; name.dispatchEvent({ type: 'change' });
+    assert.equal(f.app.commandLibrary.find(groupId).name, '初始化');
+    assert.equal(row(id).querySelector('[data-field="parent"]').options.find(option => option.value === groupId).textContent, '初始化');
+    assert.ok(row(groupId).querySelector('[data-field="parent"]'));
+    assert.ok(row(groupId).querySelector('[data-field="repeat"]'));
+    assert.ok(row(groupId).querySelector('[data-field="interval"]'));
+    row(groupId).querySelector('.command-disclosure').click();
+    assert.equal(f.app.commandLibrary.find(groupId).collapsed, true);
+    assert.equal(tree.querySelector(`[data-command-id="${id}"]`), null);
+    assert.equal(row(groupId).querySelector('.command-edit'), null);
+    assert.equal(tree.querySelector('.command-editor'), null);
+    row(groupId).querySelector('.command-disclosure').click();
+    assert.equal(view.selectedId, id);
+    const editor = tree.querySelector('.command-editor');
+    assert.equal(editor.id, `command-editor-${id}`);
+    assert.ok(row(id).querySelector('[data-field="name"]'));
+    assert.ok(row(id).querySelector('[data-field="parent"]'));
+    assert.equal(editor.querySelector('[data-field="name"]'), null);
+    assert.equal(editor.querySelector('[data-field="parent"]'), null);
+    assert.ok(editor.querySelector('.command-content-heading').querySelector('[data-field="mode"]'));
+    assert.equal(editor.querySelector('[data-field="content"]').rows, 2);
+    assert.ok(editor.querySelector('.command-send-options').querySelector('[data-field="repeat"]'));
+    assert.ok(editor.querySelector('.command-send-options').querySelector('[data-field="interval"]'));
+    row(id).querySelector('.command-disclosure').click();
+    assert.equal(view.selectedId, null);
+    assert.equal(row(id).querySelector('.command-disclosure').getAttribute('aria-expanded'), 'false');
+});
+
+test('command sorting keeps keyboard focus on the reordered item and uses its title at a list boundary', t => {
+    const f = boot(t), tree = f.get('command-tree'), view = f.app.commandView;
+    Object.getPrototypeOf(tree).focus = function () { if (!this.disabled) f.document.activeElement = this; };
+    view.add('command'); view.add('command');
+    const id = view.add('command');
+    const up = tree.querySelector(`[data-command-id="${id}"]`).querySelector('.command-row-actions').querySelectorAll('button').find(button => button.textContent === '上移');
+    up.focus(); up.click();
+    assert.ok(tree.contains(f.document.activeElement), 'rebuilding the editor must not leave focus on its detached old button');
+    assert.equal(f.document.activeElement.dataset.commandAction, 'move-up');
+    f.document.activeElement.click();
+    assert.equal(f.app.commandLibrary.location(id).index, 0);
+    assert.ok(tree.contains(f.document.activeElement));
+    assert.equal(f.document.activeElement.dataset.commandAction, 'name');
+});
+
+test('native command dragging previews insertion and moves across groups or back to the root', t => {
+    const f = boot(t), view = f.app.commandView, library = f.app.commandLibrary, tree = f.get('command-tree');
+    const g = view.add('group'), a = view.add('command', g), b = view.add('command'), c = view.add('command');
+    const row = id => tree.querySelector(`[data-command-id="${id}"]`).querySelector('.command-row');
+    const transfer = { setData(type, id) { this.type = type; this.id = id; } };
+    const drag = id => row(id).querySelector('.command-drag-handle').dispatchEvent({ type: 'dragstart', dataTransfer: transfer });
+    drag(b);
+    row(c).dispatchEvent({ type: 'dragover', clientY: 599, dataTransfer: transfer });
+    assert.equal(row(c).classList.contains('command-drop-after'), true);
+    row(c).dispatchEvent({ type: 'drop', dataTransfer: transfer });
+    assert.deepEqual(Array.from(library.nodes, node => node.id), [g, c, b]);
+    drag(b);
+    row(g).dispatchEvent({ type: 'dragover', clientY: 300, dataTransfer: transfer });
+    assert.equal(row(g).classList.contains('command-drop-inside'), true);
+    row(g).dispatchEvent({ type: 'drop', dataTransfer: transfer });
+    assert.equal(library.location(b).parent.id, g);
+    assert.deepEqual(Array.from(library.find(g).children, node => node.id), [a, b]);
+    drag(b);
+    const root = tree.querySelector('.command-root-drop');
+    assert.equal(root.hidden, false);
+    root.dispatchEvent({ type: 'dragover', bubbles: true, dataTransfer: transfer });
+    root.dispatchEvent({ type: 'drop', bubbles: true, dataTransfer: transfer });
+    assert.equal(library.location(b).parent, null);
+    assert.equal(tree.querySelector('.command-root-drop').hidden, true);
+    drag(g);
+    const saved = JSON.stringify(library.serialize());
+    row(a).dispatchEvent({ type: 'dragover', clientY: 0, dataTransfer: transfer });
+    assert.equal(transfer.dropEffect, 'none');
+    row(a).dispatchEvent({ type: 'drop', dataTransfer: transfer });
+    assert.equal(JSON.stringify(library.serialize()), saved);
+    drag(c); f.document.dispatchEvent({ type: 'keydown', key: 'Escape' });
+    assert.equal(view.dragId, null);
+    assert.equal(tree.querySelector('.command-root-drop').hidden, true);
+    assert.deepEqual(Array.from(f.app.getConfig().send.commands, node => node.id), [g, c, b]);
+});
+
+test('inline group settings and recursive copies persist independently and block dragging while sending', t => {
+    const f = boot(t), view = f.app.commandView, library = f.app.commandLibrary, tree = f.get('command-tree');
+    const g = view.add('group'), a = view.add('command', g);
+    library.update(a, { content: 'AA' }); view.render();
+    const row = id => tree.querySelector(`[data-command-id="${id}"]`).querySelector('.command-row');
+    for (const [field, value] of [['repeat', '3'], ['interval', '.25']]) {
+        const input = row(g).querySelector(`[data-field="${field}"]`); input.value = value; input.dispatchEvent({ type: 'change' });
+    }
+    row(g).querySelectorAll('button').find(button => button.textContent === '复制').click();
+    const copyId = view.selectedId;
+    assert.notEqual(copyId, g);
+    assert.equal(library.find(copyId).repeat, 3); assert.equal(library.find(copyId).interval, .25);
+    const copyName = row(copyId).querySelector('.command-name');
+    copyName.value = '副本测试'; copyName.dispatchEvent({ type: 'change' });
+    assert.notEqual(library.find(g).name, '副本测试');
+    assert.equal(library.find(copyId).children[0].content, 'AA');
+    const saved = f.app.getConfig(); f.app.applyConfig(saved);
+    assert.equal(library.find(copyId).name, '副本测试'); assert.equal(library.find(copyId).repeat, 3);
+    assert.equal(row(copyId).querySelector('.command-edit'), null);
+    const parent = row(a).querySelector('[data-field="parent"]');
+    parent.dispatchEvent({ type: 'focus' });
+    assert.ok(parent.options.some(option => option.value === copyId));
+    view.setState({ running: true, currentId: a, message: '发送中' });
+    const handle = row(g).querySelector('.command-drag-handle');
+    assert.equal(handle.draggable, false);
+    handle.dispatchEvent({ type: 'dragstart', dataTransfer: { setData() {} } });
+    assert.equal(view.dragId, null);
+    assert.equal(row(g).querySelector('.command-name').disabled, true);
+});
+
+test('a send button rejects an invalid inline draft instead of sending with the last valid group count', async t => {
+    const f = boot(t), view = f.app.commandView, library = f.app.commandLibrary, tree = f.get('command-tree');
+    const g = view.add('group'), a = view.add('command', g);
+    library.update(a, { content: 'AA' }); view.render();
+    const writes = []; f.app.serialAdapter.send = async bytes => writes.push([...bytes]);
+    f.app.serialAdapter.onConnectStatusChange(true);
+    const item = tree.querySelector(`[data-command-id="${g}"]`), repeat = item.querySelector('[data-field="repeat"]');
+    repeat.value = '0'; repeat.dispatchEvent({ type: 'change' });
+    item.querySelector('.command-send').click();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    assert.equal(writes.length, 0);
+    assert.equal(f.get('command-error').hidden, false);
+    repeat.value = '2'; repeat.dispatchEvent({ type: 'change' });
+    item.querySelector('.command-send').click();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.deepEqual(writes, [[170], [170]]);
+});
+
+test('command tabs share one sender height and keep the separator fixed after a resize and mode switch', t => {
+    const f = boot(t), handle = f.get('send-resizer'), input = f.get('send-input'), tree = f.get('command-tree'), sender = f.get('global-send');
+    f.get('send-tab-regular').dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+    assert.equal(f.get('send-panel').hidden, true);
+    assert.equal(f.get('send-tab-commands').getAttribute('aria-selected'), 'true');
+    f.get('main-display').clientHeight = 700;
+    f.get('navigation-panel').clientHeight = 70;
+    sender.clientHeight = 200;
+    handle.dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 9, clientY: 600 });
+    f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 550 });
+    assert.equal(sender.style.height, '250px');
+    assert.equal(input.style.height, undefined);
+    assert.equal(tree.style.height, undefined);
+    f.document.dispatchEvent({ type: 'pointerup', pointerId: 9 });
+    f.get('send-tab-commands').dispatchEvent({ type: 'keydown', key: 'Home' });
+    assert.equal(f.get('send-panel').hidden, false);
+    assert.equal(f.get('command-panel').hidden, true);
+    assert.equal(sender.style.height, '250px');
+    f.click('send-tab-commands');
+    assert.equal(sender.style.height, '250px');
+});
+
+test('parent selections expose their complete path on hover and refresh after a group rename', t => {
+    const f = boot(t), view = f.app.commandView, tree = f.get('command-tree');
+    const g = view.add('group'), nested = view.add('group', g), id = view.add('command', nested);
+    f.app.commandLibrary.update(g, { name: '完整的上级指令组名称' });
+    f.app.commandLibrary.update(nested, { name: '完整的下级指令组名称' }); view.render();
+    const row = nodeId => tree.querySelector(`[data-command-id="${nodeId}"]`).querySelector('.command-row');
+    const select = row(id).querySelector('[data-field="parent"]');
+    assert.equal(select.title, '完整的上级指令组名称 / 完整的下级指令组名称');
+    select.dispatchEvent({ type: 'focus' });
+    const option = select.options.find(item => item.value === nested);
+    assert.equal(option.title, select.title);
+    const name = row(g).querySelector('.command-name'); name.value = '新组名'; name.dispatchEvent({ type: 'change' });
+    assert.equal(select.title, '新组名 / 完整的下级指令组名称');
+    assert.equal(option.title, select.title);
+});
+
+test('deleting a nonempty command requires a second click while an empty command can be removed directly', t => {
+    const f = boot(t), view = f.app.commandView, library = f.app.commandLibrary, tree = f.get('command-tree');
+    const id = view.add('command'); library.update(id, { content: 'AA' }); view.render();
+    const remove = nodeId => tree.querySelector(`[data-command-id="${nodeId}"]`).querySelector('.command-delete');
+    remove(id).click();
+    assert.ok(library.find(id)); assert.match(remove(id).textContent, /确认删除/);
+    remove(id).click(); assert.equal(library.find(id), null);
+    const empty = view.add('command'); remove(empty).click(); assert.equal(library.find(empty), null);
+    const whitespace = view.add('command'); library.update(whitespace, { content: ' ' }); view.render();
+    remove(whitespace).click(); assert.ok(library.find(whitespace));
+    remove(whitespace).click(); assert.equal(library.find(whitespace), null);
+});
+
+test('starting a group cancels ordinary repeats while serializing behind an already submitted write', async t => {
+    const f = boot(t), adapter = f.app.serialAdapter;
+    let finish;
+    const sent = [];
+    adapter.send = bytes => { sent.push([...bytes]); return sent.length === 1
+        ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(); };
+    adapter.onConnectStatusChange(true);
+    f.get('send-input').value = 'AA'; f.change('send-interval', '1');
+    const ordinary = f.app.sendController.handleClick();
+    const id = f.app.commandLibrary.add('command');
+    f.app.commandLibrary.update(id, { content: 'BB' });
+    const groupRun = f.app.commandRunner.start(id);
+    assert.equal(sent.length, 1);
+    finish(); await Promise.all([ordinary, groupRun]);
+    assert.equal(f.app.sendController.timer, null);
+    assert.deepEqual(sent, [[170], [187]]);
+    assert.equal(f.app.service.stats.txBytes, 2);
+});
 
 test('wave axes use shared arrival-based sampling rate instead of a jittering statistics timer', async t => {
     const f = boot(t, config([wave('w1'), wave('w2'), bytes('b1', { captureMode: 'number' })]));
@@ -188,6 +581,26 @@ test('source and per-view draw rate statistics return to zero when idle', async 
     await f.tick(); await f.tick();
     assert.match(widget.refs['stat-plot-fps'].textContent, /0 FPS/);
     assert.equal(f.app.widgets.widgets.get('b1').refs['stat-fps-value'].textContent, '0 f/s');
+});
+
+test('wave FPS tooltip distinguishes the actual GPU from the requested performance preference', async t => {
+    const f = boot(t, config([wave('w1')]));
+    const widget = f.app.widgets.widgets.get('w1');
+    const renderer = { available: true, rendererName: 'ANGLE (Intel, Intel(R) UHD Graphics, D3D11)',
+        render: () => true, resize() {}, dispose() {} };
+    widget.view.gpuRenderer = renderer;
+    await f.tick();
+    assert.match(widget.refs['stat-plot-fps'].title, /Intel\(R\) UHD Graphics/);
+    renderer.rendererName = 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU, D3D11)';
+    await f.tick();
+    assert.match(widget.refs['stat-plot-fps'].title, /NVIDIA GeForce RTX 4060/);
+    assert.doesNotMatch(widget.refs['stat-plot-fps'].title, /Intel/);
+    renderer.rendererName = '';
+    await f.tick();
+    assert.match(widget.refs['stat-plot-fps'].title, /未提供/);
+    renderer.available = false;
+    await f.tick();
+    assert.match(widget.refs['stat-plot-fps'].title, /Canvas 2D/);
 });
 
 test('application disposal stops timers and removes views without saving an empty layout', async t => {
@@ -448,7 +861,7 @@ test('both sidebar resizers update their CSS width constraint and stop on pointe
         f.get(panelId).clientWidth = width;
         f.get(handleId).dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 7, clientX: 500 });
         f.document.dispatchEvent({ type: 'pointermove', pointerId: 8, clientX: 0 });
-        assert.equal(f.get(panelId).style[variable], undefined);
+        assert.equal(f.get(panelId).style[variable], width + 'px');
         f.document.dispatchEvent({ type: 'pointermove', pointerId: 7, clientX: 500 + dx });
         assert.equal(f.get(panelId).style[variable], expected);
         f.document.dispatchEvent({ type: 'pointerup', pointerId: 7 });
@@ -519,32 +932,30 @@ test('widened sidebars trigger compact layout before the workspace becomes unrea
     assert.equal(f.get('app-container').classList.contains('compact-layout'), true);
 });
 
-test('the global sender resizes upward while reserving workspace space and supports cancellation', t => {
-    const f = boot(t), input = f.get('send-input'), handle = f.get('send-resizer');
+test('the shared global sender resizes upward while reserving workspace space and supports cancellation', t => {
+    const f = boot(t), sender = f.get('global-send'), handle = f.get('send-resizer');
     assert.ok(handle, 'the global sender needs its own separator');
-    input.offsetHeight = 60; input.clientHeight = 60;
     f.get('main-display').clientHeight = 620;
     f.get('navigation-panel').clientHeight = 70;
-    f.get('global-send').clientHeight = 150;
+    sender.clientHeight = 200;
     f.get('monitor-workspace').clientHeight = 400;
     f.get('workspace-toolbar').offsetHeight = 28;
     handle.dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 9, clientY: 600 });
-    f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 400 });
-    assert.equal(input.style.height, '260px');
+    f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 500 });
+    assert.equal(sender.style.height, '300px');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: -1000 });
-    assert.equal(input.style.height, '290px', 'reserve space for the workspace toolbar and visible help');
+    assert.equal(sender.style.height, '380px', 'reserve space for the workspace toolbar and visible help');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 1000 });
-    assert.equal(input.style.height, '60px', 'retain the original four-line minimum');
+    assert.equal(sender.style.height, '160px', 'retain room for the four-line input and panel controls');
     f.document.dispatchEvent({ type: 'pointermove', pointerId: 9, clientY: 400 });
     f.document.dispatchEvent({ type: 'pointerup', pointerId: 8 });
     f.document.dispatchEvent({ type: 'pointercancel', pointerId: 9 });
-    assert.equal(input.style.height, '60px');
+    assert.equal(sender.style.height, '200px');
     assert.equal(f.document.body.style.userSelect, undefined);
-    input.clientHeight = 260; input.style.height = '260px';
-    f.get('global-send').clientHeight = 350;
+    sender.clientHeight = 350; sender.style.height = '350px';
     f.get('main-display').clientHeight = 400;
     f.window.dispatchEvent({ type: 'resize' });
-    assert.equal(input.style.height, '70px', 'a smaller window must reserve the toolbar and visible help');
+    assert.equal(sender.style.height, '160px', 'a smaller window must reserve the toolbar and visible help');
 });
 
 test('importing malformed JSON or overlapping rectangles never destroys the current view', async t => {

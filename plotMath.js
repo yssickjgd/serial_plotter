@@ -1,9 +1,9 @@
 /** Return chronological extrema for each horizontal pixel bucket. */
-function bucketExtrema(values, pixels) {
-    const size = Math.max(1, Math.ceil(values.length / Math.max(1, Math.floor(pixels))));
+function bucketExtrema(values, pixels, first = 0, limit = values.length) {
+    const size = Math.max(1, Math.ceil((limit - first) / Math.max(1, Math.floor(pixels))));
     const result = [];
-    for (let start = 0; start < values.length; start += size) {
-        const end = Math.min(values.length, start + size);
+    for (let start = first; start < limit; start += size) {
+        const end = Math.min(limit, start + size);
         let minIndex = -1, maxIndex = -1;
         for (let i = start; i < end; i++) {
             if (!Number.isFinite(values[i])) continue;
@@ -19,10 +19,10 @@ function bucketExtrema(values, pixels) {
             result.push({ index: minIndex, value: values[minIndex] });
         }
     }
-    if (values.length && Number.isFinite(values[0]) && result[0].index !== 0)
-        result.unshift({ index: 0, value: values[0] });
-    if (values.length && Number.isFinite(values[values.length - 1]) && result[result.length - 1].index !== values.length - 1)
-        result.push({ index: values.length - 1, value: values[values.length - 1] });
+    if (limit > first && Number.isFinite(values[first]) && result[0]?.index !== first)
+        result.unshift({ index: first, value: values[first] });
+    if (limit > first && Number.isFinite(values[limit - 1]) && result.at(-1)?.index !== limit - 1)
+        result.push({ index: limit - 1, value: values[limit - 1] });
     return result;
 }
 
@@ -36,9 +36,9 @@ function bucketTraceExtrema(values, pixels) {
         while (end < values.length && Number.isFinite(values[end])) end++;
         if (end > start) {
             const count = Math.max(1, pixels * (end - start) / values.length);
-            const bucket = bucketExtrema(values.slice(start, end), count);
-            bucket.forEach((point, index) => points.push({ ...point, index: point.index + start,
-                ...(index === 0 && start > 0 ? { break: true } : {}) }));
+            const bucket = bucketExtrema(values, count, start, end);
+            if (start > 0) bucket[0].break = true;
+            for (const point of bucket) points.push(point);
         }
         start = end + 1;
     }

@@ -28,6 +28,34 @@ class ComputedFrames {
     get values() { return this._values; }
     get length() { return this.raw.length; }
     get capacity() { return this.raw.capacity; }
+    get estimatedMemoryBytes() {
+        let bytes = this.raw.estimatedMemoryBytes + this.engine.requiredMemoryBytes;
+        if (this.replayEngine) bytes += this.replayEngine.requiredMemoryBytes;
+        for (const columns of new Set([this.columns, this.replayColumns])) if (columns)
+            for (const chunks of columns.values()) for (const chunk of chunks) if (chunk) bytes += chunk.byteLength;
+        return bytes;
+    }
+    discardOldest(count) {
+        const removed = this.raw.discardOldest(count);
+        if (!removed) return 0;
+        for (const chunks of this.columns.values()) for (let i = 0; i < chunks.length; i++)
+            if (!this.raw.frames[i]) delete chunks[i];
+        this._values = [...this.raw.values, this.columns];
+        this.revision++;
+        return removed;
+    }
+    estimateAppendMemory(count, byteLength, frameLength) {
+        let bytes = this.raw.estimateAppendMemory(count, byteLength, frameLength);
+        count = Math.min(this.capacity, Math.max(1, Math.ceil(count)));
+        const start = (this.raw.head + this.length) % this.raw.storageCapacity;
+        for (let offset = 0; offset < count;) {
+            const slot = (start + offset) % this.raw.storageCapacity, chunk = Math.floor(slot / COMPUTED_CHUNK_SIZE);
+            for (const definition of this.definitions) if (definition.type === 'formula' && !this.columns.get(definition.number)?.[chunk])
+                bytes += COMPUTED_CHUNK_SIZE * 8;
+            offset += Math.min(count - offset, COMPUTED_CHUNK_SIZE - slot % COMPUTED_CHUNK_SIZE, this.raw.storageCapacity - slot);
+        }
+        return bytes;
+    }
     _cancelYields() {
         for (const [id, resolve] of this.yieldTimers) { clearTimeout(id); resolve(); }
         this.yieldTimers.clear();
@@ -45,6 +73,22 @@ class ComputedFrames {
         if (channel < this.raw.channelCount) return this.raw.getValue(channel, index);
         const slot = this._slot(index);
         return this.columns.get(channel + 1)?.[Math.floor(slot / COMPUTED_CHUNK_SIZE)]?.[slot % COMPUTED_CHUNK_SIZE] ?? NaN;
+    }
+    copyChannel(channel, start = 0, end = this.length) {
+        if (channel < this.raw.channelCount) return this.raw.copyChannel(channel, start, end);
+        const first = Math.max(0, Math.min(this.length, Math.floor(start)));
+        const last = Math.max(first, Math.min(this.length, Math.floor(end)));
+        const result = new Float64Array(last - first);
+        const chunks = this.columns.get(channel + 1);
+        for (let offset = 0; offset < result.length;) {
+            const slot = this._slot(first + offset), within = slot % COMPUTED_CHUNK_SIZE;
+            const count = Math.min(result.length - offset, COMPUTED_CHUNK_SIZE - within, this.raw.storageCapacity - slot);
+            const chunk = chunks?.[Math.floor(slot / COMPUTED_CHUNK_SIZE)];
+            if (chunk) result.set(chunk.subarray(within, within + count), offset);
+            else result.fill(NaN, offset, offset + count);
+            offset += count;
+        }
+        return result;
     }
     channelSlice(channel, start = 0, end = this.length) {
         const values = [];
@@ -109,6 +153,8 @@ class ComputedFrames {
         for (const number of this.columns.keys()) if (!next.entries.has(number)) this.columns.delete(number);
         const generation = ++this.generation;
         this._cancelYields();
+        this.replayColumns = null;
+        this.replayEngine = null;
         this.revision++; this._values = [...this.raw.values, this.columns];
         this.rebuilding = rebuild && affected.size > 0 && this.length > 0;
         this.pendingAffected = this.rebuilding ? affected : new Set();
@@ -118,7 +164,9 @@ class ComputedFrames {
         const cancelled = () => generation !== this.generation;
         return (async () => {
             let worker = new computedChannelApi.ChannelOperations(this.raw.channelCount, definitions);
+            this.replayEngine = worker;
             let columns = new Map(), cursor = this.serial - this.length, storageRevision = this.storageRevision;
+            this.replayColumns = columns;
             const unchanged = [...worker.entries].filter(([number, entry]) => entry.ast && !affected.has(number)).map(([number]) => number);
             const overrides = new Map();
             await this.yieldControl();
@@ -126,7 +174,9 @@ class ComputedFrames {
                 const first = this.serial - this.length;
                 if (cursor < first || storageRevision !== this.storageRevision) {
                     worker = new computedChannelApi.ChannelOperations(this.raw.channelCount, definitions);
+                    this.replayEngine = worker;
                     columns = new Map(); cursor = first; storageRevision = this.storageRevision;
+                    this.replayColumns = columns;
                 }
                 const stop = Math.min(this.serial, cursor + 512);
                 const deadline = performance.now() + 8;
@@ -151,9 +201,13 @@ class ComputedFrames {
                 else this.columns.delete(number);
             }
             this.rebuilding = false; this.progress = null; this.pendingAffected.clear(); this.revision++;
+            this.replayColumns = null;
+            this.replayEngine = null;
             this._values = [...this.raw.values, this.columns]; this.onChange(); this.onProgress();
         })().catch(error => {
             if (!cancelled()) {
+                this.replayColumns = null;
+                this.replayEngine = null;
                 this.rebuilding = false; this.progress = null; this.pendingAffected.clear();
                 this.onChange(); this.onProgress();
             }
@@ -176,6 +230,8 @@ class ComputedFrames {
     clear() {
         this._cancelYields();
         this.generation++; this.rebuilding = false; this.progress = null; this.raw.clear(); this.columns.clear();
+        this.replayColumns = null;
+        this.replayEngine = null;
         this.engine = new computedChannelApi.ChannelOperations(this.raw.channelCount, this.definitions);
         this.serial = 0; this._values = [...this.raw.values, this.columns]; this.revision++; this.onProgress();
     }
@@ -187,16 +243,23 @@ class ComputedFrames {
     resetFormat(count, definitions) {
         const engine = new computedChannelApi.ChannelOperations(count, definitions);
         this.generation++; this._cancelYields(); this.raw.clear(); this.raw.setChannelCount(count);
+        this.replayColumns = null;
+        this.replayEngine = null;
         this.engine = engine; this.definitions = engine.definitions; this.columns.clear(); this.serial = 0;
         this.rebuilding = false; this.progress = null; this.revision++; this._values = [...this.raw.values, this.columns];
     }
     replaceFrom(other) {
         this.generation++; this._cancelYields(); this.raw.replaceFrom(other.raw ?? other); this.serial = this.length; this.columns.clear();
+        this.replayColumns = null;
+        this.replayEngine = null;
         this.engine = new computedChannelApi.ChannelOperations(this.raw.channelCount, this.definitions);
         this._values = [...this.raw.values, this.columns]; this.revision++;
         return this.updateDefinitions(this.definitions, { rebuild: true, all: true });
     }
-    dispose() { this.generation++; this._cancelYields(); this.rebuilding = false; this.columns.clear(); }
+    dispose() {
+        this.generation++; this._cancelYields(); this.rebuilding = false; this.columns.clear();
+        this.replayColumns = null; this.replayEngine = null; this.raw.clear(); this._values = this.raw.values;
+    }
 }
 
 globalThis.SerialPlotter ??= {};

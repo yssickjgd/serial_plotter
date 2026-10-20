@@ -5,16 +5,26 @@ const vm = require('node:vm');
 const { ChannelOperations } = require('../channelOperations');
 const { SystemResponseFrames } = require('../systemResponseFrames');
 
-function createPlotter(responseFrames = null) {
+function createPlotter(responseFrames = null, options = {}) {
     const labels = [];
+    const canvasOps = [];
     const canvasEvents = new Map();
     const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? text => ({ width: String(text).length * 6 })
         : key === 'fillText' ? text => { labels.push(String(text)); }
+            : key === 'clearRect' || key === 'fillRect' ? (...args) => {
+                canvasOps.push(key);
+                assert.ok(args.every(Number.isFinite));
+            }
             : key === 'moveTo' || key === 'lineTo' ? (x, y) => {
                 assert.ok(Number.isFinite(x) && Number.isFinite(y));
             }
-            : () => {} });
+            : () => {},
+        set(target, key, value) {
+            if (key === 'strokeStyle') canvasOps.push(`strokeStyle:${value}`);
+            target[key] = value;
+            return true;
+        } });
     const element = () => ({ style: {}, offsetHeight: 0, clientWidth: 800,
         addEventListener() {}, getBoundingClientRect: () =>
             ({ width: 800, height: 400, left: 0, top: 0 }) });
@@ -34,14 +44,179 @@ function createPlotter(responseFrames = null) {
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
     const plotter = new Plotter('waveform-canvas', responseFrames ?? new FrameBuffer(1, 1024),
-        { viewOnly: !!responseFrames });
+        { viewOnly: !!responseFrames, ...options });
     plotter.setChannelCount(responseFrames?.channelCount ?? 1);
     plotter.setChannelVisible(0, true);
     if (!responseFrames) for (let i = 0; i < 1024; i++)
         plotter.addFrame([Math.sin(2 * Math.PI * 100 * i / 1024)]);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
-    return { plotter, labels, canvasEvents };
+    return { plotter, labels, canvasEvents, canvasOps, context };
 }
+
+test('dB conversion only processes frequency bins inside the visible viewport', () => {
+    const { plotter, context } = createPlotter();
+    plotter.setDisplayOptions({ magnitudeUnit: 'db' });
+    plotter.vp.frequency.scrollOffset = 100;
+    plotter.vp.frequency.displayCount = 20;
+    let conversions = 0;
+    const original = context.SerialPlotter.decibelMagnitude;
+    context.SerialPlotter.decibelMagnitude = (...args) => {
+        conversions++;
+        return original(...args);
+    };
+    try { plotter.draw(); } finally { context.SerialPlotter.decibelMagnitude = original; }
+    assert.equal(conversions, 20);
+    context.SerialPlotter.decibelMagnitude = () => { throw new Error('unchanged hover redraws must reuse the converted bins'); };
+    try { plotter.draw(); } finally { context.SerialPlotter.decibelMagnitude = original; }
+});
+
+test('frequency views reuse worker-prepared dB and unwrapped phase without repeating heavy transforms', () => {
+    const { plotter, context } = createPlotter();
+    const spectrum = { mags: Float64Array.of(0, 1, 2), logMags: Float64Array.of(NaN, 0, Math.log10(2)),
+        phases: Float64Array.of(NaN, 170, -170), unwrappedPhases: Float64Array.of(NaN, 170, 190), fftSize: 4 };
+    const spectra = new Map([[0, spectrum]]);
+    context.SerialPlotter.decibelMagnitude = context.SerialPlotter.unwrapPhaseDegrees = () => {
+        throw new Error('logarithms and phase unwrapping have already been computed off the UI thread');
+    };
+    plotter.setDisplayOptions({ displayMode: 'frequency', magnitudeUnit: 'db', dbFactor: 10 });
+    const first = plotter._collectWindowSeries(0, 3, spectra)[0].mags;
+    assert.deepEqual([...first], [NaN, 0, 10 * Math.log10(2)]);
+    assert.equal(plotter._collectWindowSeries(0, 3, spectra)[0].mags, first);
+    plotter.setDisplayOptions({ dbFactor: 20 });
+    assert.deepEqual([...plotter._collectWindowSeries(1, 3, spectra)[0].mags], [0, 20 * Math.log10(2)]);
+    plotter.setDisplayOptions({ displayMode: 'phase', phaseUnwrap: true, phaseUnit: 'radians' });
+    assert.deepEqual([...plotter._collectWindowSeries(1, 3, spectra)[0].mags], [170 * Math.PI / 180, 190 * Math.PI / 180]);
+    plotter.setDisplayOptions({ phaseUnwrap: false, phaseUnit: 'degrees' });
+    assert.deepEqual([...plotter._collectWindowSeries(1, 3, spectra)[0].mags], [170, -170]);
+});
+
+test('time cursor redraws reuse the sample snapshot and refresh it after new data or channel edits', () => {
+    const { plotter } = createPlotter();
+    plotter.setChannelCount(2); plotter.setAllChannelsVisible(true);
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    for (let i = 0; i < 64; i++) plotter.addFrame([i, -i]);
+    let reads = 0;
+    const copy = plotter.frames.copyChannel.bind(plotter.frames);
+    plotter.frames.copyChannel = (...args) => { reads++; return copy(...args); };
+    plotter.draw();
+    assert.equal(reads, 2);
+    plotter.mousePos = { x: 100, y: 100 };
+    plotter.draw();
+    assert.equal(reads, 2, 'cursor motion must not copy the unchanged time window again');
+    plotter.addFrame([1000, -1000]); plotter.draw();
+    assert.equal(reads, 4);
+    assert.ok(plotter._drawState.max > 1000 && plotter._drawState.min < -1000);
+    plotter.setChannelTransform(0, { gainEnabled: true, gain: -2, offsetEnabled: false, offset: 0 }); plotter.draw();
+    assert.equal(reads, 6);
+    assert.ok(plotter._drawState.min < -2000);
+});
+
+test('GPU waveform draws traces below transparent axes and falls back to Canvas 2D when lost', () => {
+    const calls = [];
+    const gpu = { available: true, resize(...args) { calls.push(['resize', ...args]); },
+        render(traces) { calls.push(['render', traces]); return this.available; }, dispose() {} };
+    const { plotter, canvasOps } = createPlotter(null, { gpuRenderer: gpu });
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    plotter.clear();
+    for (let i = 0; i < 64; i++) plotter.addFrame([Math.sin(i)]);
+    plotter.vp.time.displayCount = 64;
+    calls.length = 0; canvasOps.length = 0;
+    plotter.draw();
+    const trace = calls.find(call => call[0] === 'render')?.[1]?.[0];
+    assert.ok(trace?.points.length > 0);
+    assert.equal(trace.dots, true);
+    assert.ok(canvasOps.includes('clearRect'));
+    assert.equal(canvasOps.includes('fillRect'), false);
+    assert.equal(canvasOps.includes('strokeStyle:#1e1e1e'), false,
+        'the upper 2D overlay must not paint the minor grid over GPU traces');
+    assert.equal(canvasOps.includes('strokeStyle:#2e2e2e'), false,
+        'the upper 2D overlay must not paint the major grid over GPU traces');
+    calls.length = 0;
+    plotter.clear();
+    assert.equal(calls.find(call => call[0] === 'render')?.[1]?.length, 0,
+        'clearing samples must remove the previous GPU trace');
+    for (let i = 0; i < 64; i++) plotter.addFrame([Math.sin(i)]);
+    gpu.available = false;
+    calls.length = 0; canvasOps.length = 0;
+    plotter.draw();
+    assert.equal(calls.some(call => call[0] === 'render'), false);
+    assert.ok(canvasOps.includes('fillRect'), 'fallback retains individual time-domain points');
+    assert.ok(canvasOps.indexOf('strokeStyle:#1e1e1e') >= 0 &&
+        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#00FF7F'),
+        'the Canvas 2D fallback still paints its grid before the waveform');
+    gpu.available = true;
+    gpu.render = () => false;
+    canvasOps.length = 0;
+    plotter.draw();
+    assert.ok(canvasOps.indexOf('strokeStyle:#1e1e1e') >= 0 &&
+        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#00FF7F'),
+        'losing the GPU during a frame also restores the grid below the fallback waveform');
+    plotter.dispose();
+});
+
+test('worker FFT presents only completed spectra and ignores obsolete settings results', async () => {
+    const pending = [];
+    const pool = { available: true, runTask(task) {
+        return new Promise(resolve => pending.push({ task, resolve }));
+    } };
+    const { plotter } = createPlotter(null, { fftWorkerPool: pool });
+    plotter.draw();
+    assert.equal(pending.length, 1);
+    assert.equal(plotter.completedSpectrumDraws, 0);
+    plotter.setDisplayOptions({ fftWindow: 'blackman' });
+    pending[0].resolve({ mags: [0, 1], phases: [0, 0], dominantBin: 1, fftSize: 2 });
+    await new Promise(resolve => setImmediate(resolve));
+    plotter.draw();
+    assert.equal(pending.length, 2);
+    assert.equal(pending[1].task.windowType, 'blackman');
+    assert.equal(plotter.completedSpectrumDraws, 0, 'obsolete spectra never count as presented');
+    pending[1].resolve({ mags: [0, 2], phases: [0, 0], dominantBin: 1, fftSize: 2 });
+    await new Promise(resolve => setImmediate(resolve));
+    plotter.draw();
+    assert.equal(plotter.completedSpectrumDraws, 1);
+    assert.equal(plotter._frequencyForChannel(0).mags[1], 2);
+    plotter.draw();
+    assert.equal(plotter.completedSpectrumDraws, 1, 'repainting a cached spectrum is not a new result');
+    plotter.dispose();
+});
+
+test('worker FFT can refresh within 100 ms without stacking jobs while pending', async () => {
+    const pending = [];
+    const pool = { runTask(task) { return new Promise(resolve => pending.push({ task, resolve })); } };
+    const { plotter } = createPlotter(null, { fftWorkerPool: pool });
+    plotter.draw();
+    plotter.addFrame([1]);
+    plotter._fftAt -= 150;
+    plotter.draw();
+    assert.equal(pending.length, 1, 'new data must not queue a second FFT while the first runs');
+    pending[0].resolve({ mags: [0, 1], phases: [0, 0], dominantBin: 1, fftSize: 2 });
+    await new Promise(resolve => setImmediate(resolve));
+    plotter.draw();
+    assert.equal(pending.length, 1, 'a completed FFT gets a short rest before starting the next one');
+    plotter._fftAt -= 40;
+    plotter.draw();
+    assert.equal(pending.length, 2, 'idle workers may refresh before the former 100 ms cap');
+    plotter.dispose();
+});
+
+test('GPU spectra start the latest FFT as soon as the previous result is presented without a fixed cooldown', async () => {
+    const pending = [];
+    const pool = { runTask(task) { return new Promise(resolve => pending.push({ task, resolve })); } };
+    const gpuRenderer = { available: true, render: () => true, resize() {}, dispose() {} };
+    const { plotter } = createPlotter(null, { fftWorkerPool: pool, gpuRenderer });
+    plotter.draw();
+    pending[0].resolve({ mags: [0, 1], phases: [0, 0], dominantBin: 1, fftSize: 2 });
+    await new Promise(resolve => setImmediate(resolve));
+    plotter.addFrame([2]);
+    plotter._fftAt = performance.now();
+    plotter.draw();
+    assert.equal(pending.length, 2, 'GPU presentation must not impose an extra 33 ms rest on idle FFT workers');
+    assert.equal(plotter.completedSpectrumDraws, 1);
+    plotter.addFrame([3]);
+    plotter.draw();
+    assert.equal(pending.length, 2, 'fast input still cannot stack work ahead of the pending FFT');
+    plotter.dispose();
+});
 
 function createResponsePlotter(expression) {
     const frames = new SystemResponseFrames();

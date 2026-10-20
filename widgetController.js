@@ -91,7 +91,9 @@ class WidgetController {
         this.workspace.add({ id, type, title, element, handle, rect, minWidth: 280, minHeight: 180 });
         if (type === 'wave') {
             widget.responseFrames = new SerialPlotter.SystemResponseFrames();
-            widget.view = new SerialPlotter.Plotter(refs['waveform-canvas'], source.frames, { viewOnly: true, elements: {
+            widget.view = new SerialPlotter.Plotter(refs['waveform-canvas'], source.frames, {
+                viewOnly: true, fftWorkerPool: this.service.workerPool.available ? this.service.workerPool : null,
+                elements: {
                 scrollWrap: refs['plot-scrollbar-wrap'], scrollThumb: refs['plot-scrollbar-thumb'],
                 yScrollWrap: refs['plot-y-scrollbar-wrap'], yScrollThumb: refs['plot-y-scrollbar-thumb'],
                 header: refs['plot-header'], infoRow: refs['plot-info-row']
@@ -705,7 +707,10 @@ class WidgetController {
             const caption = this.document.createElement('span'); caption.className = 'monitor-stat-label'; caption.textContent = label;
             const value = this.document.createElement('span'); value.className = 'monitor-stat-value'; cell.append(caption, value); return cell;
         }));
-        entries.forEach((entry, index) => { target.children[index].children[1].textContent = entry[1]; });
+        entries.forEach((entry, index) => {
+            const field = target.children[index].children[1];
+            if (field.textContent !== entry[1]) field.textContent = entry[1];
+        });
     }
 
     syncData(source) {

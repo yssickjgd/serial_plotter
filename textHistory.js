@@ -80,7 +80,7 @@ async function countCaptureText(history, format, pool, {
         return counter;
     }
 
-    const budget = Math.max(1, Math.floor(pool.maxWorkers || 1));
+    const budget = Math.max(1, Math.floor(pool.workerLimit ?? pool.maxWorkers ?? 1));
     yieldByteLimit = Math.max(65536, maxBatchBytes * budget);
     const jobs = [];
     const buffer = new Uint8Array(maxBatchBytes);

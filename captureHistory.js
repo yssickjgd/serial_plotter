@@ -11,7 +11,7 @@ class CaptureHistory {
             throw new RangeError('Capture byte limit must be a positive integer');
         this.maxBytes = maxBytes;
         captureHistoryStates.set(this, { chunks: [], head: 0, boundaries: [], boundaryHead: 0,
-            startByte: 0, endByte: 0, streamStartByte: 0, currentStreamStartByte: 0, revision: 0, generation: 0 });
+            storageBytes: 0, startByte: 0, endByte: 0, streamStartByte: 0, currentStreamStartByte: 0, revision: 0, generation: 0 });
     }
 
     get byteLength() { const state = captureHistoryStates.get(this); return state.endByte - state.startByte; }
@@ -19,6 +19,11 @@ class CaptureHistory {
     get endByte() { return captureHistoryStates.get(this).endByte; }
     get revision() { return captureHistoryStates.get(this).revision; }
     get streamStartByte() { return captureHistoryStates.get(this).streamStartByte; }
+    get estimatedMemoryBytes() {
+        const state = captureHistoryStates.get(this);
+        return state.storageBytes + (state.chunks.length - state.head) * 256 +
+            (state.boundaries.length - state.boundaryHead) * 32;
+    }
 
     append(bytes, { timestamp = Date.now(), arrival = performance.now(), order = 0 } = {}) {
         if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
@@ -29,6 +34,7 @@ class CaptureHistory {
             sourceStartByte: startByte, sourceEndByte: endByte };
         if (!bytes.length) return metadata;
         state.chunks.push({ ...metadata, bytes: bytes.slice() });
+        state.storageBytes += bytes.length;
         state.endByte = endByte;
         state.revision++;
         if (this.byteLength > this.maxBytes) this.pruneBefore(endByte - this.maxBytes);
@@ -52,6 +58,7 @@ class CaptureHistory {
         const target = Math.min(state.endByte, Math.max(state.startByte, Math.floor(byteOffset)));
         if (!Number.isFinite(target) || target === state.startByte) return;
         while (state.head < state.chunks.length && state.chunks[state.head].endByte <= target) {
+            state.storageBytes -= state.chunks[state.head].bytes.buffer.byteLength;
             state.chunks[state.head++] = null;
         }
         if (state.head < state.chunks.length) {
@@ -60,6 +67,7 @@ class CaptureHistory {
                 let suffix = first.bytes.subarray(target - first.startByte);
                 // Compact only after halving storage; repeated single-byte eviction remains linear.
                 if (suffix.length <= suffix.buffer.byteLength / 2) suffix = suffix.slice();
+                state.storageBytes += suffix.buffer.byteLength - first.bytes.buffer.byteLength;
                 state.chunks[state.head] = { ...first, startByte: target, byteOffset: target, bytes: suffix };
             }
         }
@@ -119,6 +127,7 @@ class CaptureHistory {
     clear() {
         const state = captureHistoryStates.get(this);
         state.chunks = []; state.head = 0; state.startByte = 0; state.endByte = 0;
+        state.storageBytes = 0;
         state.boundaries = []; state.boundaryHead = 0;
         state.streamStartByte = 0; state.currentStreamStartByte = 0;
         state.revision++; state.generation++;
@@ -127,7 +136,7 @@ class CaptureHistory {
 
 /** Replay bounded slices; stopByte can freeze a snapshot while reception continues. */
 async function replayCaptureHistory(history, format, capacity, {
-    onProgress = () => {}, onBytes = () => {}, onBoundary = () => {}, onGap = () => {}, isCancelled = () => false,
+    onProgress = () => {}, onBytes = () => {}, onBoundary = () => {}, onGap = () => {}, onStorage = () => {}, isCancelled = () => false,
     yieldControl = () => new Promise(resolve => globalThis.setTimeout(resolve, 0)),
     maxSliceBytes = 16384, flushPending = true, resumeTimers = false, previousResult = null,
     stopByte = Infinity, startByte = history.startByte, preserveCallbacks = false, decodeBatch = null, assembleRawBatch = null,
@@ -153,9 +162,27 @@ async function replayCaptureHistory(history, format, capacity, {
     if (!numeric) { parser.suspendTimers = true; parser._cancelTimer(); }
     const errors = previousResult?.errors || [];
     let errorHead = 0;
+    let errorBytes = errors.reduce((total, error) => total + (error?.bytes?.length ?? 0), 0);
+    const discardErrorsThrough = order => {
+        let removed = 0;
+        while (errorHead < errors.length && errors[errorHead].order <= order) {
+            errorBytes -= errors[errorHead].bytes?.length ?? 0;
+            errors[errorHead++] = null; removed++;
+        }
+        if (errorHead > 1024) { errors.splice(0, errorHead); errorHead = 0; }
+        return removed;
+    };
+    onStorage({ frames, discardErrorsThrough,
+        get firstError() { return errors[errorHead]; },
+        get errorCutoffOrder() { return errors[Math.min(errors.length - 1, errorHead + 4095)]?.order; },
+        get errorMemoryBytes() { return errorBytes + (errors.length - errorHead) * 256; } });
     const recordError = (type, time, bytes, metadata) => {
         errors.push({ type, time, bytes, ...metadata, kind: 'error' });
-        if (errors.length - errorHead > capacity) errors[errorHead++] = null;
+        errorBytes += bytes.length;
+        if (errors.length - errorHead > capacity) {
+            errorBytes -= errors[errorHead].bytes?.length ?? 0;
+            errors[errorHead++] = null;
+        }
         if (errorHead > 1024) { errors.splice(0, errorHead); errorHead = 0; }
     };
     // Returned error lists are copies. Rebind our collector on catchup while preserving caller callbacks.
@@ -207,6 +234,10 @@ async function replayCaptureHistory(history, format, capacity, {
             let byteOffset = 0;
             for (let i = 0; i < records.length; i++) {
                 const record = records[i], start = i * channels;
+                if (record.metadata.byteOffset < state.startByte) {
+                    if (batchedRaw) byteOffset += record.metadata.endByte - record.metadata.byteOffset;
+                    continue;
+                }
                 if (batchedRaw) {
                     const end = byteOffset + record.metadata.endByte - record.metadata.byteOffset;
                     frames.appendRaw(values.subarray(byteOffset, end), record.time, record.metadata.order,
@@ -259,7 +290,7 @@ async function replayCaptureHistory(history, format, capacity, {
         if (cursor < state.startByte) {
             cursor = state.startByte;
             parser.reset(); parser.frameCount = 0; parser.failCount = 0;
-            frames.clear(); errors.length = 0; errorHead = 0;
+            frames.clear(); errors.length = 0; errorHead = 0; errorBytes = 0;
             decodeRecords = []; decodeBytes = 0; pendingDecodes = [];
             index = state.head;
             batchBytes = 0; batchStarted = performance.now();

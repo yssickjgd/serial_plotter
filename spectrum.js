@@ -91,9 +91,12 @@ function prepareFrequencySeries(values, removeDc = false, windowType = 'hann') {
     return { mags, phases, dominantBin, fftSize };
 }
 
-if (typeof module !== 'undefined') module.exports = { prepareFrequencySeries, FFT_WINDOWS, fftInPlace, nextPow2 };
+if (typeof module !== 'undefined') module.exports = {
+    prepareFrequencySeries, FFT_WINDOWS, fftInPlace, nextPow2, windowCoefficient
+};
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.prepareFrequencySeries = prepareFrequencySeries;
 globalThis.SerialPlotter.FFT_WINDOWS = FFT_WINDOWS;
 globalThis.SerialPlotter.fftInPlace = fftInPlace;
 globalThis.SerialPlotter.nextPow2 = nextPow2;
+globalThis.SerialPlotter.windowCoefficient = windowCoefficient;

@@ -94,6 +94,10 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.draw();
     assert.equal(summary.mean, 2);
     assert.equal(plotter._collectWindowSeries(0, 2, null)[0].rawValues[1], 2);
+    const transformedSlice = plotter._transformedChannelSlice(0, 0, 2);
+    assert.equal(ArrayBuffer.isView(transformedSlice), true,
+        'plot and FFT input should use a compact numeric buffer instead of a boxed-number array');
+    assert.deepEqual([...transformedSlice], [NaN, 2]);
     assert.equal(frames.getValue(0, 1), 1);
     assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).includes('1,2,'));
 
@@ -118,11 +122,11 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     const visibleSpectra = plotter.completedSpectrumDraws;
     plotter.addFrame([1]);
     plotter.draw();
-    assert.equal(plotter.completedSpectrumDraws, visibleSpectra,
-        'redrawing a cached spectrum does not represent a new frequency frame');
+    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 1,
+        'a spectrum computed for inspection counts when it is first presented');
     plotter._fftAt -= 300;
     plotter.draw();
-    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 1);
+    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 2);
     plotter.setChannelSettings([{ name: 'legacy', visible: true }]);
     const legacy = plotter.getChannelMeta()[0];
     assert.deepEqual([legacy.gainEnabled, legacy.gain, legacy.offsetEnabled, legacy.offset],

@@ -1,5 +1,23 @@
 /** Lazy historical decode workers with two logical cores reserved for the UI. */
 function createHistoryTaskProcessor(task, dependencies) {
+    if (task?.kind === 'fft') {
+        if (!(task.values instanceof Float64Array))
+            throw new TypeError('FFT values must be a Float64Array');
+        let result;
+        return {
+            step() {
+                const spectrum = dependencies.prepareFrequencySeries(task.values,
+                    task.removeDc === true, task.windowType);
+                result = { ...spectrum, mags: Float64Array.from(spectrum.mags),
+                    phases: Float64Array.from(spectrum.phases ?? []),
+                    logMags: Float64Array.from(spectrum.mags,
+                        value => value > 0 && Number.isFinite(value) ? Math.log10(value) : NaN),
+                    unwrappedPhases: Float64Array.from(dependencies.unwrapPhaseDegrees(spectrum.phases ?? [])) };
+                return true;
+            },
+            result() { return result; }
+        };
+    }
     if (!(task?.bytes instanceof Uint8Array)) throw new TypeError('History task bytes must be a Uint8Array');
     if (task.kind === 'hex-assemble') {
         if (!Array.isArray(task.parts) || task.parts.some(part => !(part instanceof Uint8Array)))
@@ -127,7 +145,10 @@ function historyWorkerDependencies() {
     const parser = typeof module !== 'undefined' ? require('./dataParser').DataParser : globalThis.SerialPlotter.DataParser;
     const layout = typeof module !== 'undefined' ? require('./monitorView').MonitorTextLayout
         : globalThis.SerialPlotter.MonitorTextLayout;
-    return { ...codec, ...numeric, ...layout, TYPE_LENGTH: parser.TYPE_LENGTH };
+    const spectrum = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
+    const phase = typeof module !== 'undefined' ? require('./systemResponse') : globalThis.SerialPlotter;
+    return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
+        TYPE_LENGTH: parser.TYPE_LENGTH };
 }
 
 /** Self-contained classic worker source; no network requests are needed for file:// use. */
@@ -138,16 +159,21 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
     return `'use strict';\nconst TEXT_CHARSETS = ${JSON.stringify(dependencies.CHARSETS)};\n` +
         `const monitorDisplayUtils = { textTokenDisplay: ${display.textTokenDisplay.toString()} };\n` +
         `const HISTORY_TYPE_LENGTH = ${JSON.stringify(dependencies.TYPE_LENGTH)};\n` +
+        `const FFT_WINDOWS = ${JSON.stringify(dependencies.FFT_WINDOWS)};\n` +
+        ['nextPow2', 'fftInPlace', 'windowCoefficient', 'prepareFrequencySeries', 'unwrapPhaseDegrees']
+            .map(name => dependencies[name].toString()).join('\n') + '\n' +
         dependencies.decodeNumericPayload.toString() + '\n' +
         functions.map(name => dependencies[name].toString()).join('\n') + '\n' +
         createHistoryTaskProcessor.toString() + `\nself.onmessage = ({ data }) => {
             try {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
-                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload });
+                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees });
                 processor.step(Infinity);
                 const result = processor.result();
                 const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
+                if (data.task.kind === 'fft') transfer.push(result.mags.buffer, result.phases.buffer,
+                    result.logMags.buffer, result.unwrappedPhases.buffer);
                 if (result.chunks) {
                     for (const chunk of result.chunks) {
                         for (const key of ['offsets', 'cells', 'starts', 'ends', 'crosses', 'failed', 'breaks'])
@@ -182,6 +208,8 @@ class HistoryWorkerPool {
         this.peakWorkers = 0;
         this.queue = [];
         this.jobs = new Set();
+        this.fftSources = new WeakMap();
+        this.fftCacheEntries = new Map(); this.fftCacheBytes = 0; this.fftCacheLimitBytes = 64 * 1048576;
         this.nextId = 1;
         this.disposed = false;
         this.fallbackJob = null;
@@ -193,13 +221,73 @@ class HistoryWorkerPool {
         this.workerSource = null;
         this.workerURL = null;
         this.pumping = false;
+        this.idleSchedule = options.setTimeout ?? ((callback, delay) => setTimeout(callback, delay));
+        this.idleCancel = options.clearTimeout ?? (timer => clearTimeout(timer));
     }
 
     get workerCount() { return this.workers.length; }
+    clearFftCache() {
+        this.fftSources = new WeakMap(); this.fftCacheEntries.clear(); this.fftCacheBytes = 0;
+    }
+    _forgetFft(promise) {
+        const entry = this.fftCacheEntries.get(promise);
+        if (!entry) return;
+        if (entry.cache.entries.get(entry.key) === promise) entry.cache.entries.delete(entry.key);
+        this.fftCacheBytes -= entry.bytes; this.fftCacheEntries.delete(promise);
+    }
+    setFftCacheLimit(bytes) {
+        this.fftCacheLimitBytes = bytes;
+        for (const [promise, entry] of this.fftCacheEntries) {
+            if (this.fftCacheBytes <= bytes) break;
+            if (entry.bytes) this._forgetFft(promise);
+        }
+    }
+    setWorkerLimit(limit) {
+        this.workerLimit = Math.max(1, Math.min(this.maxWorkers, Math.floor(limit)));
+        for (const slot of [...this.workers].reverse()) if (!slot.job && this.workers.length > this.workerLimit) {
+            this._closeWorker(slot);
+            this.workers = this.workers.filter(item => item !== slot);
+        }
+    }
+
+    /** Share identical input snapshots before reading samples or dispatching workers. */
+    requestFft(source, options, readValues) {
+        if (this.disposed) return Promise.reject(historyAbortError());
+        let cache = this.fftSources.get(source);
+        if (!cache || cache.version !== source.version) {
+            if (cache) for (const promise of cache.entries.values()) this._forgetFft(promise);
+            cache = { version: source.version, entries: new Map() };
+            this.fftSources.set(source, cache);
+        }
+        const key = JSON.stringify([options.channel, options.start, options.end,
+            options.removeDc, options.windowType, options.gain, options.offset]);
+        if (cache.entries.has(key)) return cache.entries.get(key);
+        let promise;
+        try {
+            promise = this.runTask({ kind: 'fft', values: readValues(),
+                removeDc: options.removeDc, windowType: options.windowType });
+        } catch (error) { return Promise.reject(error); }
+        cache.entries.set(key, promise);
+        this.fftCacheEntries.set(promise, { cache, key, bytes: 0 });
+        while (cache.entries.size > Math.max(32, source.channelCount * 4))
+            this._forgetFft(cache.entries.values().next().value);
+        promise.then(result => {
+            const entry = this.fftCacheEntries.get(promise);
+            if (!entry) return;
+            for (const value of Object.values(result)) {
+                if (ArrayBuffer.isView(value)) entry.bytes += value.byteLength;
+                else if (Array.isArray(value)) entry.bytes += value.length * 8;
+            }
+            this.fftCacheBytes += entry.bytes; this.setFftCacheLimit(this.fftCacheLimitBytes);
+        }, () => this._forgetFft(promise));
+        return promise;
+    }
 
     runTask(task) {
         if (this.disposed) return Promise.reject(historyAbortError());
-        if (!(task?.bytes instanceof Uint8Array))
+        if (task?.kind === 'fft' && !(task.values instanceof Float64Array))
+            return Promise.reject(new TypeError('FFT values must be a Float64Array'));
+        if (task?.kind !== 'fft' && !(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
         if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
             task.parts.some(part => !(part instanceof Uint8Array))))
@@ -210,7 +298,10 @@ class HistoryWorkerPool {
         return new Promise((resolve, reject) => {
             const job = { id: this.nextId++, task, resolve, reject, settled: false };
             this.jobs.add(job);
-            this.queue.push(job);
+            if (task.kind === 'fft') {
+                const firstOther = this.queue.findIndex(queued => queued.task.kind !== 'fft');
+                this.queue.splice(firstOther < 0 ? this.queue.length : firstOther, 0, job);
+            } else this.queue.push(job);
             this._pump();
         });
     }
@@ -233,17 +324,23 @@ class HistoryWorkerPool {
                     if (!this.fallbackJob) this._startFallback(this.queue.shift());
                     break;
                 }
+                const limit = this.workerLimit ?? this.maxWorkers;
+                if (this.workers.filter(worker => worker.job).length >= limit) break;
                 let slot = this.workers.find(worker => !worker.job);
-                if (!slot && this.workers.length < this.maxWorkers) {
+                if (!slot && this.workers.length < limit) {
                     try { slot = this._createWorker(); }
                     catch { this._failWorkers(); continue; }
                 }
                 if (!slot) break;
+                if (slot.idleTimer != null) this.idleCancel(slot.idleTimer);
+                slot.idleTimer = null;
                 const job = this.queue.shift();
                 slot.job = job;
                 try {
-                    const bytes = new Uint8Array(job.task.bytes);
-                    const task = { ...job.task, bytes }, transfer = [bytes.buffer];
+                    const fft = job.task.kind === 'fft';
+                    const data = fft ? new Float64Array(job.task.values) : new Uint8Array(job.task.bytes);
+                    const task = fft ? { ...job.task, values: data } : { ...job.task, bytes: data };
+                    const transfer = [data.buffer];
                     if (task.kind === 'hex-assemble') {
                         task.parts = task.parts.map(part => {
                             const copy = new Uint8Array(part);
@@ -263,7 +360,18 @@ class HistoryWorkerPool {
                     slot.worker.postMessage({ id: job.id, task }, transfer);
                 } catch { this._failWorkers(); }
             }
-        } finally { this.pumping = false; }
+        } finally {
+            this.pumping = false;
+            for (const slot of this.workers) if (!slot.job && slot.idleTimer == null) {
+                slot.idleTimer = this.idleSchedule(() => {
+                    slot.idleTimer = null;
+                    if (slot.job || slot.closed) return;
+                    this._closeWorker(slot);
+                    this.workers = this.workers.filter(item => item !== slot);
+                }, 10000);
+                slot.idleTimer?.unref?.();
+            }
+        }
     }
 
     _createWorker() {
@@ -304,17 +412,21 @@ class HistoryWorkerPool {
         return slot;
     }
 
+    _closeWorker(slot) {
+        slot.closed = true;
+        if (slot.idleTimer != null) this.idleCancel(slot.idleTimer);
+        slot.idleTimer = null;
+        slot.worker.onmessage = null;
+        slot.worker.onerror = null;
+        slot.worker.onmessageerror = null;
+        try {
+            const completion = slot.worker.terminate();
+            completion?.catch?.(() => {});
+        } catch { /* Cleanup must continue even if one worker already exited. */ }
+    }
+
     _closeWorkers() {
-        for (const slot of this.workers) {
-            slot.closed = true;
-            slot.worker.onmessage = null;
-            slot.worker.onerror = null;
-            slot.worker.onmessageerror = null;
-            try {
-                const completion = slot.worker.terminate();
-                completion?.catch?.(() => {});
-            } catch { /* Cleanup must continue even if one worker already exited. */ }
-        }
+        for (const slot of this.workers) this._closeWorker(slot);
         this.workers.length = 0;
         if (this.workerURL) URL.revokeObjectURL(this.workerURL);
         this.workerURL = null;
@@ -363,6 +475,7 @@ class HistoryWorkerPool {
         for (const job of this.jobs) this._settle(job, historyAbortError());
         this.queue.length = 0;
         this.fallbackJob = null;
+        this.clearFftCache();
         this._closeWorkers();
     }
 }

@@ -137,3 +137,84 @@ test('a failed replacement file load clears the previously loaded bytes', async 
     await controller.sendOnce();
     assert.deepEqual(sent, []);
 });
+
+test('command writes share the same serialized transport and skip cancelled queued writes', async () => {
+    const { SendController } = require('../sendController');
+    const writes = [], recorded = [];
+    let finish, valid = true;
+    const engine = { send(bytes) { writes.push([...bytes]); return writes.length === 1
+        ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(); } };
+    const controller = new SendController({ mode: element('hex'), input: element('AA'), fileInput: element(),
+        interval: element('0'), intervalUnit: element('s'), button: element(), loadButton: element(),
+        getEngine: () => engine, onSent: bytes => recorded.push([...bytes]) });
+    const first = controller.sendOnce();
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    const cancelled = controller.sendBytes(Uint8Array.of(187), () => valid);
+    const last = controller.sendBytes(Uint8Array.of(204));
+    valid = false; finish();
+    assert.deepEqual(await Promise.all([first, cancelled, last]), [true, false, true]);
+    assert.deepEqual(writes, [[170], [204]]);
+    assert.deepEqual(recorded, writes);
+    controller.dispose();
+});
+
+test('starting ordinary send notifies the sequence and waits for its pending write', async () => {
+    const { SendController } = require('../sendController');
+    const writes = [];
+    let finish, starts = 0, engine = { send(bytes) { writes.push([...bytes]); return writes.length === 1
+        ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(); } };
+    const controller = new SendController({ mode: element('hex'), input: element('AA'), fileInput: element(),
+        interval: element('0'), intervalUnit: element('s'), button: element(), loadButton: element(),
+        getEngine: () => engine, onSent() {}, onStart() { starts++; } });
+    const first = controller.sendBytes(Uint8Array.of(187));
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    const ordinary = controller.handleClick();
+    assert.equal(starts, 1);
+    assert.equal(writes.length, 1);
+    finish(); await Promise.all([first, ordinary]);
+    assert.deepEqual(writes, [[187], [170]]);
+    engine.send = () => new Promise(resolve => { finish = resolve; });
+    const pending = controller.sendBytes(Uint8Array.of(221));
+    const next = controller.sendBytes(Uint8Array.of(204));
+    engine = null; finish(); await pending;
+    assert.equal(await next, false, 'a queued write cannot leak into a new connection');
+    controller.dispose();
+});
+
+test('a late failure from a cancelled command cannot invalidate a newer queued ordinary send', async () => {
+    const { SendController } = require('../sendController');
+    const writes = [];
+    let reject;
+    const engine = { send(bytes) { writes.push([...bytes]); return writes.length === 1
+        ? new Promise((resolve, fail) => { reject = fail; }) : Promise.resolve(); } };
+    const controller = new SendController({ mode: element('hex'), input: element('AA'), fileInput: element(),
+        interval: element('0'), intervalUnit: element('s'), button: element(), loadButton: element(),
+        getEngine: () => engine, onSent() {} });
+    const old = controller.sendBytes(Uint8Array.of(187));
+    const next = controller.handleClick();
+    reject(new Error('old write failed'));
+    await Promise.all([old, next]);
+    assert.deepEqual(writes, [[187], [170]]);
+    controller.dispose();
+});
+
+test('restarting an ordinary repeat cannot install the previous task timer after its late first write', async t => {
+    const { SendController } = require('../sendController');
+    const completions = [], interval = element('1');
+    const engine = { send: () => new Promise(resolve => completions.push(resolve)) };
+    const controller = new SendController({ mode: element('hex'), input: element('AA'), fileInput: element(),
+        interval, intervalUnit: element('s'), button: element(), loadButton: element(),
+        getEngine: () => engine, onSent() {} });
+    t.after(() => controller.dispose());
+    const first = controller.handleClick();
+    controller.stop(); interval.value = '2';
+    const second = controller.handleClick();
+    completions[0](); await first;
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    assert.equal(completions.length, 2);
+    assert.equal(controller.timer, null, 'only the new task may start a timer after its own first write');
+    assert.equal(controller.starting, true);
+    completions[1](); await second;
+    assert.notEqual(controller.timer, null);
+    controller.dispose();
+});

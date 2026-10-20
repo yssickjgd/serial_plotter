@@ -1,5 +1,20 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+
+test('memory eviction frees derived chunks without restarting running filter or integral state', () => {
+    const { ComputedFrames } = require('../computedFrames');
+    const { FrameBuffer } = require('../frameBuffer');
+    const frames = new ComputedFrames(new FrameBuffer(1, 10000),
+        [{ number: 2, type: 'formula', expression: 'int(CH01)' }]);
+    for (let i = 0; i < 9000; i++) frames.append([1], Uint8Array.of(1), 't', i, i);
+    const before = frames.estimatedMemoryBytes;
+    frames.discardOldest(8192);
+    assert.equal(frames.getValue(1, 0), 8193);
+    assert.ok(frames.estimatedMemoryBytes < before / 2);
+    frames.append([1]);
+    assert.equal(frames.getValue(1, frames.length - 1), 9001);
+    frames.dispose();
+});
 const fs = require('node:fs');
 const { FrameBuffer } = require('../frameBuffer');
 const { ComputedFrames } = fs.existsSync(require('node:path').join(__dirname, '../computedFrames.js'))
@@ -10,6 +25,20 @@ function frames(definitions, capacity = 4, options) {
     return new ComputedFrames(new FrameBuffer(1, capacity), definitions, options);
 }
 const append = (f, value) => f.append([value], Uint8Array.of(value), '', value, value * 10);
+
+test('bulk snapshots include computed columns and match historical formulas through wrap and resize', async () => {
+    const f = frames([formula(2, 'CH01*2'), { number: 3, type: 'constant', expression: '[0]=1' }], 5003);
+    for (let i = 0; i < 11000; i++) append(f, i);
+    for (const channel of [0, 1, 2])
+        assert.deepEqual([...f.copyChannel(channel, 101, 5000)], f.channelSlice(channel, 101, 5000));
+    await f.updateDefinitions([formula(2, 'CH01*3')], { rebuild: false });
+    append(f, 11000);
+    assert.deepEqual([...f.copyChannel(1)], f.channelSlice(1));
+    f.resize(13);
+    assert.deepEqual([...f.copyChannel(1)], f.channelSlice(1));
+    f.clear();
+    assert.equal(f.copyChannel(1).length, 0);
+});
 
 test('renumbering preserves filter integration and explicit lookback state with the same stored columns', async () => {
     const definitions = [formula(2, 'CH01'), { number: 3, type: 'constant', expression: '[0]=1,[1]=1' },

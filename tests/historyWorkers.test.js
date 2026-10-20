@@ -51,6 +51,137 @@ function loadPool() {
     return exports;
 }
 
+test('idle history workers retire individually and clearing FFT cache permits a fresh snapshot', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const timers = new Map(), workers = [];
+    let next = 0, reads = 0;
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4,
+        setTimeout: fn => { timers.set(++next, fn); return next; }, clearTimeout: id => timers.delete(id),
+        workerFactory: () => {
+            const worker = { postMessage(message) { this.message = message; }, terminate() { this.terminated = true; } };
+            workers.push(worker); return worker;
+        } });
+    t.after(() => pool.dispose());
+    const source = { version: 1, channelCount: 1 }, options = { channel: 0, start: 0, end: 4 };
+    const read = () => { reads++; return new Float64Array(4); };
+    const first = pool.requestFft(source, options, read);
+    workers[0].onmessage({ data: { id: workers[0].message.id, result: { mags: new Float64Array(3) } } });
+    await first;
+    await pool.requestFft(source, options, read);
+    assert.equal(reads, 1);
+    pool.clearFftCache();
+    const second = pool.requestFft(source, options, read);
+    assert.equal(reads, 2);
+    assert.equal(timers.size, 0, 'reusing a worker cancels its idle retirement');
+    workers[0].onmessage({ data: { id: workers[0].message.id, result: {} } }); await second;
+    assert.equal(timers.size, 1);
+    for (const fn of [...timers.values()]) fn(); timers.clear();
+    assert.equal(pool.workerCount, 0);
+    assert.equal(workers[0].terminated, true);
+    assert.equal(pool.available, true, 'later work may lazily create a new worker');
+});
+
+test('completed shared FFT caches obey a byte limit and release obsolete source versions', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2 }); t.after(() => pool.dispose());
+    pool.setFftCacheLimit(512);
+    pool.runTask = async () => ({ mags: new Float64Array(8), phases: new Float64Array(8),
+        logMags: new Float64Array(8), unwrappedPhases: new Float64Array(8) });
+    const source = { version: 1, channelCount: 1 };
+    for (let i = 0; i < 4; i++) {
+        await pool.requestFft(source, { channel: 0, start: i, end: i + 8 }, () => new Float64Array(8));
+        assert.ok(pool.fftCacheBytes <= 512);
+    }
+    source.version++;
+    await pool.requestFft(source, { channel: 0, start: 0, end: 8 }, () => new Float64Array(8));
+    assert.equal(pool.fftCacheBytes, 256);
+    pool.clearFftCache();
+    assert.equal(pool.fftCacheBytes, 0);
+});
+
+test('live FFT jobs share the worker core budget and keep phase and amplitude correct', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const signal = Float64Array.from([0, Math.SQRT1_2, 1, Math.SQRT1_2,
+        0, -Math.SQRT1_2, -1, -Math.SQRT1_2]);
+    const jobs = Array.from({ length: 4 }, () => pool.runTask({ kind: 'fft',
+        values: signal, removeDc: false, windowType: 'rectangular' }));
+    const results = await Promise.all(jobs);
+    assert.ok(pool.peakWorkers <= 2, 'FFT must respect the existing two-core reserve');
+    assert.deepEqual([...signal], [0, Math.SQRT1_2, 1, Math.SQRT1_2,
+        0, -Math.SQRT1_2, -1, -Math.SQRT1_2]);
+    for (const result of results) {
+        assert.equal(result.fftSize, 8);
+        assert.equal(result.dominantBin, 1);
+        assert.ok(Math.abs(result.mags[1] - 1) < 1e-12);
+        assert.ok(Math.abs(result.phases[1] + 90) < 1e-10);
+    }
+});
+
+test('FFT worker fallback remains asynchronous on systems without spare worker cores', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2 });
+    t.after(() => pool.dispose());
+    let settled = false;
+    const result = pool.runTask({ kind: 'fft', values: Float64Array.from([1, 1, 1, 1]),
+        removeDc: true, windowType: 'rectangular' }).then(value => { settled = true; return value; });
+    assert.equal(settled, false);
+    assert.equal((await result).mags[0], 0);
+    assert.equal(pool.workerCount, 0);
+});
+
+test('matching plots share FFT snapshots while input, range, transforms and windows stay independent', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const source = { version: 1, channelCount: 1 };
+    const options = { channel: 0, start: 0, end: 8, removeDc: false, windowType: 'rectangular', gain: 1, offset: 0 };
+    let reads = 0;
+    const read = () => { reads++; return Float64Array.from([1, 0, -1, 0, 1, 0, -1, 0]); };
+    const first = pool.requestFft(source, options, read);
+    assert.equal(pool.requestFft(source, { ...options }, read), first, 'amplitude and phase views subscribe to one computation');
+    const result = await first;
+    assert.equal(result.dominantBin, 2);
+    assert.equal(pool.requestFft(source, options, read), first, 'unchanged hover redraws reuse the completed spectrum');
+    assert.equal(reads, 1, 'sharing must happen before copying the input samples');
+    const variants = [
+        { ...options, start: 1 }, { ...options, end: 7 }, { ...options, removeDc: true },
+        { ...options, windowType: 'hann' }, { ...options, gain: -1 }, { ...options, offset: 2 }
+    ];
+    const other = pool.requestFft({ version: 1, channelCount: 1 }, options, read);
+    source.version++;
+    const next = pool.requestFft(source, options, read);
+    assert.notEqual(next, first, 'new samples cannot reuse a previous snapshot');
+    const jobs = variants.map(value => pool.requestFft(source, value, read));
+    assert.ok(jobs.every(job => job !== next));
+    await Promise.all([other, next, ...jobs]);
+    assert.equal(reads, 9);
+    const invalid = { ...options, windowType: 'invalid' };
+    const failed = pool.requestFft(source, invalid, read);
+    await assert.rejects(failed, /窗函数/);
+    const retried = pool.requestFft(source, invalid, read);
+    assert.notEqual(retried, failed, 'a failed shared task cannot poison later requests');
+    await assert.rejects(retried, /窗函数/);
+});
+
+test('FFT workers prepare shared logarithmic magnitudes and unwrapped phase with identical fallback values', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { unwrapPhaseDegrees } = require('../systemResponse');
+    for (const hardwareConcurrency of [2, 4]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency, workerFactory: nodeWorkerFactory() });
+        t.after(() => pool.dispose());
+        for (const values of [new Float64Array(32),
+            Float64Array.from({ length: 32 }, (_, i) => Math.sin(i * 0.73) + Math.cos(i * 1.2))]) {
+            const result = await pool.runTask({ kind: 'fft', values, windowType: 'hann', removeDc: true });
+            assert.ok(result.logMags instanceof Float64Array);
+            assert.ok(result.unwrappedPhases instanceof Float64Array);
+            assert.deepEqual([...result.logMags], [...result.mags].map(value => value > 0 ? Math.log10(value) : NaN));
+            assert.deepEqual([...result.unwrappedPhases], unwrapPhaseDegrees(result.phases));
+        }
+    }
+});
+
 test('Hex assembly uses the worker budget and preserves every original input byte', async t => {
     const { HistoryWorkerPool } = loadPool();
     const gate = new SharedArrayBuffer(4), started = deferred(), threads = new Set();

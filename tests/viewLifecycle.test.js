@@ -35,7 +35,7 @@ function fixture() {
         requestAnimationFrame: fn => { pending.set(++id, fn); return id; },
         cancelAnimationFrame: key => pending.delete(key),
         ResizeObserver: class { constructor(fn) { this.fn = fn; observers.push(this); }
-            observe(target) { this.target = target; } disconnect() { this.disconnected = true; } },
+            observe(target) { this.target = target; (this.targets ??= []).push(target); } disconnect() { this.disconnected = true; } },
         IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); }
             observe(target) { this.target = target; } disconnect() { this.disconnected = true; } }
     });
@@ -44,11 +44,81 @@ function fixture() {
     const canvas = () => ({ ...target(), ownerDocument: document, parentElement: target(),
         getContext: () => new Proxy({}, { get: (_, key) => key === 'measureText'
             ? () => ({ width: 50 }) : () => {} }) });
-    const plot = frames => new context.SerialPlotter.Plotter(canvas(), frames, { viewOnly: true,
-        elements: { scrollWrap: target(), scrollThumb: target(), yScrollWrap: target(), yScrollThumb: target() } });
+    const plot = (frames, options = {}) => new context.SerialPlotter.Plotter(canvas(), frames, { viewOnly: true, ...options,
+        elements: { scrollWrap: target(), scrollThumb: target(), yScrollWrap: target(), yScrollThumb: target(), ...options.elements } });
     return { document, context, pending, observers, plot,
-        flush() { now += 120; const callbacks = [...pending.values()]; pending.clear(); callbacks.forEach(fn => fn(now)); } };
+        flush(interval = 120) { now += interval; const callbacks = [...pending.values()]; pending.clear(); callbacks.forEach(fn => fn(now)); } };
 }
+
+test('header-only layout changes redraw visible plots and keep offscreen bitmaps released', () => {
+    const f = fixture(), frames = new FrameBuffer(1, 100), header = target();
+    header.offsetHeight = 32;
+    frames.append([1]);
+    const plot = f.plot(frames, { elements: { header } });
+    plot.setChannelCount(1); plot.setAllChannelsVisible(true); f.flush();
+    const resize = f.observers.find(observer => observer instanceof f.context.ResizeObserver);
+    assert.ok(resize.targets.includes(header));
+    assert.ok(resize.targets.includes(plot.canvas.parentElement));
+    const before = plot.completedDraws;
+    header.offsetHeight = 96;
+    resize.fn([{ target: header }]); f.flush();
+    assert.equal(plot.height, 292);
+    assert.equal(plot.canvas.height, 292);
+    assert.equal(plot.completedDraws, before + 1);
+    f.flush(); assert.equal(f.pending.size, 0, 'a header observation cannot create an idle redraw loop');
+    const intersection = f.observers.find(observer => observer instanceof f.context.IntersectionObserver);
+    intersection.fn([{ isIntersecting: false }]);
+    header.offsetHeight = 128; resize.fn([{ target: header }]);
+    assert.equal(plot.canvas.width * plot.canvas.height, 1);
+    assert.equal(f.pending.size, 0);
+    plot.dispose(); assert.equal(resize.disconnected, true);
+});
+
+test('offscreen plots release backing bitmaps and restore sharp rendering without touching samples', () => {
+    const f = fixture(), frames = new FrameBuffer(1, 100);
+    frames.append([7]);
+    const sizes = [], gpu = { available: true, render: () => true, dispose() {},
+        resize: (...size) => sizes.push(size) };
+    f.document.defaultView.devicePixelRatio = 2;
+    const plot = f.plot(frames, { gpuRenderer: gpu });
+    const width = plot.canvas.width, height = plot.canvas.height;
+    const observer = f.observers.find(item => item.target === plot.canvas);
+    observer.fn([{ isIntersecting: false }]);
+    assert.equal(plot.canvas.width * plot.canvas.height, 1);
+    assert.deepEqual(sizes.at(-1).slice(2), [1, 1]);
+    plot.resize();
+    assert.equal(plot.canvas.width * plot.canvas.height, 1, 'offscreen resize must not allocate a full bitmap');
+    observer.fn([{ isIntersecting: true }]);
+    assert.equal(plot.canvas.width, width);
+    assert.equal(plot.canvas.height, height);
+    assert.deepEqual(sizes.at(-1).slice(2), [width, height]);
+    assert.equal(frames.getValue(0, 0), 7);
+    plot.setVisible(false);
+    assert.equal(plot.canvas.width * plot.canvas.height, 1);
+    plot.setVisible(true);
+    assert.equal(plot.canvas.width, width);
+    plot.dispose();
+    assert.equal(plot.canvas.width * plot.canvas.height, 1);
+});
+
+test('GPU time plots follow each 144 Hz animation tick while Canvas fallback retains its rate limit', () => {
+    const f = fixture(), frames = new FrameBuffer(2, 100);
+    const gpu = { available: true, render: () => true, resize() {}, dispose() {} };
+    const accelerated = f.plot(frames, { gpuRenderer: gpu }), fallback = f.plot(frames);
+    for (const plot of [accelerated, fallback]) { plot.setChannelCount(2); plot.setAllChannelsVisible(true); }
+    f.flush();
+    const firstGpu = accelerated.completedDraws, firstCpu = fallback.completedDraws;
+    for (let i = 0; i < 24; i++) {
+        frames.append([i, -i]);
+        accelerated.onDataChanged(); fallback.onDataChanged();
+        f.flush(1000 / 144);
+    }
+    assert.equal(accelerated.completedDraws - firstGpu, 24, 'GPU rendering must not skip frames at the former 30 FPS ceiling');
+    assert.ok(fallback.completedDraws - firstCpu <= 5);
+    f.flush();
+    assert.equal(f.pending.size, 0, 'removing the rate limit must not create an idle animation loop');
+    accelerated.dispose(); fallback.dispose();
+});
 
 test('multiple view-only plots never append, resize or clear their shared source', () => {
     const f = fixture(), frames = new FrameBuffer(1, 100);
