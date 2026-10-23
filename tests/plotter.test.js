@@ -38,10 +38,10 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.draw = () => { batchDraws++; };
     plotter.setChannelSettings([
         { name: 'first', color: '#112233', visible: true },
-        { name: 'CH2', color: '#445566', visible: false }
+        { name: 'CH00002', color: '#445566', visible: false }
     ]);
     assert.equal(batchDraws, 1);
-    assert.equal(plotter.getChannelMeta().map(ch => ch.name).join(','), 'first,CH02');
+    assert.equal(plotter.getChannelMeta().map(ch => ch.name).join(','), 'first,CH00002');
     plotter.draw = drawBeforeBatch;
     plotter.setChannelVisible(0, true);
     plotter.setChannelVisible(1, true);
@@ -51,7 +51,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.draw();
     assert.equal(plotter.frames.length, 5000);
     assert.equal(plotter.frames.getValue(0, 0), 1000);
-    assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).startsWith('Index,"a,b",CH02\r\n0,1000,-1000\r\n'));
+    assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).startsWith('Index,"a,b",CH00002\r\n0,1000,-1000\r\n'));
     assert.ok(lineToCount < 10000, `draw called lineTo ${lineToCount} times`);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     const start = performance.now();
@@ -121,18 +121,19 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     assert.equal(frames.getValue(0, 0), 0);
     const visibleSpectra = plotter.completedSpectrumDraws;
     plotter.addFrame([1]);
+    assert.notEqual(plotter._frequencyForChannel(0), offsetSpectrum);
     plotter.draw();
     assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 1,
         'a spectrum computed for inspection counts when it is first presented');
-    plotter._fftAt -= 300;
     plotter.draw();
-    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 2);
+    assert.equal(plotter.completedSpectrumDraws, visibleSpectra + 1,
+        'repainting unchanged data does not compute or count another spectrum');
     plotter.setChannelSettings([{ name: 'legacy', visible: true }]);
     const legacy = plotter.getChannelMeta()[0];
     assert.deepEqual([legacy.gainEnabled, legacy.gain, legacy.offsetEnabled, legacy.offset],
         [false, 1, false, 0]);
 
-    // Live samples should advance the frequency plot only when a fresh spectrum is due.
+    // New input can refresh on the next animation tick without a fixed waiting interval.
     let clockMs = 1000;
     context.performance = { now: () => clockMs };
     plotter._fftVersion = -1;
@@ -147,13 +148,15 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     clockMs += 40;
     plotter.addFrame([2]);
     plotter.renderLoop();
-    assert.equal(plotter.completedDraws, firstDraw + 1,
-        'fresh samples alone must not redraw the same cached spectrum');
+    assert.equal(plotter.completedDraws, firstDraw + 2);
+    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 2,
+        'new samples refresh the spectrum immediately, even within 100 ms');
 
     clockMs += 65;
     plotter.renderLoop();
     assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 2,
-        'a new spectrum is drawn after 100 ms of incoming data');
+        'elapsed time without new samples does not refresh a cached spectrum');
+    assert.equal(plotter.completedDraws, firstDraw + 2);
 
     clockMs += 40;
     plotter.addFrame([3]);
@@ -161,5 +164,5 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.renderLoop();
     assert.equal(plotter.completedDraws, firstDraw + 3,
         'a display change redraws promptly while the frequency cache is fresh');
-    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 2);
+    assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 3);
 });

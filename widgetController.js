@@ -1,7 +1,7 @@
 /** Own view instances and bind the one property inspector to the selected widget. */
 class WidgetController {
     constructor({ document, service, globals, workspace, onChange = () => {}, onRulesChange = () => {}, onActivate = () => {},
-        onBeforeChannelRenumber = () => {} }) {
+        onBeforeChannelRenumber = () => {}, onChannelMetadataChange = () => {} }) {
         this.document = document;
         this.service = service;
         this.globals = globals;
@@ -9,6 +9,8 @@ class WidgetController {
         this.onChange = onChange;
         this.onRulesChange = onRulesChange;
         this.onBeforeChannelRenumber = onBeforeChannelRenumber;
+        this.onChannelMetadataChange = onChannelMetadataChange;
+        this.channelSearchText = '';
         this.onActivate = onActivate;
         this.widgets = new Map();
         this.activeId = null;
@@ -49,6 +51,7 @@ class WidgetController {
     get active() { return this.widgets.get(this.activeId); }
     element(id) { return this.document.getElementById(id); }
     _listen(element, event, callback, cleanups = this.cleanups) {
+        if (!element) return;
         element.addEventListener(event, callback);
         cleanups.push(() => element.removeEventListener(event, callback));
     }
@@ -84,8 +87,11 @@ class WidgetController {
         remove.className = 'widget-close'; remove.type = 'button'; remove.textContent = '×';
         remove.setAttribute('aria-label', `删除${title}`);
         handle.append(remove);
-        const source = this.service.acquireSource(type !== 'byte' ? { captureMode: 'number' } : settings);
+        const source = this.service.acquireSource(type !== 'byte' ? { captureMode: 'number', engineSource: settings.engineSource } : settings);
         const widget = { id, type, title, settings, element, refs, source, lastTab: null, disposed: false };
+        widget.engineNotice = this.document.createElement('div'); widget.engineNotice.className = 'widget-engine-notice';
+        widget.engineNotice.setAttribute('role', 'status'); widget.engineNotice.hidden = true;
+        element.append(widget.engineNotice);
         if (type === 'wave') widget.pendingViewport = settings[settings.plotContent === 'response' ? 'responseViewport' : 'viewport'];
         this.widgets.set(id, widget);
         this.workspace.add({ id, type, title, element, handle, rect, minWidth: 280, minHeight: 180 });
@@ -166,9 +172,13 @@ class WidgetController {
 
     applySettings(widget) {
         const { settings, view } = widget;
+        const raw = this.service.dataEngine?.mode === 'Raw_Data';
+        widget.engineNotice.hidden = !raw || widget.type === 'wave' && settings.plotContent === 'response' || widget.type === 'byte' && settings.captureMode !== 'engine';
+        widget.engineNotice.textContent = raw ? widget.type === 'byte' ? 'Raw_Data：当前展示原始记录，暂无数值字段。'
+            : 'Raw_Data：暂无数值输入。可在左下数据引擎配置解析；系统响应仍可查看。' : '';
         if (widget.type === 'wave') {
             const response = settings.plotContent === 'response';
-            widget.responseFrames.configure(this.service.numericSource.frames,
+            widget.responseFrames.configure(widget.source.kind === 'numeric' ? widget.source.frames : this.service.numericSource.frames,
                 Number(settings.plotResponseTimePoints), Number(this.globals.plotWindowPoints));
             const target = response ? widget.responseFrames : widget.source.frames;
             const switching = view.frames !== target;
@@ -181,7 +191,7 @@ class WidgetController {
                 view.setFrames(target);
                 widget.pendingViewport = null; this._cancelViewportRestore(widget);
             }
-            view.setChannelCount(this.service.numericSource.frames.channelCount);
+            view.setChannelCount(target.channelCount);
             const channelKey = this._channelSettingsKey(widget);
             const channels = view.getChannelMeta().map((channel, index) => ({ ...channel, ...settings[channelKey][index],
                 name: this.globals.channelNames[index] ?? SerialPlotter.formatChannelId(index),
@@ -219,7 +229,11 @@ class WidgetController {
         } else if (widget.type === 'pose') {
             view.setFrames(widget.source.frames); view.setSettings(settings); view.setPaused(this.service.paused); view.resize();
         } else {
-            view.setMode(settings.captureMode);
+            const mode = settings.captureMode === 'engine' ? widget.source.kind === 'protocol' ? 'protocol' : widget.source.kind === 'numeric' ? 'number' : 'hex' : settings.captureMode;
+            if (view.setProtocolDecoder) view.setProtocolDecoder(widget.source.decodeRecord ?? null, { deferRender: true });
+            if (view.setProtocolOptions) view.setProtocolOptions({ fieldPaths: settings.protocolFieldPaths,
+                mappings: this.service.dataEngine?.config.mappings ?? [] });
+            view.setMode(mode);
             view.setEncoding(settings.textEncoding);
             view.setDisplayOptions(settings.monitorDisplay);
             view.channelColors = Array.from({ length: this.service.numericSource.frames.channelCount }, (_, index) => this.channelColor(index));
@@ -234,6 +248,17 @@ class WidgetController {
         this.element('widget-selection-prompt').hidden = Boolean(widget);
         this.element('widget-title-tools').hidden = !widget;
         this.element('monitor-settings-tabs').hidden = !widget;
+        const sourceWrap = this.element('widget-engine-source-wrap'), sourceSelect = this.element('widget-engine-source');
+        const choices = this.service.dataEngine?.choices() ?? [];
+        sourceWrap.hidden = !widget || widget.type === 'byte' || !choices.length;
+        sourceSelect.replaceChildren(...choices.map(choice => {
+            const option = this.document.createElement('option'); option.value = choice.id; option.textContent = choice.name; return option;
+        }));
+        if (widget?.settings.engineSource && choices.length && !choices.some(choice => choice.id === widget.settings.engineSource)) {
+            const option = this.document.createElement('option'); option.value = widget.settings.engineSource;
+            option.textContent = `来源不可用：${widget.settings.engineSource}`; sourceSelect.append(option);
+        }
+        if (widget) sourceSelect.value = widget.settings.engineSource ?? 'synchronized';
         this.element('active-monitor-caption').textContent = widget?.title ?? '控件属性';
         const typeLabel = this.element('active-widget-type');
         typeLabel.hidden = !widget;
@@ -251,7 +276,7 @@ class WidgetController {
         }
         this.syncGlobals();
         if (widget.type === 'wave') this._bindYBounds(widget);
-        else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.settings.captureMode); }
+        else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.settings.captureMode === 'engine' ? this.service.dataEngine?.mode === 'Data_Array' ? 'number' : 'engine' : widget.settings.captureMode); }
         else this.poseConfigView.render(widget);
         this.displayView.setChannels(this.channelMeta());
         this._renderChannels(widget);
@@ -261,15 +286,56 @@ class WidgetController {
         this.selectTab(widget.lastTab ?? (widget.type === 'wave' ? 'tab-waveform-config' : widget.type === 'pose' ? 'tab-pose-display' : 'tab-monitor-config'));
     }
 
+    getChannelRegistry() {
+        if (!this.channelRegistry) this.channelRegistry = new SerialPlotter.ChannelRegistry({
+            rawCount: Number(this.globals.channelsCount), definitions: this.globals.channelDefinitions,
+            names: this.globals.channelNames, channels: this.globals.channelRecords });
+        this.globals.channelRecords = this.channelRegistry.toJSON(); return this.channelRegistry;
+    }
+
     channelMeta() {
-        const frames = this.service.numericSource.frames;
-        return Array.from({ length: frames.channelCount }, (_, index) => ({ index, number: index + 1,
-            definition: this.globals.channelDefinitions.find(value => value.number === index + 1),
-            color: this.channelColor(index), signal: this.active?.type === 'wave' && this.active.settings.plotContent === 'response'
-                ? ['constant', 'system'].includes(this.globals.channelDefinitions.find(value => value.number === index + 1)?.type)
-                : frames.isSignal(index),
-            name: this.globals.channelNames[index] ?? SerialPlotter.formatChannelId(index) }))
-            .filter(channel => channel.index < Number(this.globals.channelsCount) || channel.definition);
+        const frames = this.service.numericSource.frames, response = this.active?.type === 'wave' && this.active.settings.plotContent === 'response';
+        return this.getChannelRegistry().getChannels().map(entry => ({ index: entry.number - 1, number: entry.number,
+            definition: entry.definition, color: this.channelColor(entry.number - 1), name: entry.name,
+            signal: response ? ['constant', 'system'].includes(entry.type) : frames.isSignal(entry.number - 1) }));
+    }
+
+    ensureRawChannels(count) {
+        const old = Number(this.globals.channelsCount); if (count <= old) return;
+        if (!Number.isInteger(count) || count + this.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
+        const registry = this.getChannelRegistry(), delta = count - old;
+        const numberMap = new Map(registry.getChannels().map(entry => [entry.number, entry.number > old ? entry.number + delta : entry.number]));
+        this._remapChannels(this.globals.channelDefinitions, numberMap, { rawCount: count });
+    }
+
+    previewRawChannels(count) {
+        const old = Number(this.globals.channelsCount); if (count <= old) return this.globals;
+        if (!Number.isInteger(count) || count + this.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
+        const registry = this.getChannelRegistry(), delta = count - old;
+        const mapping = new Map(registry.getChannels().map(entry => [entry.number, entry.number > old ? entry.number + delta : entry.number]));
+        const definitions = this.globals.channelDefinitions.map(definition => ({ ...definition, number: mapping.get(definition.number),
+            expression: SerialPlotter.renumberChannelExpression(definition.type === 'formula' ? registry.canonicalizeExpression(definition.expression) : definition.expression, mapping) }));
+        const names = [];
+        for (const entry of registry.getChannels()) names[mapping.get(entry.number) - 1] = entry.name;
+        return { ...this.globals, channelsCount: String(count), channelNames: names, channelDefinitions: definitions };
+    }
+
+    addMappedChannel() {
+        this.ensureRawChannels(Number(this.globals.channelsCount) + 1);
+        return this.getChannelRegistry().get(Number(this.globals.channelsCount));
+    }
+
+    rebindEngineSources() {
+        for (const widget of this.widgets.values()) {
+            const previous = widget.source;
+            widget.source = this.service.acquireSource(widget.type === 'byte' ? widget.settings : { captureMode: 'number', engineSource: widget.settings.engineSource });
+            this.service.releaseSource(previous);
+            if (widget.type !== 'wave' || widget.settings.plotContent !== 'response') widget.view.setFrames(widget.source.frames);
+            this.applySettings(widget); this._whenReady(widget);
+        }
+        this.channelRegistry = null;
+        if (this.active) this.activate(this.activeId);
+        this.onRulesChange(); this.onChange();
     }
 
     channelColor(index) {
@@ -311,16 +377,18 @@ class WidgetController {
                 widget.view.invalidateData();
             }
         }
+        this.channelView.setChannelColor(index, color);
+        this.onChannelMetadataChange(index, { color });
         this.onChange();
     }
 
     validateChannelDefinition(definition) {
         const definitions = this.globals.channelDefinitions.filter(value => value.number !== definition.number).concat(definition);
-        return new SerialPlotter.ChannelOperations(Number(this.globals.channelsCount), definitions);
+        return new SerialPlotter.ChannelOperations(Number(this.globals.channelsCount), definitions, { names: this.globals.channelNames, symbolVersion: 2 });
     }
 
     updateChannelDefinition(definition, { reapply = false } = {}) {
-        this.validateChannelDefinition(definition);
+        definition = this.validateChannelDefinition(definition).definitions.find(entry => entry.number === definition.number);
         const definitions = this.globals.channelDefinitions.filter(value => value.number !== definition.number).concat({ ...definition })
             .sort((a, b) => a.number - b.number);
         const ready = this.service.updateChannelDefinitions(definitions, {
@@ -332,8 +400,11 @@ class WidgetController {
     }
 
     addChannel(type) {
-        const number = Math.max(Number(this.globals.channelsCount), ...this.globals.channelDefinitions.map(value => value.number)) + 1;
-        const definition = { number, type, expression: type === 'constant' ? '[0]=1' : type === 'system' ? 'x[0]' : 'CH01' };
+        let number = Number(this.globals.channelsCount);
+        for (const definition of this.globals.channelDefinitions) number = Math.max(number, definition.number);
+        number++;
+        if (number > 65535) throw new Error('通道总数不能超过 65535');
+        const definition = { id: `channel-${Date.now()}-${this.channelSequence = (this.channelSequence ?? 0) + 1}`, number, type, expression: type === 'constant' ? '[0]=1' : type === 'system' ? 'X[0]' : 'CH00001' };
         if (type === 'system') definition.initial = '';
         this.channelView.expanded.add(number);
         this.updateChannelDefinition(definition).catch(error => this._showError(error.message));
@@ -344,7 +415,7 @@ class WidgetController {
         if (!this.globals.channelDefinitions.some(value => value.number === number)) return;
         const remaining = this.globals.channelDefinitions.filter(value => value.number !== number);
         // Reject references to the deleted channel before shifted IDs can hide them.
-        new SerialPlotter.ChannelOperations(Number(this.globals.channelsCount), remaining);
+        new SerialPlotter.ChannelOperations(Number(this.globals.channelsCount), remaining, { names: this.globals.channelNames, symbolVersion: 2 });
         const oldCount = this.service.numericSource.frames.channelCount;
         const numberMap = new Map(Array.from({ length: oldCount }, (_, index) => index + 1)
             .filter(value => value !== number).map(value => [value, value > number ? value - 1 : value]));
@@ -363,11 +434,12 @@ class WidgetController {
         return this._remapChannels(this.globals.channelDefinitions, numberMap);
     }
 
-    _remapChannels(previousDefinitions, numberMap) {
+    _remapChannels(previousDefinitions, numberMap, { rawCount = Number(this.globals.channelsCount) } = {}) {
+        const oldRegistry = this.getChannelRegistry();
         const remapDefinition = definition => ({ ...definition, number: numberMap.get(definition.number),
-            expression: SerialPlotter.renumberChannelExpression(definition.expression, numberMap) });
+            expression: SerialPlotter.renumberChannelExpression(definition.type === 'formula' ? oldRegistry.canonicalizeExpression(definition.expression) : definition.expression, numberMap) });
         const definitions = previousDefinitions.map(remapDefinition).sort((a, b) => a.number - b.number);
-        new SerialPlotter.ChannelOperations(Number(this.globals.channelsCount), definitions);
+        new SerialPlotter.ChannelOperations(rawCount, definitions, { symbolVersion: 2 });
         this.onBeforeChannelRenumber(numberMap);
         const indices = values => values.filter(index => numberMap.has(index + 1)).map(index => numberMap.get(index + 1) - 1);
         const oldCount = this.service.numericSource.frames.channelCount;
@@ -383,11 +455,16 @@ class WidgetController {
         this.globals.channelNames = reorder(names.map((name, index) => name === SerialPlotter.formatChannelId(index) && numberMap.has(index + 1)
             ? SerialPlotter.formatChannelId(numberMap.get(index + 1) - 1) : name));
         this.globals.channelColors = reorder(colors);
+        this.globals.channelRecords = oldRegistry.toJSON().filter(entry => numberMap.has(entry.number))
+            .map(entry => ({ ...entry, number: numberMap.get(entry.number) }));
+        this.globals.channelsCount = String(rawCount);
+        this.channelRegistry = null;
+        this.service.channelNames = this.globals.channelNames;
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave') for (const key of ['channels', 'responseChannels'])
                 widget.settings[key] = reorder(widget.settings[key]).map((channel, index) => ({ ...channel,
                     name: this.globals.channelNames[index], color: this.globals.channelColors[index] }));
-            else if (widget.type === 'pose') widget.settings = SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap);
+            else if (widget.type === 'pose') widget.settings = { ...SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap), engineSource: widget.settings.engineSource ?? null };
             else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
             for (const profile of Object.values(widget.settings.exportSettings?.formats ?? {}))
                 if (profile.channelIndices !== null) profile.channelIndices = indices(profile.channelIndices);
@@ -395,7 +472,17 @@ class WidgetController {
         this.channelView.expanded = new Set([...this.channelView.expanded].filter(value => numberMap.has(value)).map(value => numberMap.get(value)));
         this.channelView.drafts = new Map([...this.channelView.drafts].filter(([value]) => numberMap.has(value))
             .map(([value, draft]) => [numberMap.get(value), remapDefinition(draft)]));
-        const ready = this.service.updateChannelDefinitions(definitions, { rebuild: false, numberMap });
+        let ready;
+        if (rawCount !== oldRegistry.rawCount) {
+            this.service.channelDefinitions = definitions;
+            const sources = [...this.service.sources].filter(source => source.kind === 'numeric');
+            for (const source of sources) if (source.frames.resetFormat) {
+                source.catalogCount = rawCount; source.frames.channelNames = this.globals.channelNames;
+                source.frames.resetFormat(rawCount, definitions);
+            }
+            if (this.service.dataEngine) this.service.dataEngine.arraySource.catalogCount = rawCount;
+            ready = Promise.resolve();
+        } else ready = this.service.updateChannelDefinitions(definitions, { rebuild: false, numberMap });
         this.globals.channelDefinitions = definitions;
         this._channelsChanged();
         return ready.catch(error => this._showError(error.message));
@@ -403,8 +490,10 @@ class WidgetController {
 
     _channelsChanged() {
         // History replay may still expose the previous frame shape. Bind against the new rules.
+        this.channelRegistry = null;
+        this.service.channelNames = this.globals.channelNames;
         const originalCount = Number(this.globals.channelsCount);
-        const engine = new SerialPlotter.ChannelOperations(originalCount, this.globals.channelDefinitions);
+        const engine = new SerialPlotter.ChannelOperations(originalCount, this.globals.channelDefinitions, { names: this.globals.channelNames, symbolVersion: 2 });
         const isScalar = index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula';
         for (const widget of this.widgets.values()) {
             if (widget.type === 'pose') {
@@ -423,13 +512,22 @@ class WidgetController {
     }
 
     setChannelName(index, name) {
-        this.globals.channelNames[index] = name;
+        const registry = this.getChannelRegistry(); name = registry.rename(index + 1, name).name;
+        this.globals.channelDefinitions = registry.getDefinitions();
+        this.globals.channelNames = registry.getNames(); this.globals.channelRecords = registry.toJSON();
+        this.service.channelNames = this.globals.channelNames;
+        this.service.channelDefinitions = this.globals.channelDefinitions;
+        for (const source of this.service.sources) if (source.kind === 'numeric') {
+            source.frames.channelNames = this.globals.channelNames; source.frames.names = this.globals.channelNames;
+        }
         for (let i = 0; i < this.globals.channelNames.length; i++) this.globals.channelNames[i] ??= SerialPlotter.formatChannelId(i);
         for (const widget of this.widgets.values()) if (widget.type === 'wave') {
             widget.view.setChannelName(index, name);
             widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
         }
-        this.displayView.setChannels(this.channelMeta());
+        this.displayView.setChannels(this.channelMeta(), { render: false });
+        this.channelView.setChannelName(index, name);
+        this.onChannelMetadataChange(index, { name });
         if (this.active?.type === 'pose') this.poseConfigView.render(this.active);
         this.onChange();
     }
@@ -438,14 +536,7 @@ class WidgetController {
         this.element('plot-window-points').value = this.active?.type === 'wave' &&
             this.active.settings.plotContent === 'response' && this.active.settings.plotViewMode === 'time'
             ? this.active.settings.plotResponseTimePoints : this.globals.plotWindowPoints;
-        for (const [key, id] of Object.entries(this.globalIds)) {
-            const input = this.element(id);
-            if (input.type === 'checkbox') input.checked = this.globals[key]; else input.value = this.globals[key];
-        }
-        for (const id of ['rebuild-history', 'rebuild-history-byte', 'rebuild-history-pose', 'channel-rebuild-wave', 'channel-rebuild-byte'])
-            this.element(id).checked = this.globals.rebuildHistory;
-        this.element('header-config').hidden = !this.globals.enableHeader;
-        this.element('footer-config').hidden = !this.globals.enableFooter;
+        // Numeric controls are an explicit-apply global draft; selecting widgets cannot overwrite it.
     }
 
     updateTextRules(rules) {
@@ -470,8 +561,8 @@ class WidgetController {
         const widget = this.active;
         if (!widget) return;
         const wave = widget.type === 'wave';
-        const valid = new Set(widget.type === 'pose' ? ['tab-pose-frame', 'tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-frame', 'tab-waveform-config', 'tab-waveform-channels']
-            : ['tab-byte-frame', 'tab-monitor-config', ...(widget.settings.captureMode === 'number' ? ['tab-monitor-channels'] : [])]);
+        const valid = new Set(widget.type === 'pose' ? ['tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-config', 'tab-waveform-channels']
+            : ['tab-monitor-config', ...(widget.settings.captureMode === 'engine' && ['numeric', 'protocol'].includes(widget.source.kind) ? ['tab-monitor-channels'] : [])]);
         if (!valid.has(tab)) tab = widget.type === 'pose' ? 'tab-pose-display' : wave ? 'tab-waveform-config' : 'tab-monitor-config';
         widget.lastTab = tab;
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn')) {
@@ -492,11 +583,6 @@ class WidgetController {
 
     _syncSections(widget) {
         const s = widget.settings;
-        const byteNumeric = widget.type === 'byte' && s.captureMode === 'number';
-        const shared = this.element('shared-numeric-settings');
-        const host = this.element(widget.type === 'pose' ? 'pose-numeric-settings' : byteNumeric ? 'byte-numeric-settings' : 'tab-waveform-frame');
-        if (shared.parentElement !== host) host.append(shared);
-        this.element('byte-numeric-settings').hidden = !byteNumeric;
         if (widget.type === 'pose') return;
         this.element('plot-response-status').textContent = widget.responseStatus ?? '';
         this.element('plot-response-status').hidden = !widget.responseStatus;
@@ -519,7 +605,7 @@ class WidgetController {
         this.element('frame-raw-settings').hidden = s.captureMode !== 'text';
         this.element('frame-text-settings').hidden = s.captureMode !== 'text';
         const independent = response && s.plotViewMode === 'time';
-        this.element('plot-window-points').max = String(independent ? 65536 : Math.min(65536, Number(this.globals.maxPoints)));
+        this.element('plot-window-points').max = String(SerialPlotter.Limits.maxPlotWindowPoints);
         this.element('plot-window-label').textContent = independent ? '时域采样点数（当前控件）' : '采样点数（全局共用）';
     }
 
@@ -538,6 +624,11 @@ class WidgetController {
     }
 
     _bindInspector() {
+        this._listen(this.element('widget-engine-source'), 'change', () => {
+            if (!this.active || this.binding) return;
+            this.active.settings.engineSource = this.element('widget-engine-source').value;
+            this.rebindEngineSources();
+        });
         this._listen(this.element('plot-window-points'), 'change', () => {
             try { this.setPlotWindowPoints(this.element('plot-window-points').value); this._showError(''); }
             catch (error) { this._showError(error.message); }
@@ -547,11 +638,24 @@ class WidgetController {
             this.active.channelCategory = this.element(`channel-category-${kind}`).value;
             this._renderChannels(this.active);
         });
-        for (const kind of ['wave', 'byte']) this._listen(this.element(`channel-add-type-${kind}`), 'change', () => {
-            const widget = this.active;
-            if (widget?.type !== kind || widget.channelCategory && widget.channelCategory !== 'all') return;
-            widget.channelAddType = this.element(`channel-add-type-${kind}`).value;
-        });
+        for (const kind of ['wave', 'byte']) {
+            const input = this.element(`channel-search-${kind}`);
+            let composing = false;
+            const search = () => {
+                if (this.channelSearchText === input.value) return;
+                this.channelSearchText = input.value;
+                if (this.active) this._renderChannels(this.active);
+            };
+            this._listen(input, 'compositionstart', () => { composing = true; });
+            this._listen(input, 'compositionend', () => { composing = false; search(); });
+            this._listen(input, 'input', event => { if (!composing && !event.isComposing) search(); });
+            this._listen(input, 'change', () => { if (!composing) search(); });
+            this._listen(input, 'keydown', event => {
+                if (composing || event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
+                event.preventDefault();
+                this.channelView.locateFirst(this.element(kind === 'wave' ? 'channel-config-list' : 'monitor-channel-list'));
+            });
+        }
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn'))
             this._listen(button, 'click', () => this.selectTab(button.dataset.tab));
         for (const name of ['change', 'blur', 'pointerleave'])
@@ -634,30 +738,6 @@ class WidgetController {
                 this.applySettings(widget); this._syncSections(widget); this.onChange(); this._showError('');
             } catch (error) { this._showError(error.message); }
         });
-        for (const [key, id] of Object.entries(this.globalIds)) this._listen(this.element(id), 'change', () => {
-            const input = this.element(id), candidate = { ...this.globals, [key]: input.type === 'checkbox' ? input.checked : input.value };
-            try {
-                SerialPlotter.validateConfig(candidate);
-                new SerialPlotter.ChannelOperations(Number(candidate.channelsCount), candidate.channelDefinitions);
-                Object.assign(this.globals, candidate);
-                void this.service.updateNumericFormat(candidate).then(() => this.syncData(this.service.numericSource));
-                this._channelsChanged();
-                this.syncGlobals(); this.activate(this.activeId); this.onRulesChange(); this.onChange(); this._showError('');
-            } catch (error) { this._showError(error.message); }
-        });
-        for (const id of ['rebuild-history', 'rebuild-history-byte', 'rebuild-history-pose', 'channel-rebuild-wave', 'channel-rebuild-byte']) this._listen(this.element(id), 'change', () => {
-            this.globals.rebuildHistory = this.element(id).checked;
-            this.service.rebuildHistory = this.globals.rebuildHistory;
-            this.syncGlobals(); this.onChange();
-        });
-        for (const kind of ['wave', 'byte']) this._listen(this.element(`channel-add-${kind}`), 'click', () => {
-            const widget = this.active;
-            if (widget?.type !== kind || widget.channelCategory === 'raw') return;
-            const type = widget.channelCategory && widget.channelCategory !== 'all'
-                ? widget.channelCategory : this.element(`channel-add-type-${kind}`).value;
-            try { this.addChannel(type); }
-            catch (error) { this._showError(error.message); }
-        });
         for (const [id, visible] of [['btn-channels-all-on', true], ['btn-channels-all-off', false]])
             this._listen(this.element(id), 'click', () => {
                 if (this.active?.type !== 'wave') return;
@@ -670,16 +750,34 @@ class WidgetController {
 
     _renderChannels(widget) {
         if (widget.type === 'pose') { this.poseConfigView.render(widget); return; }
+        this.channelView.showError(widget, '');
+        if (widget.type === 'byte') this.element('channel-filters-byte').hidden = widget.source.kind === 'protocol';
+        if (widget.type === 'byte' && widget.source.kind === 'protocol') { this._renderProtocolFields(widget); return; }
         const category = widget.channelCategory ?? 'all', restricted = category !== 'all';
+        for (const kind of ['wave', 'byte']) this.element(`channel-search-${kind}`).value = this.channelSearchText;
         this.element(`channel-category-${widget.type}`).value = category;
-        const type = this.element(`channel-add-type-${widget.type}`), button = this.element(`channel-add-${widget.type}`);
-        type.value = restricted ? category : widget.channelAddType ?? 'formula';
-        type.disabled = restricted;
-        for (const option of type.options) if (option.value === 'raw') option.hidden = category !== 'raw';
-        button.disabled = category === 'raw';
-        button.title = category === 'raw' ? '原始数据通道由帧解析生成，不能手动新增' : '';
         if (widget.type === 'wave') this.channelView.render(this.element('channel-config-list'), widget);
-        else if (widget.settings.captureMode === 'number') this.channelView.render(this.element('monitor-channel-list'), widget);
+        else if (widget.settings.captureMode === 'engine') this.channelView.render(this.element('monitor-channel-list'), widget);
+    }
+
+    _renderProtocolFields(widget) {
+        const host = this.element('monitor-channel-list'); this.channelView.clear(host);
+        const label = this.document.createElement('label'); label.className = 'input-group';
+        label.textContent = '显示字段路径（每行一个，空白表示全部；结构路径包含全部子字段）';
+        const input = this.document.createElement('textarea'); input.rows = 4; input.value = (widget.settings.protocolFieldPaths ?? []).join('\n');
+        input.setAttribute('aria-label', '显示结构化字段'); label.append(input);
+        const apply = this.document.createElement('button'); apply.type = 'button'; apply.className = 'btn btn-primary'; apply.textContent = '应用字段选择';
+        const hint = this.document.createElement('p'); hint.className = 'hint-text';
+        const paths = new Set();
+        for (let index = widget.source.frames.length - 1; index >= Math.max(0, widget.source.frames.length - 16) && paths.size < 80; index--)
+            for (const field of widget.source.decodeRecord(index)?.record.flatFields ?? []) { if (paths.size >= 80) break; paths.add(field.path); }
+        hint.textContent = paths.size ? `最近记录的字段：${[...paths].join('、')}` : '收到消息后可查看字段路径。未选择数值映射的字段仍可显示和导出。';
+        apply.addEventListener('click', () => {
+            const paths = input.value.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
+            widget.settings.protocolFieldPaths = paths.length ? [...new Set(paths)] : null;
+            widget.view.setProtocolOptions({ fieldPaths: widget.settings.protocolFieldPaths }); this.onChange();
+        });
+        host.append(label, apply, hint);
     }
 
     _channelSettingsKey(widget) { return widget.settings.plotContent === 'response' ? 'responseChannels' : 'channels'; }
@@ -783,8 +881,16 @@ class WidgetController {
             this.applySettings(this.active);
             this.activate(this.activeId); this.onChange(); return;
         }
-        SerialPlotter.validateConfig({ plotWindowPoints: value, maxPoints: this.globals.maxPoints });
-        this.globals.plotWindowPoints = String(value);
+        const count = SerialPlotter.parseIntInRange(value, SerialPlotter.Limits.minPoints,
+            SerialPlotter.Limits.maxPlotWindowPoints, '波形监视台内采样点数');
+        const capacity = Math.max(count, Number(this.globals.maxPoints));
+        SerialPlotter.validateConfig({ plotWindowPoints: count, maxPoints: capacity });
+        if (capacity > Number(this.globals.maxPoints)) {
+            this.service.setCapacity(capacity);
+            this.globals.maxPoints = String(capacity);
+            this.element('max-points').value = String(capacity);
+        }
+        this.globals.plotWindowPoints = String(count);
         for (const widget of this.widgets.values()) if (widget.type === 'wave') this.applySettings(widget);
         this.activate(this.activeId);
         this.onChange();

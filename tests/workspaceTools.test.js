@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FrameBuffer } = require('../frameBuffer');
+const { SynchronizedFrames } = require('../engineFrames');
 const { WorkspaceTools } = require('../workspaceTools');
 
 function element() {
@@ -237,4 +238,123 @@ test('a view render failure settles asynchronous search without leaking a pendin
     const outcome = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve('unsettled'), 50))]);
     assert.equal(outcome, false);
     assert.match(f.el('monitor-search-status').textContent, /render failed/);
+});
+
+test('65535 search channels render 40 candidates per page and preserve an off-page selection', () => {
+    const source = widget('large', [1]); source.source.frames.channelCount = 65535;
+    const f = fixture([source]);
+    f.service.channelNames = Array.from({ length: 65535 }, (_, index) => index === 65534 ? '末通道' : 'CH' + (index + 1));
+    f.select('large');
+    assert.ok(f.tools.channelInputs.length <= 41);
+    const picker = f.tools.channelPicker; picker.filter.value = '末通道'; picker.filter.fire('input');
+    const target = f.tools.channelInputs.find(row => row.channel === 65534);
+    assert.equal(target.text.textContent, 'CH65535 · 末通道');
+    target.input.checked = true; target.input.fire('change');
+    picker.filter.value = ''; picker.filter.fire('input'); picker.next.fire('click');
+    assert.ok(f.tools.channelInputs.some(row => row.channel === 40));
+    assert.deepEqual([...f.tools.selectedChannels], [65534]);
+    assert.match(f.el('monitor-search-channel-toggle').textContent, /CH65535/);
+    f.tools.dispose();
+});
+
+test('engine numeric sources use scalar search while Raw_Data selects Hex search for every widget', async () => {
+    const source = widget('engine', [7], { type: 'byte', settings: { captureMode: 'engine' } }); source.source.kind = 'numeric';
+    const f = fixture([source]); f.service.dataEngine = { mode: 'Data_Array' }; f.select('engine');
+    assert.equal(f.tools._kind(), 'number'); f.el('monitor-search-query').value = '7';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    f.service.dataEngine.mode = 'Raw_Data'; f.tools.syncSources();
+    assert.equal(f.tools._kind(), 'hex');
+    assert.equal(f.el('monitor-search-channel').hidden, true);
+    f.tools.dispose();
+});
+
+test('protocol field searches preserve exact64 and text paths and map source byte spans to other widgets', async () => {
+    const { Protocol } = require('../protocolEngine');
+    const compiled = Protocol.compile({ id: 'search', framing: { fixedLength: 12 }, payloadOffset: 0,
+        messages: [{ id: 'state', command: 1, fields: [{ name: 'clock', type: 'uint64' }, { name: 'label', type: 'string', length: 4 }] }] });
+    const source = widget('protocol', [], { type: 'byte', settings: { captureMode: 'engine' } }); source.source.kind = 'protocol';
+    source.source.frames.appendRaw(Protocol.encode(compiled, 'state', { clock: 9007199254740993n, label: '温' }), '', 1, 1000, { byteOffset: 100 });
+    source.source.decodeRecord = index => Protocol.decode(source.source.frames.rawBytesAt(index), compiled);
+    source.view.reference = 100;
+    const raw = widget('raw', Array(12).fill(0), { type: 'byte', offset: 100, settings: { captureMode: 'hex' } });
+    const f = fixture([source, raw]); f.select('protocol');
+    const controls = f.tools.protocolControls;
+    assert.equal(controls.host.hidden, false);
+    controls.kind.value = 'integer64'; controls.kind.fire('change'); controls.path.value = 'clock'; controls.path.fire('input');
+    f.el('monitor-search-query').value = '9007199254740993';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.deepEqual(f.tools.matches.map(match => [match.path, match.startByte, match.endByte]), [['clock', 100, 108]]);
+    assert.equal(raw.view.matches[0].absoluteStartByte, 100);
+    assert.equal(raw.view.matches[0].absoluteEndByte, 108);
+    controls.kind.value = 'text'; controls.kind.fire('change'); controls.path.value = 'label'; controls.path.fire('input');
+    f.el('monitor-search-query').value = '温';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.deepEqual(f.tools.matches.map(match => [match.path, match.startByte, match.endByte]), [['label', 108, 112]]);
+    f.tools.dispose();
+});
+
+test('synchronized held-value matches locate each channel origin instead of the most recent unrelated packet', async () => {
+    const source = widget('sync', [7, 7], { offset: 200 });
+    source.source.frames.provenanceAt = (channel, index) => ({ order: 10, byteOffset: 100, endByte: 104 });
+    source.view.jumpToFrame = index => { source.view.sampleJump = index; return true; };
+    const raw = widget('raw', [0, 0, 0, 0], { type: 'byte', offset: 100, settings: { captureMode: 'hex' } });
+    raw.source.frames.orderAt = index => index + 10;
+    const f = fixture([source, raw]); f.service.dataEngine = { recordsSource: raw.source };
+    f.select('sync'); f.el('monitor-search-query').value = '7';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.equal(f.tools.matches[0].startByte, 100);
+    assert.equal(source.view.sampleJump, 0);
+    assert.deepEqual(raw.view.jumps, [100]);
+    assert.equal(source.view.navigationMarkers.matches[0].startOrder, source.source.frames.orderAt(0));
+    f.tools.dispose();
+});
+
+test('synchronized value matches report evicted source packets without jumping to unrelated retained bytes', async () => {
+    const source = widget('sync', [7], { offset: 200 });
+    source.source.frames.provenanceAt = () => ({ order: 10, byteOffset: 100, endByte: 104 });
+    const raw = widget('raw', [0], { type: 'byte', offset: 200, settings: { captureMode: 'hex' } });
+    raw.source.frames.orderAt = () => 20;
+    const f = fixture([source, raw]); f.service.dataEngine = { recordsSource: raw.source };
+    f.select('sync'); f.el('monitor-search-query').value = '7';
+    assert.equal(await f.tools.requestSearch('nearest'), false);
+    assert.equal(f.tools.matches.length, 1, 'the held value remains a match even after its packet is evicted');
+    assert.match(f.el('monitor-search-status').textContent, /源消息.*保留/);
+    assert.deepEqual(raw.view.jumps, []);
+    f.tools.dispose();
+});
+
+test('synchronized formula searches navigate the referenced input packet and report its actual eviction', async () => {
+    const source = widget('sync', []), raw = widget('raw', [], { type: 'byte', settings: { captureMode: 'hex' } });
+    const records = new FrameBuffer(1, 5);
+    records.appendRaw(Uint8Array.of(1, 2, 3, 4), '', 10, 1000, { byteOffset: 100, endByte: 104 });
+    records.appendRaw(Uint8Array.of(5, 6, 7, 8), '', 20, 1000.3, { byteOffset: 200, endByte: 204 });
+    raw.source.frames = records;
+    const sync = new SynchronizedFrames(2, 10, { definitions: [{ number: 3, type: 'formula', expression: 'CH1*2' },
+        { number: 4, type: 'formula', expression: 'CH3+CH2' }], resolveFrame: origin => {
+        const index = records.indexAtOrAfterOrder(origin.order);
+        return index >= 0 && records.orderAt(index) === origin.order ? records.frameAt(index) : null;
+    } });
+    sync.ingest(1000, new Map([[0, 2]]), { order: 10, byteOffset: 100, endByte: 104 });
+    sync.ingest(1000.3, new Map([[1, 3]]), { order: 20, byteOffset: 200, endByte: 204 }); sync.advance(1001);
+    source.source.frames = sync; source.view.jumpToFrame = index => { source.view.sampleJump = index; return true; };
+    const f = fixture([source, raw]); f.service.dataEngine = { recordsSource: raw.source };
+    f.select('sync'); f.tools.selectedChannels = new Set([2]); f.el('monitor-search-query').value = '4';
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.equal(f.tools.matches[0].provenance.byteOffset, 100); assert.deepEqual(raw.view.jumps, [100]);
+    records.discardOldest(1); f.tools.invalidate();
+    assert.equal(await f.tools.requestSearch('nearest'), false); assert.equal(f.tools.matches[0].unretained, true);
+    assert.deepEqual(raw.view.jumps, [100]); assert.match(f.el('monitor-search-status').textContent, /源消息.*保留/);
+    f.tools.selectedChannels = new Set([3]); f.el('monitor-search-query').value = '7';
+    assert.equal(await f.tools.requestSearch('nearest'), true); assert.equal(f.tools.matches[0].startByte, 200);
+    f.tools.dispose();
+});
+
+test('a constant-only formula search never invents a source packet from the sampling boundary', async () => {
+    const source = widget('sync', []), raw = widget('raw', [1], { type: 'byte', offset: 100, settings: { captureMode: 'hex' } });
+    const sync = new SynchronizedFrames(1, 10, { definitions: [{ number: 2, type: 'formula', expression: '5' }] });
+    sync.ingest(0, new Map([[0, 1]]), { order: 1, byteOffset: 100, endByte: 101 }); source.source.frames = sync;
+    const f = fixture([source, raw]); f.service.dataEngine = { recordsSource: raw.source };
+    f.select('sync'); f.tools.selectedChannels = new Set([1]); f.el('monitor-search-query').value = '5';
+    assert.equal(await f.tools.requestSearch('nearest'), false); assert.deepEqual(raw.view.jumps, []);
+    assert.match(f.el('monitor-search-status').textContent, /没有关联源消息/); f.tools.dispose();
 });

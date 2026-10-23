@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
+async function applyEngine(f) { const ready = f.app.engineView.apply(); await f.settle(); await ready; }
 
 test('panel dimensions and explicit collapse preferences survive save reload and JSON import', async t => {
     const f = boot(t);
@@ -17,7 +18,7 @@ test('panel dimensions and explicit collapse preferences survive save reload and
     f.click('workspace-toggle-left');
     f.get('global-send').clientHeight = 200;
     f.get('send-resizer').dispatchEvent({ type: 'keydown', key: 'ArrowUp' });
-    const expected = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 220 };
+    const expected = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 220, leftSplitRatio: .5 };
     assert.deepEqual(JSON.parse(JSON.stringify(f.app.getConfig().uiLayout)), expected);
     await f.tick(200);
     assert.deepEqual(JSON.parse(f.storage.get('serialplot_v3_config')).uiLayout, expected);
@@ -59,7 +60,7 @@ test('sender pointer resize saves only the completed drag and cancellation prese
 
 test('temporary compact layout and sender clamping preserve imported layout preferences', t => {
     const f = boot(t);
-    const preferred = { leftWidth: 350, rightWidth: 400, leftOpen: true, rightOpen: false, sendHeight: 350 };
+    const preferred = { leftWidth: 350, rightWidth: 400, leftOpen: true, rightOpen: false, sendHeight: 350, leftSplitRatio: .5 };
     f.window.innerWidth = 900;
     f.get('main-display').clientHeight = 380;
     f.get('navigation-panel').clientHeight = 70;
@@ -216,7 +217,7 @@ test('command tree editor supports regrouping sorting folding inline errors and 
     assert.equal(library.find(b).repeat, 1);
     field('repeat').value = '2'; field('repeat').dispatchEvent({ type: 'change' });
     assert.equal(library.find(b).repeat, 2);
-    const action = text => row().querySelector('.command-row-actions').querySelectorAll('button').find(button => button.textContent === text);
+    const action = text => row().querySelector('.command-row-actions').querySelectorAll('button').find(button => (button.getAttribute('aria-label') ?? button.textContent) === text);
     action('上移').click();
     assert.equal(library.find(groupId).children[0].id, b);
     field('parent').value = ''; field('parent').dispatchEvent({ type: 'change' });
@@ -273,7 +274,7 @@ test('command sorting keeps keyboard focus on the reordered item and uses its ti
     Object.getPrototypeOf(tree).focus = function () { if (!this.disabled) f.document.activeElement = this; };
     view.add('command'); view.add('command');
     const id = view.add('command');
-    const up = tree.querySelector(`[data-command-id="${id}"]`).querySelector('.command-row-actions').querySelectorAll('button').find(button => button.textContent === '上移');
+    const up = tree.querySelector(`[data-command-id="${id}"]`).querySelector('[data-command-action="move-up"]');
     up.focus(); up.click();
     assert.ok(tree.contains(f.document.activeElement), 'rebuilding the editor must not leave focus on its detached old button');
     assert.equal(f.document.activeElement.dataset.commandAction, 'move-up');
@@ -483,7 +484,7 @@ test('legacy settings migrate to two independent views without losing channel tr
     const f = boot(t, { dataType: 'uint8', enableHeader: false, channelsCount: '1',
         captureMode: 'hex', channels: [{ name: 'Voltage', visible: true, gainEnabled: true, gain: 2 }] });
     assert.equal(f.app.widgets.widgets.size, 2);
-    assert.equal(f.app.getConfig().version, 2);
+    assert.equal(f.app.getConfig().version, 3);
     assert.equal(f.app.widgets.widgets.get('wave-1').view.getChannelMeta()[0].gain, 2);
     assert.equal(f.app.getConfig().global.channelNames[0], 'Voltage');
     assert.equal(f.writes, 0);
@@ -532,7 +533,7 @@ test('configuration import validates atomically and saves a complete versioned w
     f.app.widgets.create({ type: 'byte', title: 'extra' });
     await f.tick(200);
     const stored = JSON.parse(f.storage.get('serialplot_v3_config'));
-    assert.equal(stored.version, 2);
+    assert.equal(stored.version, 3);
     assert.equal(stored.widgets.length, 2);
     assert.equal(Object.keys(stored.workspace.rects).length, 2);
 });
@@ -670,7 +671,7 @@ test('changing one byte parser rebuilds that source while other views continue r
 test('shared numeric rule changes preserve raw bytes and do not report replay as a new sample rate', async t => {
     const f = boot(t, config([wave('w1'), bytes('b1')]));
     f.app.serialAdapter.onDataCallback(Uint8Array.of(1, 2, 3, 4)); await f.tick();
-    f.app.widgets.activate('w1'); f.change('data-type', 'uint16'); await f.settle();
+    f.app.widgets.activate('w1'); f.change('data-type', 'uint16'); await applyEngine(f);
     assert.deepEqual(Array.from(f.app.service.numericSource.frames.channelSlice(0)), [513, 1027]);
     assert.deepEqual(Array.from(f.app.service.baseSource.frames.rawBytesAt(0)), [1, 2, 3, 4]);
     assert.equal(f.app.service.stats.rxBytes, 4);

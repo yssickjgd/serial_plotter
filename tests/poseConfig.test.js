@@ -82,7 +82,7 @@ test('workspace roundtrip uses candidate scalar channel definitions for pose val
     const s = C.defaults(); s.bindings.euler = [0, 1, 3];
     const input = config(s); input.global.channelDefinitions = [{ number: 4, type: 'formula', expression: 'CH01+CH02' }];
     const normalized = validateWorkspaceConfig(input);
-    assert.deepEqual(normalized.widgets[0].settings, s);
+    assert.deepEqual(normalized.widgets[0].settings, { ...s, engineSource: null });
     assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(normalized))).widgets, normalized.widgets);
     input.global.channelDefinitions = [{ number: 4, type: 'constant', expression: '[0]=1' }];
     assert.throws(() => validateWorkspaceConfig(input));

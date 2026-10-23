@@ -1,19 +1,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
+async function applyEngine(f) {
+    const applied = f.app.engineView.apply();
+    await f.settle(); await applied;
+}
 
 test('two pose widgets share numeric acquisition while their settings, inspector and history remain independent', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    f.change('channels-count', '3'); await f.settle();
+    f.change('channels-count', '3'); await applyEngine(f);
     const a = f.app.widgets.create({ type: 'pose' }), b = f.app.widgets.create({ type: 'pose' });
     assert.equal(a.source, b.source); assert.equal(a.source, f.app.service.numericSource);
     assert.equal(f.get('tab-pose-display').hidden, false);
     assert.equal(f.get('tab-monitor-config').hidden, true);
     assert.equal(f.get('tab-waveform-config').hidden, true);
-    f.app.widgets.selectTab('tab-pose-frame');
-    assert.ok(f.get('data-type').closest('#tab-pose-frame'));
-    assert.equal(f.get('rebuild-history-pose').checked, true);
-    f.change('rebuild-history-pose', false); assert.equal(f.get('rebuild-history-byte').checked, false);
+    assert.ok(f.get('data-type').closest('#data-engine'));
+    assert.equal(f.get('tab-pose-frame'), null);
+    assert.equal(f.get('rebuild-history').checked, true);
+    f.change('rebuild-history', false); assert.equal(f.app.getConfig().global.rebuildHistory, false);
     f.change('pose-bindings-euler-0', '0'); f.change('pose-bindings-euler-1', '1'); f.change('pose-bindings-euler-2', '2');
     f.change('pose-euler-unit', 'degrees');
     assert.equal(b.settings.euler.unit, 'degrees'); assert.equal(a.settings.euler.unit, 'radians');
@@ -116,29 +120,33 @@ test('clearing pose history before another receive discards old orientation and 
     f.click('btn-clear');
     f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 192, 127)); await f.tick();
     assert.equal(widget.view.lastValid, null); assert.equal(widget.view.target.valid, false);
-    f.change('channels-count', '2'); await f.settle();
+    f.change('channels-count', '2'); await applyEngine(f);
     assert.equal(widget.source.frames.channelCount, 2);
     assert.equal(widget.view.frames, widget.source.frames);
-    f.change('channels-count', '1'); await f.settle();
+    f.change('channels-count', '1'); await applyEngine(f);
     assert.deepEqual(Array.from(widget.settings.bindings.euler), [0, 0, 0]);
 });
 
-test('asynchronous numeric channel shrink unbinds removed pose channels before inspector edits and configuration export', async t => {
+test('shrinking the applied array preserves catalog identities and pose bindings without introducing channel aliases', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    f.change('channels-count', '3'); await f.settle();
+    f.change('channels-count', '3'); await applyEngine(f);
     const widget = f.app.widgets.create({ type: 'pose', settings: { bindings: { euler: [0, 1, 2] },
         overlay: { bindings: { quaternion: [2, 1, 0, null] } } } });
     const bytes = new Uint8Array(13); bytes[0] = 0xAB;
     f.app.serialAdapter.onDataCallback(bytes); await f.tick();
-    f.change('channels-count', '1'); await f.settle();
-    assert.equal(widget.source.frames.channelCount, 1);
-    assert.deepEqual(Array.from(widget.settings.bindings.euler), [0, null, null]);
-    assert.deepEqual(Array.from(widget.settings.overlay.bindings.quaternion), [null, null, 0, null]);
+    const channelIds = [1, 2, 3].map(number => f.app.widgets.getChannelRegistry().get(number).id);
+    f.change('channels-count', '1'); await applyEngine(f);
+    assert.equal(widget.source.frames.channelCount, 3);
+    assert.deepEqual(Array.from(widget.settings.bindings.euler), [0, 1, 2]);
+    assert.deepEqual(Array.from(widget.settings.overlay.bindings.quaternion), [2, 1, 0, null]);
+    assert.deepEqual([1, 2, 3].map(number => f.app.widgets.getChannelRegistry().resolve('CH' + number).id), channelIds);
+    assert.equal(f.app.getConfig().dataEngine.array.channelsCount, '1');
     f.change('pose-cubeVisible', false);
     assert.equal(widget.settings.cubeVisible, false);
     assert.doesNotThrow(() => f.app.applyConfig(f.app.getConfig())); await f.settle();
-    f.change('channels-count', '3'); await f.settle();
-    assert.deepEqual(Array.from(f.app.widgets.widgets.get(widget.id).settings.bindings.euler), [0, null, null]);
+    f.change('channels-count', '3'); await applyEngine(f);
+    assert.deepEqual(Array.from(f.app.widgets.widgets.get(widget.id).settings.bindings.euler), [0, 1, 2]);
+    assert.deepEqual([1, 2, 3].map(number => f.app.widgets.getChannelRegistry().get(number).id), channelIds);
 });
 
 test('pose axis controls select Z direction independently and prevent nonorthogonal choices', t => {

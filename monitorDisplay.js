@@ -64,8 +64,8 @@
                 if (!Number.isInteger(value) || value < 1 || value > 17)
                     throw new RangeError('numericSignificantDigits must be an integer from 1 to 17');
             } else if (key === 'numericHiddenChannels') {
-                if (!Array.isArray(value) || value.some(index => !Number.isInteger(index) || index < 0 || index >= 256))
-                    throw new RangeError('numericHiddenChannels must contain channel indices from 0 to 255');
+                if (!Array.isArray(value) || value.some(index => !Number.isInteger(index) || index < 0 || index >= 65535))
+                    throw new RangeError('numericHiddenChannels must contain channel indices from 0 to 65534');
                 value = [...new Set(value)].sort((a, b) => a - b);
             } else if (COLORS.has(key)) {
                 if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value))

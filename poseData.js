@@ -22,7 +22,7 @@
             if (channel < 0 || channel >= frames.channelCount || frames.isSignal && !frames.isSignal(channel))
                 return { valid: false, reason: `${prefix}${labels[i]} 来源不是有效标量通道` };
             const value = frames.getValue(channel, index);
-            if (!Number.isFinite(value)) return { valid: false, reason: `${prefix}${labels[i]} CH${String(channel + 1).padStart(2, '0')} 数值无效` };
+            if (!Number.isFinite(value)) return { valid: false, reason: `${prefix}${labels[i]} CH${String(channel + 1).padStart(5, '0')} 数值无效` };
             values.push(value);
         }
         return convert(values, settings);

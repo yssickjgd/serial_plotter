@@ -47,6 +47,7 @@ function bootApplication(config = null, options = {}) {
             else this[key] = String(value);
         }
         getAttribute(key) { return this.attributes[key] ?? null; }
+        removeAttribute(key) { delete this.attributes[key]; if (['checked', 'disabled', 'hidden', 'selected'].includes(key)) this[key] = false; }
         addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn); }
         removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
         dispatchEvent(event) {
@@ -57,6 +58,8 @@ function bootApplication(config = null, options = {}) {
             return true;
         }
         click() { this.dispatchEvent({ type: 'click', target: this }); }
+        focus() { document.activeElement = this; }
+        blur() { if (document.activeElement === this) document.activeElement = document.body; }
         showModal() { this.open = true; this.attributes.open = ''; }
         close() { this.open = false; delete this.attributes.open; this.dispatchEvent({ type: 'close' }); }
         append(...children) { children.forEach(child => this.appendChild(child)); }
@@ -68,6 +71,7 @@ function bootApplication(config = null, options = {}) {
         remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
         contains(node) { return node === this || this.children.some(child => child.contains(node)); }
         matches(selector) {
+            if (selector === ':disabled') return this.disabled;
             const attribute = selector.match(/\[([^=\]]+)(?:="?([^"\]]*)"?)?\]/);
             const cls = selector.match(/\.([\w-]+)/), id = selector.match(/#([\w-]+)/), tag = selector.match(/^[\w-]+/);
             return (!tag || this.tagName === tag[0].toUpperCase()) && (!cls || this.classList.contains(cls[1])) &&

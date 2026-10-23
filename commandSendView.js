@@ -1,10 +1,12 @@
 /** Inline command identity, nested drag ordering, and expandable command payloads. */
 class CommandSendView {
-    constructor({ library, runner, tree, addButton, groupButton, stopButton, status, error, onChange = () => {} }) {
+    constructor({ library, runner, tree, addButton, groupButton, stopButton, status, error, onChange = () => {},
+        protocolSession = runner.protocolSession, getProtocols = null }) {
         Object.assign(this, { library, runner, tree, addButton, groupButton, stopButton, status, error, onChange });
         this.document = tree.ownerDocument;
         this.selectedId = null; this.busy = false; this.disposed = false; this.listeners = [];
         this.dragId = null; this.dragIds = new Set(); this.dropInfo = null;
+        this.protocolSession = protocolSession; this.getProtocols = getProtocols; this.protocolViews = [];
         this.listen(addButton, 'click', () => this.add('command'));
         this.listen(groupButton, 'click', () => this.add('group'));
         this.listen(stopButton, 'click', () => runner.stop());
@@ -65,6 +67,7 @@ class CommandSendView {
         this.syncBusy();
     }
     syncBusy() {
+        for (const view of this.protocolViews) view.setBusy(this.busy);
         for (const node of this.tree.querySelectorAll('input, select, textarea, button'))
             node.disabled = this.busy && node.dataset.toggle !== 'true' || node.dataset.unavailable === 'true';
         for (const node of this.tree.querySelectorAll('.command-drag-handle')) node.draggable = !this.busy;
@@ -104,7 +107,7 @@ class CommandSendView {
         this.fillOptions(select, options, value);
         select.addEventListener('change', () => onChange(select.value));
         label.appendChild(select); parent.appendChild(label);
-        globalThis.SerialPlotter.bindSelectWheel?.(select); return select;
+        return select;
     }
     fillOptions(select, options, value) {
         select.replaceChildren();
@@ -129,7 +132,7 @@ class CommandSendView {
             walk(this.library.nodes);
             this.fillOptions(select, options, this.library.location(node.id)?.parent?.id ?? '');
         };
-        for (const event of ['focus', 'pointerdown', 'wheel']) select.addEventListener(event, populate, true);
+        for (const event of ['focus', 'pointerdown']) select.addEventListener(event, populate, true);
     }
     runOptions(parent, node) {
         const options = this.element('div', 'command-send-options');
@@ -146,12 +149,30 @@ class CommandSendView {
         const content = this.element('div', 'command-content'), heading = this.element('div', 'command-content-heading');
         const title = this.element('label', 'command-content-label', '发送内容');
         title.setAttribute('for', `command-content-${node.id}`); heading.appendChild(title);
-        this.select(heading, '格式', 'mode', [['hex', 'Hex'], ['text', '文本（UTF-8）']], node.mode,
-            value => { if (this.mutate(() => this.library.update(node.id, { mode: value }), false)) this.refreshRow(node.id); });
+        this.select(heading, '格式', 'mode', [['hex', 'Hex'], ['text', '文本（UTF-8）'], ['protocol', '协议消息']], node.mode,
+            value => this.mutate(() => this.library.update(node.id, { mode: value })));
         content.appendChild(heading);
-        const input = this.field(content, '发送内容', 'content', node.content, 'textarea', node.id);
-        input.id = `command-content-${node.id}`; input.placeholder = 'Hex 如 AA 55 0D 0A；文本按原样发送';
-        input.parentElement.classList.add('command-content-input'); editor.appendChild(content);
+        if (node.mode === 'protocol') {
+            const host = this.element('div', 'command-content protocol-send-editor');
+            host.setAttribute('data-protocol-command', node.id); content.appendChild(host);
+            const View = typeof module !== 'undefined' ? require('./protocolSendView').ProtocolSendView
+                : globalThis.SerialPlotter.ProtocolSendView;
+            const view = new View({ root: host, document: this.document, session: this.protocolSession,
+                getProtocols: this.getProtocols, value: node.protocol,
+                onChange: protocol => {
+                    if (this.mutate(() => this.library.update(node.id, { protocol }), false)) this.refreshRow(node.id);
+                } });
+            this.protocolViews.push(view);
+            const draft = view.getDraft();
+            if (JSON.stringify(draft) !== JSON.stringify(node.protocol)) {
+                this.library.update(node.id, { protocol: draft }); this.onChange();
+            }
+        } else {
+            const input = this.field(content, '发送内容', 'content', node.content, 'textarea', node.id);
+            input.id = `command-content-${node.id}`; input.placeholder = 'Hex 如 AA 55 0D 0A；文本按原样发送';
+            input.parentElement.classList.add('command-content-input');
+        }
+        editor.appendChild(content);
         this.runOptions(editor, node); return editor;
     }
     rowActions(row, node, location) {
@@ -159,7 +180,10 @@ class CommandSendView {
         if (node.type === 'group') actions.append(this.button('添加指令', () => this.add('command', node.id)),
             this.button('添加子组', () => this.add('group', node.id)));
         for (const [title, delta] of [['上移', -1], ['下移', 1]]) {
-            const button = this.button(title, () => this.mutate(() => this.library.move(node.id, location.parent?.id ?? null, location.index + delta)));
+            const button = this.button('', () => this.mutate(() => this.library.move(node.id, location.parent?.id ?? null, location.index + delta)), 'reorder-button');
+            button.title = title; button.setAttribute('aria-label', title);
+            const arrow = this.element('span', `move-arrow move-arrow-${delta < 0 ? 'up' : 'down'}`);
+            arrow.setAttribute('aria-hidden', 'true'); button.appendChild(arrow);
             button.setAttribute('data-command-action', delta < 0 ? 'move-up' : 'move-down');
             button.dataset.unavailable = String(location.index + delta < 0 || location.index + delta >= location.siblings.length);
             actions.appendChild(button);
@@ -202,7 +226,8 @@ class CommandSendView {
         row.querySelector('.command-disclosure').setAttribute('aria-label', `${expanded ? '收起' : '展开'}${node.type === 'group' ? '指令组' : '指令设置'}：${node.name}`);
         row.querySelector('.command-send').setAttribute('aria-label', `发送${node.type === 'group' ? '指令组' : '指令'}：${node.name}`);
         const meta = row.querySelector('.command-meta');
-        meta.textContent = node.type === 'group' ? `${node.children.length} 项` : `${node.mode === 'hex' ? 'Hex' : '文本'} · ${node.repeat} 次 · ${node.interval} s`;
+        const format = node.mode === 'protocol' ? `协议 ${node.protocol?.messageId || '待选择消息'}` : node.mode === 'hex' ? 'Hex' : '文本';
+        meta.textContent = node.type === 'group' ? `${node.children.length} 项` : `${format} · ${node.repeat} 次 · ${node.interval} s`;
         meta.title = meta.textContent;
     }
     clearDrop() {
@@ -258,6 +283,7 @@ class CommandSendView {
     }
     render() {
         if (this.disposed) return;
+        for (const view of this.protocolViews.splice(0)) view.dispose();
         this.clearDrag();
         const scroll = this.tree.scrollTop, active = this.document.activeElement;
         const focusId = active?.closest?.('.command-item')?.dataset.commandId;
@@ -305,6 +331,7 @@ class CommandSendView {
                 send.setAttribute('data-command-action', 'send'); row.appendChild(send);
                 this.refreshRow(node.id, row, node); item.appendChild(row);
                 if (node.type === 'command' && this.selectedId === node.id) item.appendChild(this.editor(node));
+                if (node.mode === 'protocol') this.refreshRow(node.id, row, this.library.find(node.id));
                 if (node.type === 'group') walk(node.children, item, node);
                 list.appendChild(item);
             }
@@ -321,6 +348,7 @@ class CommandSendView {
     dispose() {
         if (this.disposed) return;
         this.clearDrag(); this.disposed = true;
+        for (const view of this.protocolViews.splice(0)) view.dispose();
         for (const remove of this.listeners.splice(0)) remove();
         this.tree.replaceChildren();
     }

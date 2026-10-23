@@ -48,7 +48,7 @@ test('mixed Euler overlay reads only channel-backed components from the selected
     assert.match(D.read(frames, 1, settings).reason, /pitch.*未绑定/);
     settings.overlay.bindings.euler[1] = 0;
     frames.append([NaN, 0, 0], Uint8Array.of(5), '', 3, 1002, { byteOffset: 14 });
-    assert.match(D.read(frames, 2, settings).reason, /pitch.*CH01.*无效/);
+    assert.match(D.read(frames, 2, settings).reason, /pitch.*CH00001.*无效/);
 });
 
 test('quaternion and matrix overlays support independent fixed and channel values', () => {
@@ -73,7 +73,7 @@ test('missing bindings, nonfinite components and overwritten indices report inva
     assert.match(D.read(frames, 1, settings).reason, /yaw/);
     settings.bindings.euler = [0, 1, 2];
     frames.append([NaN, 0, 0], Uint8Array.of(5), '', 3, 1002, { byteOffset: 14 });
-    assert.match(D.read(frames, 2, settings).reason, /CH01/);
+    assert.match(D.read(frames, 2, settings).reason, /CH00001/);
     assert.equal(D.read(frames, 3, settings).valid, false);
     frames.append([0, 0, 0], Uint8Array.of(6), '', 4, 1003, { byteOffset: 15 });
     assert.equal(D.read(frames, 0, settings).order, 2);
@@ -81,7 +81,7 @@ test('missing bindings, nonfinite components and overwritten indices report inva
 });
 test('computed scalars are bindable while constant arrays and systems are not', () => {
     const raw = new FrameBuffer(3, 10), frames = new ComputedFrames(raw, [
-        { number: 4, type: 'formula', expression: 'CH01+CH02' },
+        { number: 4, type: 'formula', expression: 'CH00001+CH00002' },
         { number: 5, type: 'constant', expression: '[0]=1' }]);
     const settings = C.defaults(); settings.bindings.euler = [3, 1, 2];
     frames.append([0, Math.PI / 2, 0], Uint8Array.of(1), '', 1, 1000, { byteOffset: 0 });

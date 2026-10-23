@@ -33,7 +33,7 @@ function systemCoefficients(entry) {
     for (const [key, value] of expression.terms) {
         if (!Number.isFinite(value)) throw new Error('系统系数必须为有限数值');
         const [kind, delay] = key.split(':');
-        if (kind === 'x') b[Number(delay)] += value; else a[Number(delay)] -= value;
+        if (kind === 'X') b[Number(delay)] += value; else a[Number(delay)] -= value;
     }
     return { b, a };
 }
@@ -44,7 +44,7 @@ function prepareSystemResponse(entry, count = 1000, gridSize = count) {
     if (entry.system) for (let i = 0; i < count; i++) {
         const value = systemChannels.evaluateSimpleChannelNode(entry.system.ast, reference => {
             const index = i + (reference.index ?? 0);
-            return reference.number === 'x' ? index === 0 ? 1 : 0 : index >= 0 ? samples[index] : 0;
+            return reference.number === 'X' ? index === 0 ? 1 : 0 : index >= 0 ? samples[index] : 0;
         });
         samples[i] = Number.isFinite(value) ? value : NaN;
     }

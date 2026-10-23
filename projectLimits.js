@@ -1,6 +1,7 @@
 const PROJECT_LIMITS = Object.freeze({
     minChannels: 1,
-    maxChannels: 50,
+    maxChannels: 65535,
+    maxTotalChannels: 65535,
     minPoints: 2,
     maxPoints: 3600000,
     maxPlotWindowPoints: 65536,

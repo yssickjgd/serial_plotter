@@ -39,8 +39,8 @@ test('numeric channel visibility validates independent saved channel indices wit
     options.numericHiddenChannels.push(1);
     assert.deepEqual(input.numericHiddenChannels, [49, 2, 2, 0]);
     assert.deepEqual(normalizeDisplayOptions().numericHiddenChannels, []);
-    assert.deepEqual(normalizeDisplayOptions({ numericHiddenChannels: [50, 255] }).numericHiddenChannels, [50, 255]);
-    for (const value of [null, '0', [-1], [256], [1.5], ['1']])
+    assert.deepEqual(normalizeDisplayOptions({ numericHiddenChannels: [50, 255, 256, 65534] }).numericHiddenChannels, [50, 255, 256, 65534]);
+    for (const value of [null, '0', [-1], [65535], [1.5], ['1']])
         assert.throws(() => normalizeDisplayOptions({ numericHiddenChannels: value }));
 });
 

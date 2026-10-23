@@ -61,7 +61,7 @@ function validateConfig(config) {
         validationMonitorDisplay.normalizeDisplayOptions(config.monitorDisplay);
     const options = {
         connType: [['serial', 'tcp-client', 'tcp-server', 'udp'], '连接模式'],
-        captureMode: [['number', 'hex', 'text'], '采集格式'],
+        captureMode: [['number', 'engine', 'hex', 'text'], '采集格式'],
         textEncoding: [['utf-8', 'ascii', 'gbk', 'gb18030', 'big5', 'utf-16le',
             'utf-16be', 'shift_jis', 'windows-1252'], '文本字符集'],
         textBoundary: [['idle', 'cr', 'lf', 'crlf', 'lfcr'], '文本断帧'],

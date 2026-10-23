@@ -42,11 +42,11 @@ class CaptureHistory {
     }
 
     /** Pause and disconnect terminate the current stream segment without dropping its bytes. */
-    markBoundary() {
+    markBoundary(metadata = {}) {
         const state = captureHistoryStates.get(this);
         const checkpoint = state.boundaries.at(-1);
         if (checkpoint?.byteOffset === state.endByte) return { ...checkpoint };
-        const next = { byteOffset: state.endByte };
+        const next = { ...metadata, byteOffset: state.endByte };
         state.currentStreamStartByte = state.endByte;
         if (state.startByte === state.endByte) state.streamStartByte = state.endByte;
         state.boundaries.push(next); state.revision++;
@@ -105,17 +105,21 @@ class CaptureHistory {
             if (generation !== state.generation || cursor < state.startByte)
                 throw new Error('History changed while reading');
             if (boundaries[boundary]?.byteOffset === cursor) {
-                yield { bytes: new Uint8Array(0), byteOffset: cursor, endByte: cursor,
+                yield { ...boundaries[boundary], bytes: new Uint8Array(0), byteOffset: cursor, endByte: cursor,
                     streamStartByte: cursor, streamEnded: true };
                 boundary++;
             }
             if (cursor === stop) break;
-            while (index < state.chunks.length && state.chunks[index].endByte <= cursor) index++;
+            // Pruning can compact the archive while an async consumer is yielded.
+            let low = state.head, high = state.chunks.length;
+            while (low < high) { const mid = (low + high) >>> 1; if (state.chunks[mid].endByte <= cursor) low = mid + 1; else high = mid; }
+            index = low;
             const chunk = state.chunks[index];
             const next = Math.min(stop, chunk.endByte, cursor + maxSliceBytes,
                 boundaries[boundary]?.byteOffset ?? Infinity);
             const streamEnded = next === boundaries[boundary]?.byteOffset;
-            yield { bytes: chunk.bytes.subarray(cursor - chunk.startByte, next - chunk.startByte),
+            yield { ...chunk, bytes: chunk.bytes.subarray(cursor - chunk.startByte, next - chunk.startByte),
+                ...(streamEnded ? { boundaryTimestamp: boundaries[boundary].timestamp, boundaryArrival: boundaries[boundary].arrival } : {}),
                 byteOffset: cursor, endByte: next, streamStartByte: chunk.streamStartByte, streamEnded };
             cursor = next;
             if (streamEnded) boundary++;
@@ -149,7 +153,14 @@ async function replayCaptureHistory(history, format, capacity, {
         if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Decode batch limits must be positive integers');
     const { DataParser, RawFrameParser, FrameBuffer } = historyDependencies;
     const numeric = (format.captureMode || 'number') === 'number';
-    const frames = previousResult?.frames || new FrameBuffer(Number(format.channelsCount || 1), capacity);
+    const wireChannels = Number(format.channelsCount || 1), catalogChannels = Math.max(wireChannels, Number(format.catalogCount || wireChannels));
+    const padSamples = values => {
+        if (values.length === catalogChannels) return values;
+        const padded = new Array(catalogChannels).fill(NaN);
+        for (let channel = 0; channel < Math.min(wireChannels, values.length); channel++) padded[channel] = values[channel];
+        return padded;
+    };
+    const frames = previousResult?.frames || new FrameBuffer(numeric ? catalogChannels : wireChannels, capacity);
     const parser = previousResult?.parser || (numeric ? new DataParser() : new RawFrameParser());
     if (!previousResult && numeric) parser.setFormat(format);
     else if (!previousResult) {
@@ -210,7 +221,7 @@ async function replayCaptureHistory(history, format, capacity, {
                 if (decodeRecords.length >= maxDecodeFrames || decodeBytes >= maxDecodeBytes) dispatchDecode();
             };
         } else if (numeric) parser.onFrameParsed = (values, time, bytes, timestamp, metadata) =>
-            frames.append(values, bytes, time, metadata.order, timestamp, metadata);
+            frames.append(padSamples(values), bytes, time, metadata.order, timestamp, metadata);
         else parser.onFrameParsed = (bytes, time, timestamp, metadata) =>
             frames.appendRaw(bytes, time, metadata.order, timestamp, metadata);
         if (batchedRaw) parser.setFramePartsCallback((parts, time, timestamp, metadata) => {
@@ -245,7 +256,7 @@ async function replayCaptureHistory(history, format, capacity, {
                     byteOffset = end;
                 } else {
                     const samples = values.subarray ? values.subarray(start, start + channels) : values.slice(start, start + channels);
-                    frames.append(samples, record.bytes, record.time, record.metadata.order, record.timestamp, record.metadata);
+                    frames.append(padSamples(samples), record.bytes, record.time, record.metadata.order, record.timestamp, record.metadata);
                 }
                 if (performance.now() - started >= 8) {
                     await yieldControl(); started = performance.now();

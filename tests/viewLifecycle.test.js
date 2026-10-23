@@ -101,7 +101,7 @@ test('offscreen plots release backing bitmaps and restore sharp rendering withou
     assert.equal(plot.canvas.width * plot.canvas.height, 1);
 });
 
-test('GPU time plots follow each 144 Hz animation tick while Canvas fallback retains its rate limit', () => {
+test('GPU and Canvas time plots follow each 144 Hz animation tick without a default rate cap', () => {
     const f = fixture(), frames = new FrameBuffer(2, 100);
     const gpu = { available: true, render: () => true, resize() {}, dispose() {} };
     const accelerated = f.plot(frames, { gpuRenderer: gpu }), fallback = f.plot(frames);
@@ -114,10 +114,55 @@ test('GPU time plots follow each 144 Hz animation tick while Canvas fallback ret
         f.flush(1000 / 144);
     }
     assert.equal(accelerated.completedDraws - firstGpu, 24, 'GPU rendering must not skip frames at the former 30 FPS ceiling');
-    assert.ok(fallback.completedDraws - firstCpu <= 5);
+    assert.equal(fallback.completedDraws - firstCpu, 24);
     f.flush();
     assert.equal(f.pending.size, 0, 'removing the rate limit must not create an idle animation loop');
     accelerated.dispose(); fallback.dispose();
+});
+
+test('synchronous spectra refresh on each new animation-frame snapshot without a fixed FFT wait', () => {
+    const f = fixture(), frames = new FrameBuffer(1, 100), plot = f.plot(frames);
+    for (let i = 0; i < 16; i++) frames.append([i % 2]);
+    plot.setChannelCount(1); plot.setDisplayOptions({ displayMode: 'frequency' });
+    plot.setAllChannelsVisible(true); f.flush();
+    const before = plot.completedSpectrumDraws;
+    for (let i = 0; i < 12; i++) {
+        frames.append([i]); plot.onDataChanged(); f.flush(1000 / 144);
+    }
+    assert.equal(plot.completedSpectrumDraws - before, 12);
+    f.flush(); assert.equal(f.pending.size, 0);
+    plot.dispose();
+});
+
+test('an explicitly capped subscriber retains its own limit without setting the default for other plots', () => {
+    const f = fixture(), frames = new FrameBuffer(1, 100);
+    const plot = f.plot(frames, { maxDrawFps: 30 });
+    plot.setChannelCount(1); plot.setAllChannelsVisible(true); f.flush();
+    const before = plot.completedDraws;
+    for (let i = 0; i < 24; i++) { frames.append([i]); plot.onDataChanged(); f.flush(1000 / 144); }
+    assert.ok(plot.completedDraws - before <= 5);
+    f.flush(); assert.equal(f.pending.size, 0); plot.dispose();
+});
+
+test('worker spectra accept the next snapshot immediately after completion while keeping one batch in flight', async () => {
+    const f = fixture(), frames = new FrameBuffer(1, 100), requests = [];
+    const pool = { available: true, requestFft: () => new Promise(resolve => requests.push(resolve)) };
+    const plot = f.plot(frames, { fftWorkerPool: pool });
+    for (let i = 0; i < 16; i++) frames.append([i % 2]);
+    plot.setChannelCount(1); plot.setDisplayOptions({ displayMode: 'frequency' });
+    plot.setAllChannelsVisible(true); f.flush();
+    assert.equal(requests.length, 1);
+    for (let i = 0; i < 5; i++) { frames.append([i]); plot.onDataChanged(); f.flush(1000 / 144); }
+    assert.equal(requests.length, 1, 'incoming samples must not build an unbounded FFT queue');
+    requests[0](f.context.SerialPlotter.prepareFrequencySeries(Float64Array.of(0, 1, 0, 1), false, 'hann'));
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    f.flush(1000 / 144);
+    assert.equal(requests.length, 2, 'completed FFT work may immediately yield to the next input snapshot');
+    assert.equal(plot.completedSpectrumDraws, 1);
+    plot.dispose();
+    requests[1]?.(f.context.SerialPlotter.prepareFrequencySeries(Float64Array.of(0, 1, 0, 1), false, 'hann'));
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.equal(f.pending.size, 0, 'a late result cannot redraw a destroyed view');
 });
 
 test('multiple view-only plots never append, resize or clear their shared source', () => {

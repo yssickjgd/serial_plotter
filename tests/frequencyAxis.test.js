@@ -180,22 +180,21 @@ test('worker FFT presents only completed spectra and ignores obsolete settings r
     plotter.dispose();
 });
 
-test('worker FFT can refresh within 100 ms without stacking jobs while pending', async () => {
+test('Canvas worker FFT starts the latest snapshot without a cooldown or stacked jobs', async () => {
     const pending = [];
     const pool = { runTask(task) { return new Promise(resolve => pending.push({ task, resolve })); } };
     const { plotter } = createPlotter(null, { fftWorkerPool: pool });
     plotter.draw();
     plotter.addFrame([1]);
-    plotter._fftAt -= 150;
     plotter.draw();
     assert.equal(pending.length, 1, 'new data must not queue a second FFT while the first runs');
     pending[0].resolve({ mags: [0, 1], phases: [0, 0], dominantBin: 1, fftSize: 2 });
     await new Promise(resolve => setImmediate(resolve));
     plotter.draw();
-    assert.equal(pending.length, 1, 'a completed FFT gets a short rest before starting the next one');
-    plotter._fftAt -= 40;
+    assert.equal(pending.length, 2, 'idle workers start the latest snapshot immediately after completion');
+    plotter.addFrame([2]);
     plotter.draw();
-    assert.equal(pending.length, 2, 'idle workers may refresh before the former 100 ms cap');
+    assert.equal(pending.length, 2, 'new samples cannot stack a third job behind the pending FFT');
     plotter.dispose();
 });
 

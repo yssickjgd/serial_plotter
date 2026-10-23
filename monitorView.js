@@ -9,6 +9,8 @@ const monitorDisplayUtils = typeof module !== 'undefined'
     ? require('./monitorDisplay') : globalThis.SerialPlotter.MonitorDisplay;
 const monitorChannelId = typeof module !== 'undefined'
     ? require('./plotMath').formatChannelId : globalThis.SerialPlotter.formatChannelId;
+const monitorProtocolUtils = typeof module !== 'undefined'
+    ? require('./protocolRecords') : globalThis.SerialPlotter;
 
 function monitorPrefix(row, options, frames) {
     const direction = row.kind === 'rx' || row.kind === 'error' ? 'RX' : 'TX';
@@ -233,6 +235,8 @@ function monitorRowLayout(row, columns, mode = 'hex', frames = null, textTokens 
 }
 
 function monitorBodyText(row, layout) {
+    if (layout.byteMode === 'protocol') return layout.protocolLines.slice(layout.firstLine ?? 0,
+        layout.lastLine ?? layout.lineCount).map(line => line.text).join('\n');
     if (layout.byteMode === 'text') return layout.parts.map(part => part.text).join('');
     if (layout.byteMode === 'number') return layout.numberText;
     if (layout.hex) return monitorDisplayUtils.hexVisibleParts(row.bytes, layout).map(part => part.text).join('');
@@ -359,6 +363,10 @@ class MonitorView {
         this._inViewport = true;
         this.decodeCache = options.decodeCache ?? null;
         this.prepareRecord = options.prepareRecord ?? null;
+        this.protocolDecoder = options.getProtocolRecord ?? options.decodeRecord ?? null;
+        this.protocolVersion = 0; this.protocolOptionsVersion = 0;
+        this.protocolOptions = {}; this.protocolCache = new Map(); this.protocolCacheWeight = 0;
+        this.protocolVisibleSpans = [];
         this.txFrames = options.txFrames ?? null;
         this.getSourceErrors = options.getSourceErrors ?? (() => []);
         this.container = container;
@@ -532,6 +540,7 @@ class MonitorView {
         this._cancelScheduledRender();
         this._cancelTextPreparation();
         this.frames = frames;
+        this.protocolCache.clear(); this.protocolCacheWeight = 0;
         this.lastRows = [];
         this.lastOffsets = [0];
         this.rowPositions = [];
@@ -561,6 +570,7 @@ class MonitorView {
         this.textCache.clear();
         this.textLayouts.clear();
         this.textStates.clear();
+        this.protocolCache.clear(); this.protocolVisibleSpans = [];
     }
 
     appendFrame() { this.schedule(); }
@@ -660,6 +670,7 @@ class MonitorView {
     }
 
     _byteAtLine(row, layout, line) {
+        if (layout.byteMode === 'protocol') return layout.protocolLines[line]?.field?.byteOffset ?? 0;
         if (layout.byteMode === 'number') return 0;
         if (layout.hex) {
             const parts = monitorDisplayUtils.hexVisibleParts(row.bytes, { ...layout, firstLine: line, lastLine: line + 1 });
@@ -678,6 +689,10 @@ class MonitorView {
     }
 
     _lineAtByte(row, layout, byte) {
+        if (layout.byteMode === 'protocol') {
+            const index = layout.protocolLines.findIndex(line => line.field && byte >= line.field.byteOffset && byte < line.field.endByte);
+            return index < 0 ? 0 : index;
+        }
         if (layout.byteMode === 'number') return 0;
         if (layout.hex) {
             let line = Math.floor(byte / layout.bytesPerLine) * layout.linesPerBlock;
@@ -785,7 +800,7 @@ class MonitorView {
         // A pressed scrollbar must keep its original track and record mapping until release.
         if (this._scrollSession) return;
         const records = this._records(), container = this.container;
-        const large = records.length > this.largeThreshold;
+        const large = this._largeRecords(records);
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
         const columns = this._layoutColumns(Math.max(2, Math.floor((container.clientWidth - padding) / this.charWidth)));
@@ -833,13 +848,98 @@ class MonitorView {
     }
 
     setMode(mode, { deferRender = false } = {}) {
-        if (!['hex', 'ascii', 'number', 'text'].includes(mode)) throw new RangeError('监视台显示格式无效');
+        if (mode === 'engine') mode = 'protocol';
+        if (!['hex', 'ascii', 'number', 'text', 'protocol'].includes(mode)) throw new RangeError('监视台显示格式无效');
         if (this.mode !== mode) {
             this._releaseTextSelection();
             this.numberAlignment = null;
         }
         this.mode = mode;
         if (!deferRender) this.render({ userAction: true });
+    }
+
+    setProtocolDecoder(decoder, { version, deferRender = false } = {}) {
+        if (decoder !== null && typeof decoder !== 'function') throw new TypeError('协议解码器必须为函数');
+        this.protocolDecoder = decoder; this.protocolVersion = version ?? this.protocolVersion + 1;
+        this.protocolCache.clear(); this.protocolCacheWeight = 0; this.protocolVisibleSpans = [];
+        if (!deferRender && this.mode === 'protocol') this.render({ userAction: true });
+    }
+
+    setProtocolOptions(options = {}, { deferRender = false } = {}) {
+        for (const key of ['fieldPaths', 'paths', 'hiddenPaths', 'collapsedPaths']) if (options[key] !== undefined && options[key] !== null &&
+            (!Array.isArray(options[key]) || options[key].some(path => typeof path !== 'string')))
+            throw new TypeError('协议字段筛选必须为路径数组');
+        this.protocolOptions = { ...this.protocolOptions, ...options }; this.protocolOptionsVersion++;
+        if (!deferRender && this.mode === 'protocol') this.render({ userAction: true });
+    }
+
+    _protocolRecord(row) {
+        const key = `${this.protocolVersion}:${row.order}:${this.frames.rawByteOffsetAt?.(row.frameIndex)}:${row.bytes.length}`;
+        let cached = this.protocolCache.get(key);
+        if (cached) return cached;
+        let record;
+        try {
+            if (!this.protocolDecoder) throw new Error('未配置协议解码器');
+            record = monitorProtocolUtils.unwrapProtocolRecord(this.protocolDecoder(row.frameIndex));
+        } catch (error) { record = { messageName: '协议解码失败', status: 'error', error, flatFields: [] }; }
+        const weight = row.bytes.length * 4 + (record.flatFields?.length ?? 0) * 96 + 256;
+        while (this.protocolCache.size && (this.protocolCache.size >= 128 || this.protocolCacheWeight + weight > 4194304)) {
+            const oldest = this.protocolCache.keys().next().value;
+            this.protocolCacheWeight -= this.protocolCache.get(oldest).weight; this.protocolCache.delete(oldest);
+        }
+        cached = { record, weight, layouts: new Map() }; this.protocolCache.set(key, cached); this.protocolCacheWeight += weight;
+        return cached;
+    }
+
+    _protocolLayout(row, columns) {
+        const cached = this._protocolRecord(row), prefix = monitorPrefix(row, this._displayOptions(), this.frames);
+        const bodyColumns = Math.max(2, columns - textCells(prefix)), key = `${bodyColumns}:${this.protocolOptionsVersion}`;
+        if (cached.layouts.has(key)) return { ...cached.layouts.get(key), prefix };
+        const protocolLines = [];
+        const append = (text, field = null, kind = 'field') => {
+            let line = '', cells = 0;
+            for (const char of String(text)) {
+                if (char === '\r') continue;
+                const width = textCells(char);
+                if (char === '\n' || cells && cells + width > bodyColumns) {
+                    protocolLines.push({ text: line, field, kind }); line = ''; cells = 0;
+                    if (char === '\n') continue;
+                }
+                line += char; cells += width;
+            }
+            protocolLines.push({ text: line, field, kind });
+        };
+        append(monitorProtocolUtils.protocolRecordSummary(cached.record), null, 'summary');
+        for (const field of monitorProtocolUtils.protocolVisibleFields(cached.record, this.protocolOptions)) {
+            const label = field.label === undefined ? '' : ` (${field.label})`;
+            append(`${field.path} = ${monitorProtocolUtils.protocolValueText(field.value, field)}${label}`, field);
+        }
+        for (const warning of cached.record.warnings ?? []) append(`警告: ${warning.message ?? warning.code ?? warning}`, null, 'warning');
+        const layout = { prefix, byteMode: 'protocol', protocolLines, lineCount: protocolLines.length,
+            protocolStatus: monitorProtocolUtils.protocolRecordStatus(cached.record) };
+        if (cached.layouts.size >= 4) cached.layouts.delete(cached.layouts.keys().next().value);
+        cached.layouts.set(key, layout); return layout;
+    }
+
+    /** Source byte positions are absolute; startByte/endByte remain frame relative. */
+    getVisibleHexSpans() {
+        if (this.mode === 'protocol') return this.protocolVisibleSpans.slice();
+        const result = [];
+        for (const position of this.rowPositions) {
+            if (position.frameIndex === undefined || position.top >= this.container.scrollTop + this.container.clientHeight ||
+                position.top + position.height <= this.container.scrollTop) continue;
+            const row = { ...this.frames.frameAt(position.frameIndex), frameIndex: position.frameIndex };
+            const layout = this._rowLayout(row, this._columns());
+            if (!layout.hex) continue;
+            const firstLine = Math.max(0, Math.floor((this.container.scrollTop - position.top) / this.rowHeight));
+            const lastLine = Math.min(layout.lineCount, Math.ceil((this.container.scrollTop + this.container.clientHeight - position.top) / this.rowHeight));
+            for (const part of monitorDisplayUtils.hexVisibleParts(row.bytes, { ...layout, firstLine, lastLine })) if (Number.isInteger(part.byteIndex)) {
+                const startByte = part.byteIndex, byteOffset = this.frames.rawByteOffsetAt(row.frameIndex) + startByte;
+                result.push({ order: row.order, frameIndex: row.frameIndex, startByte, endByte: startByte + 1,
+                    byteOffset, endByteOffset: byteOffset + 1 });
+            }
+        }
+        return result;
     }
 
     _displayOptions() { return this.displayOptions ?? monitorDisplayUtils.DEFAULTS; }
@@ -875,7 +975,8 @@ class MonitorView {
         return new MonitorRecordIndex(sources);
     }
 
-    _usesLargeLayout() { return this._records().length > this.largeThreshold; }
+    _largeRecords(records) { return records.length > this.largeThreshold || this.mode === 'protocol' && records.length > 0; }
+    _usesLargeLayout() { return this._largeRecords(this._records()); }
 
     /** Wheel movement uses actual nearby line heights; the compressed scrollbar remains a coarse history navigator. */
     _scrollVirtualBy(delta) {
@@ -1347,6 +1448,7 @@ class MonitorView {
     }
 
     _rowLayout(row, columns, countOnly = false) {
+        if (this.mode === 'protocol' && row.kind === 'rx' && row.frameIndex !== undefined) return this._protocolLayout(row, columns);
         const options = this._displayOptions();
         if (this.mode === 'text' && row.frameIndex !== undefined && row.kind === 'rx') {
             const state = this.preparedText;
@@ -1462,6 +1564,7 @@ class MonitorView {
                 start: row.order === match.startOrder ? match.startByte ?? 0 : 0,
                 end: row.order === match.endOrder ? match.endByte ?? Infinity : Infinity,
                 channel: match.channel,
+                path: match.path,
                 current: i === this.currentMatch
             });
         }
@@ -1505,6 +1608,7 @@ class MonitorView {
         this.extras.length = 0;
         this.followTail = true;
         this.anchor = null;
+        this.protocolCache.clear(); this.protocolCacheWeight = 0; this.protocolVisibleSpans = [];
         this.cursorOrder = null;
         this.cursorByteOffset = null;
         this.revealOrder = null;
@@ -1553,6 +1657,7 @@ class MonitorView {
             return;
         }
         this._renderDeferred = false;
+        this.protocolVisibleSpans = [];
         this._clearRowListeners();
         if (this.followTail) this.centerPadding = 0;
         let records = this._records();
@@ -1567,7 +1672,7 @@ class MonitorView {
                 this.anchor = records.length ? { order: records.orderAt(0), within: 0 } : null;
             }
         }
-        if (geometry ? geometry.large : records.length > this.largeThreshold) {
+        if (geometry ? geometry.large : this._largeRecords(records)) {
             this._renderLarge(records);
             this._captureScrollGeometry(records, true);
             return;
@@ -1680,7 +1785,8 @@ class MonitorView {
         const relevant = ranges?.some(range => layout.byteMode === 'number'
             ? range.channel !== undefined : range.channel === undefined);
         const replacements = layout.byteMode === 'text' && layout.parts.some(part => part.token?.failed);
-        if (relevant || replacements || this._displayOptions().keyword || layout.byteMode === 'number' && this.channelColors?.length)
+        if (layout.byteMode === 'protocol') this._appendProtocolBody(body, row, layout, ranges ?? []);
+        else if (relevant || replacements || this._displayOptions().keyword || layout.byteMode === 'number' && this.channelColors?.length)
             this._appendHighlightedBody(body, row, layout, ranges ?? []);
         else body.textContent = monitorBodyText(row, layout);
         div.append(prefix, body);
@@ -1708,6 +1814,38 @@ class MonitorView {
             div.appendChild(toggle);
         }
         return div;
+    }
+
+    _appendProtocolBody(body, row, layout, ranges) {
+        const first = layout.firstLine ?? 0, last = layout.lastLine ?? layout.lineCount;
+        for (let index = first; index < last; index++) {
+            const line = layout.protocolLines[index]; if (!line) break;
+            const span = this.document.createElement('span'), field = line.field;
+            span.textContent = (index === first ? '' : '\n') + line.text;
+            span.className = `monitor-protocol-${line.kind}`;
+            if (field) {
+                const matches = ranges.filter(range => range.path ? range.path === field.path :
+                    range.channel === undefined && field.byteOffset < range.end && field.endByte > range.start);
+                const current = matches.some(range => range.current);
+                if (matches.length) {
+                    span.className += ` monitor-search-${current ? 'current' : 'match'}`;
+                    span.style.backgroundColor = this._displayOptions()[current ? 'searchCurrentColor' : 'searchMatchColor'];
+                }
+                const byteOffset = this.frames.rawByteOffsetAt(row.frameIndex) + field.byteOffset;
+                span.title = `${field.path} · 字节 ${byteOffset}–${this.frames.rawByteOffsetAt(row.frameIndex) + field.endByte}` +
+                    (field.bitOffset === undefined ? '' : ` · 位 ${field.bitOffset}:${field.bitLength}`);
+                if (span.dataset) Object.assign(span.dataset, { fieldPath: field.path, byteOffset: String(byteOffset),
+                    startByte: String(field.byteOffset), endByte: String(field.endByte) });
+                const position = this.rowPositions.find(position => position.order === row.order);
+                if (position && position.top + (index + 1) * this.rowHeight > this.container.scrollTop &&
+                    position.top + index * this.rowHeight < this.container.scrollTop + this.container.clientHeight)
+                    this.protocolVisibleSpans.push({ element: span, order: row.order, frameIndex: row.frameIndex,
+                    path: field.path, startByte: field.byteOffset, endByte: field.endByte, byteOffset,
+                    endByteOffset: this.frames.rawByteOffsetAt(row.frameIndex) + field.endByte,
+                    ...(field.bitOffset === undefined ? {} : { bitOffset: field.bitOffset, bitLength: field.bitLength }) });
+            }
+            body.appendChild(span);
+        }
     }
 
     _keywordByteRanges(row, layout, hexParts) {

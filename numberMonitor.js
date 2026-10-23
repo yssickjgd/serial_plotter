@@ -36,7 +36,8 @@ function wrapNumericField(text, columns, labelPadding) {
 
 function numericGrid(fields, bodyColumns, significantDigits = null) {
     const columns = Number.isFinite(bodyColumns) ? Math.max(2, Math.floor(bodyColumns)) : 2;
-    const labelDigits = Math.max(2, String(fields.length).length, ...fields.map(field => numericFieldParts(field)?.id.length ?? 0));
+    let labelDigits = Math.max(5, String(fields.length).length);
+    for (const field of fields) labelDigits = Math.max(labelDigits, numericFieldParts(field)?.id.length ?? 0);
     const scientific = Number.isInteger(significantDigits) && significantDigits >= 1 && significantDigits <= 17;
     // Reserve a sign, every significant digit, e± and a three-digit exponent.
     // The same grid also fits -Infinity, so invalid samples cannot change row heights.

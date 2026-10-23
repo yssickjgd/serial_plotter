@@ -14,8 +14,6 @@
  *    7. 渲染（renderLoop、draw、_drawCrosshair）
  * ═══════════════════════════════════════════════════════════════ */
 
-const FFT_REFRESH_INTERVAL_MS = 100;
-const WORKER_FFT_REFRESH_INTERVAL_MS = 1000 / 30;
 const plotterLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 const PlotWaveGpuRenderer = typeof module !== 'undefined'
@@ -28,6 +26,7 @@ class Plotter {
         this.document = this.canvas.ownerDocument ?? document;
         this.window = this.document.defaultView ?? window;
         this.viewOnly = options.viewOnly === true;
+        this.maxDrawFps = Number.isFinite(options.maxDrawFps) && options.maxDrawFps > 0 ? options.maxDrawFps : null;
         this.fftWorkerPool = options.fftWorkerPool ?? null;
         this._listeners = [];
         this._raf = null;
@@ -786,12 +785,6 @@ class Plotter {
             : { start: Math.max(0, total - this.plotWindowPoints), end: total };
     }
 
-    _fftRefreshInterval() {
-        if (this.fftWorkerPool?.available === false) return FFT_REFRESH_INTERVAL_MS;
-        if (this.fftWorkerPool && this.gpuRenderer?.available) return 0;
-        return this.fftWorkerPool ? WORKER_FFT_REFRESH_INTERVAL_MS : FFT_REFRESH_INTERVAL_MS;
-    }
-
     /** 对所有可见通道的当前输入范围执行 FFT，结果缓存在 Map 中供 draw 复用。 */
     _computeFftForVisibleChannels() {
         if (this.frames.rawMode) { this._fftCache.clear(); return this._fftCache; }
@@ -800,10 +793,7 @@ class Plotter {
         const sourceMode = this.frames.responseMode ? 'static' : this.isPaused ? 'paused' : 'live';
         const sameRange = this._fftInputRange &&
             this._fftInputRange.start === range.start && this._fftInputRange.end === range.end;
-        if ((this._fftVersion === this.frames.version && sameRange) ||
-            (this._fftVersion >= 0 && sourceMode === 'live' &&
-                this._fftSourceMode === 'live' &&
-                now - this._fftAt < this._fftRefreshInterval())) return this._fftCache;
+        if (this._fftVersion === this.frames.version && sameRange) return this._fftCache;
         if (this._fftPending) return this._fftCache;
         if (this.fftWorkerPool && !this.frames.responseMode) {
             const frames = this.frames, version = frames.version, generation = this._fftGeneration;
@@ -1316,18 +1306,17 @@ class Plotter {
 
     /* ── 渲染 ── */
 
-    /** GPU plots follow display refresh; Canvas fallback retains its 30 FPS ceiling. */
+    /** Workspace subscribers may cap drawing independently from receive throughput. */
     renderLoop() {
         if (this._disposed || !this.isVisible || !this._inViewport) return;
         const now = performance.now();
-        if (this._scrollbarDirty && this.displayMode === 'time') {
+        if (this._scrollbarDirty) {
             this._updateScrollbar();
             this._scrollbarDirty = false;
         }
-        const spectrumDue = !this._fftPending && (this._fftVersion < 0 ||
-            (this._fftVersion !== this.frames.version && now - this._fftAt >= this._fftRefreshInterval()));
+        const spectrumDue = !this._fftPending && this._fftVersion !== this.frames.version;
         if ((!this.isPaused || this._viewDirty) && this._dirty &&
-            (this.gpuRenderer?.available || now - this._lastDraw >= 1000 / 30) &&
+            (!this.maxDrawFps || now - this._lastDraw >= 1000 / this.maxDrawFps) &&
             (this.displayMode === 'time' || this._viewDirty || spectrumDue)) {
             this.draw();
         }

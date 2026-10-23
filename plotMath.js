@@ -85,7 +85,7 @@ function bucketAxisExtrema(values, xPositions) {
 
 /** Format a zero-based channel index for labels, default names, and exports. */
 function formatChannelId(index) {
-    return `CH${String(index + 1).padStart(2, '0')}`;
+    return `CH${String(index + 1).padStart(5, '0')}`;
 }
 
 function csvField(value) {

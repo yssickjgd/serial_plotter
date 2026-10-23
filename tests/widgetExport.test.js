@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
+async function applyEngine(f) { const ready = f.app.engineView.apply(); await f.settle(); await ready; }
 
 test('export parsing is independent and text decoding and output encoding are separate', async t => {
     const f = boot(t);
@@ -268,7 +269,7 @@ test('default all-channel export continues to include newly configured channels'
     const f = boot(t);
     const wave = f.app.widgets.create({ type: 'wave' });
     f.app.getConfig();
-    f.change('channels-count', '3'); await f.settle();
+    f.change('channels-count', '3'); await applyEngine(f);
     const choices = f.get('export-channel-list').children;
     assert.equal(choices.length, 3);
     assert.ok([...choices].every(label => label.children[0].checked));
@@ -311,7 +312,7 @@ test('old global export options migrate to their selected widget and invalid pro
 
 test('base export retains undecodable bytes while CSV uses every retained sample beyond the current viewport', async t => {
     const f = boot(t), wave = f.app.widgets.create({ type: 'wave' });
-    f.change('chk-header', true); await f.settle();
+    f.change('chk-header', true); await applyEngine(f);
     const data = Uint8Array.of(0xff, 0xab, 1, 2, 0xab, 3, 4, 0xab, 5, 6);
     f.app.service.receive(data); f.app.service.pause(true); await f.tick();
     wave.view.vp.time.displayCount = 2;

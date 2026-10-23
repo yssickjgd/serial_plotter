@@ -17,6 +17,8 @@ class ExportSettingsView {
         this.onChange = onChange;
         this.allowedFormats = ['binary', 'hex-text', 'text', 'csv'];
         this.directionAvailable = true;
+        this.channelPage = 0;
+        this.channelFilter = '';
         this.listeners = [];
         this.elements = Object.fromEntries(Object.entries({
             format: 'export-format', direction: 'export-direction', encoding: 'export-encoding',
@@ -64,6 +66,7 @@ class ExportSettingsView {
                 this.sync();
                 this.onChange('channels');
             });
+        this._buildChannelPicker();
         this.sync();
     }
 
@@ -73,6 +76,24 @@ class ExportSettingsView {
     }
 
     dispose() { for (const remove of this.listeners.splice(0)) remove(); }
+
+    _buildChannelPicker() {
+        const toolbar = this.document.createElement('div'); toolbar.className = 'channel-picker-toolbar';
+        const filter = this.document.createElement('input'); filter.type = 'search'; filter.id = 'export-channel-filter';
+        filter.placeholder = '筛选通道编号或名称'; filter.setAttribute?.('aria-label', '筛选导出通道');
+        const previous = this.document.createElement('button'), next = this.document.createElement('button'), summary = this.document.createElement('span');
+        previous.className = next.className = 'btn btn-secondary';
+        previous.type = next.type = 'button'; previous.textContent = '上一页'; next.textContent = '下一页';
+        const pager = this.document.createElement('div'); pager.className = 'sidebar-pager';
+        summary.setAttribute?.('role', 'status'); pager.append(previous, summary, next); toolbar.append(filter, pager);
+        const list = this.document.getElementById('export-channel-list');
+        if (list.parentNode?.insertBefore) list.parentNode.insertBefore(toolbar, list);
+        else this.document.getElementById('export-channels-wrap').append(toolbar);
+        this.channelPicker = { toolbar, filter, previous, next, summary };
+        this.listen(filter, 'input', () => { this.channelFilter = filter.value; this.channelPage = 0; this.renderChannels(); });
+        this.listen(previous, 'click', () => { if (this.channelPage > 0) { this.channelPage--; this.renderChannels(); } });
+        this.listen(next, 'click', () => { if ((this.channelPage + 1) * 40 < this.filteredChannelCount) { this.channelPage++; this.renderChannels(); } });
+    }
 
     selectedChannels() {
         return this.channels.flatMap((channel, index) => this.excludedChannels.has(index) || channel.signal === false ? [] : [index]);
@@ -131,17 +152,24 @@ class ExportSettingsView {
             if (key.startsWith('enable')) field.checked = numeric[key]; else field.value = numeric[key];
         }
         this.setDefaultEncoding(defaultEncoding);
-        this.excludedChannels = new Set(channels.flatMap((_, index) =>
-            profile.channelIndices === null || profile.channelIndices.includes(index) ? [] : [index]));
-        this.setChannels(channels);
+        const selected = profile.channelIndices === null ? null : new Set(profile.channelIndices);
+        this.excludedChannels = new Set(channels.flatMap((_, index) => selected === null || selected.has(index) ? [] : [index]));
+        this.setChannels(channels, { preserveIdentity: false });
     }
 
     setDefaultEncoding(encoding) {
         if (!this.encodingEdited) this.elements.encoding.value = exportSettingsCodec.normalizeTextEncoding(encoding);
     }
 
-    setChannels(channels) {
-        this.channels = channels.map(channel => ({ name: channel.name, signal: channel.signal }));
+    setChannels(channels, { preserveIdentity = true } = {}) {
+        const excludedIds = new Set(), excludedIndices = new Set();
+        for (const index of this.excludedChannels) {
+            const id = this.channels[index]?.id;
+            if (preserveIdentity && id !== undefined) excludedIds.add(id); else excludedIndices.add(index);
+        }
+        this.channels = channels.map(channel => ({ id: channel.id, name: channel.name, signal: channel.signal }));
+        this.excludedChannels = new Set(this.channels.flatMap((channel, index) =>
+            excludedIndices.has(index) || excludedIds.has(channel.id) ? [index] : []));
         for (const index of this.excludedChannels)
             if (index >= channels.length) this.excludedChannels.delete(index);
         this.renderChannels();
@@ -149,8 +177,18 @@ class ExportSettingsView {
     }
 
     renderChannels() {
-        const labels = this.channels.flatMap(({ name, signal }, index) => {
-            if (signal === false) return [];
+        const query = this.channelFilter.trim().toLocaleLowerCase(), matching = [];
+        const exact = /^ch0*(\d+)$/i.exec(query);
+        this.channels.forEach(({ name, signal }, index) => {
+            if (signal === false) return;
+            if (query && (exact ? Number(exact[1]) !== index + 1 :
+                !`CH${String(index + 1).padStart(5, '0')} ${name ?? ''}`.toLocaleLowerCase().includes(query))) return;
+            matching.push(index);
+        });
+        this.filteredChannelCount = matching.length;
+        this.channelPage = Math.max(0, Math.min(this.channelPage, Math.ceil(matching.length / 40) - 1));
+        const labels = matching.slice(this.channelPage * 40, (this.channelPage + 1) * 40).map(index => {
+            const { name } = this.channels[index];
             const label = this.document.createElement('label');
             label.className = 'export-channel-choice';
             const checkbox = this.document.createElement('input');
@@ -158,8 +196,9 @@ class ExportSettingsView {
             checkbox.checked = !this.excludedChannels.has(index);
             checkbox.disabled = this.busy;
             const text = this.document.createElement('span');
-            const id = `CH${String(index + 1).padStart(2, '0')}`;
-            text.textContent = name && name !== id ? `${id} · ${name}` : id;
+            const id = `CH${String(index + 1).padStart(5, '0')}`;
+            const defaultName = /^CH0*\d+$/i.test(name ?? '') && Number(name.slice(2)) === index + 1;
+            text.textContent = name && !defaultName ? `${id} · ${name}` : id;
             label.title = text.textContent;
             checkbox.addEventListener('change', () => {
                 if (checkbox.checked) this.excludedChannels.delete(index);
@@ -168,9 +207,14 @@ class ExportSettingsView {
                 this.onChange('channels');
             });
             label.append(checkbox, text);
-            return [label];
+            return label;
         });
         this.document.getElementById('export-channel-list').replaceChildren(...labels);
+        const picker = this.channelPicker;
+        picker.previous.disabled = this.busy || this.channelPage <= 0;
+        picker.next.disabled = this.busy || (this.channelPage + 1) * 40 >= matching.length;
+        picker.filter.disabled = this.busy;
+        picker.summary.textContent = matching.length ? `${this.channelPage * 40 + 1}–${Math.min(matching.length, (this.channelPage + 1) * 40)} / ${matching.length}` : '无匹配通道';
     }
 
     sync({ numericAvailable = this.numericAvailable, busy = this.busy, allowedFormats = this.allowedFormats,
@@ -216,6 +260,11 @@ class ExportSettingsView {
             this.document.getElementById(id).disabled = busy;
         for (const label of this.document.getElementById('export-channel-list').children)
             label.children[0].disabled = busy;
+        if (this.channelPicker) {
+            this.channelPicker.filter.disabled = busy;
+            this.channelPicker.previous.disabled = busy || this.channelPage <= 0;
+            this.channelPicker.next.disabled = busy || (this.channelPage + 1) * 40 >= this.filteredChannelCount;
+        }
     }
 }
 

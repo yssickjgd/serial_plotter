@@ -1,10 +1,13 @@
 /** Executes a validated snapshot; cancellation never retracts an already submitted write. */
 class CommandRunner {
     constructor({ library, send, getEngine, beforeStart = () => {}, onState = () => {}, onError = () => {},
-        schedule = setTimeout, cancel = clearTimeout }) {
+        schedule = setTimeout, cancel = clearTimeout, protocolSession = null }) {
         Object.assign(this, { library, send, getEngine, beforeStart, onState, onError, schedule, cancel });
         this.task = null;
         this.disposed = false;
+        const Session = typeof module !== 'undefined' ? require('./protocolSendView').ProtocolSendSession
+            : globalThis.SerialPlotter.ProtocolSendSession;
+        this.protocolSession = protocolSession || (Session ? new Session({ getProtocol: id => this.library.getProtocol?.(id) }) : null);
     }
     get running() { return this.task !== null; }
     stop() {
@@ -25,7 +28,7 @@ class CommandRunner {
         if (this.disposed) return false;
         let plan;
         try {
-            plan = this.library.prepareTree(id);
+            plan = this.library.prepareTree(id, { protocolSession: this.protocolSession });
             if (!this.getEngine()) throw new Error('请先连接通讯设备');
         } catch (error) { this.onError(error); return false; }
         this.stop(); this.beforeStart();
@@ -54,7 +57,9 @@ class CommandRunner {
                     if (!active()) return false;
                     this.onState({ running: true, currentId: item.id, sent: task.sent, total: task.total,
                         message: `正在发送 ${item.name} · ${task.sent} / ${task.total}` });
-                    if (!await this.send(item.bytes, current)) {
+                    const sent = item.protocol ? await this.protocolSession.send(item.protocol, this.send, current)
+                        : await this.send(item.bytes, current);
+                    if (!sent) {
                         if (this.task === task) throw new Error('发送失败，剩余指令已停止');
                         return false;
                     }

@@ -4,8 +4,8 @@ const { migrateWorkspaceConfig, validateWorkspaceConfig } = require('../widgetCo
 
 test('interface layout defaults migrate and custom panel preferences roundtrip with strict validation', () => {
     const config = migrateWorkspaceConfig(null);
-    assert.deepEqual(config.uiLayout, { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200 });
-    config.uiLayout = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 300 };
+    assert.deepEqual(config.uiLayout, { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200, leftSplitRatio: .5 });
+    config.uiLayout = { leftWidth: 355, rightWidth: 410, leftOpen: false, rightOpen: true, sendHeight: 300, leftSplitRatio: .5 };
     assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(config))).uiLayout, config.uiLayout);
     assert.deepEqual(migrateWorkspaceConfig({}).uiLayout, migrateWorkspaceConfig(null).uiLayout);
     for (const input of [null, [], 'bad', { leftWidth: 239 }, { rightWidth: 701 }, { sendHeight: 159 },
@@ -80,16 +80,16 @@ test('fresh workspace is empty; legacy configuration migrates both monitors with
 test('global derived channels and colors roundtrip and reject conflicting or invalid definitions', () => {
     const config = migrateWorkspaceConfig(null);
     config.global.channelDefinitions = [{ number: 2, type: 'constant', expression: '[0]=1,[1]=2' },
-        { number: 3, type: 'formula', expression: 'filter(CH01,CH02)' }];
+        { number: 3, type: 'formula', expression: 'FILTER(CH01,CH02)' }];
     config.global.channelColors = ['#ff0000', '#00ff00', '#0000ff'];
     const result = validateWorkspaceConfig(config);
-    assert.deepEqual(result.global.channelDefinitions, config.global.channelDefinitions);
+    assert.deepEqual(result.global.channelDefinitions, [config.global.channelDefinitions[0], { ...config.global.channelDefinitions[1], expression: 'FILTER(CH00001,CH00002)' }]);
     assert.deepEqual(result.global.channelColors, config.global.channelColors);
     assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(result))), result);
     assert.throws(() => validateWorkspaceConfig({ ...config, global: { ...config.global, channelsCount: '2' } }), /冲突/);
     assert.throws(() => validateWorkspaceConfig({ ...config, global: { ...config.global, channelColors: ['red'] } }), /颜色/);
     assert.throws(() => validateWorkspaceConfig({ ...config, global: { ...config.global,
-        channelDefinitions: [{ number: 2, type: 'system', expression: 'x[0]+y[-1]', initial: '' }] } }), /初始状态/);
+        channelDefinitions: [{ number: 2, type: 'system', expression: 'X[0]+Y[-1]', initial: '' }] } }), /初始状态/);
 });
 
 test('invalid instance or overlapping layout is rejected before replacing state', () => {
@@ -192,4 +192,62 @@ test('buffer export settings roundtrip independently and malformed profiles are 
         assert.throws(() => validateWorkspaceConfig({ ...config, tools: { ...config.tools,
             exportProfiles: { ...config.tools.exportProfiles, numeric: profile } } }));
     }
+});
+
+
+test('legacy channel symbols migrate once and new explicit versions stay case sensitive', () => {
+    const config = migrateWorkspaceConfig(null);
+    delete config.global.symbolVersion;
+    config.global.channelDefinitions = [{ number: 2, type: 'formula', expression: 'int(CH01)' }];
+    const result = validateWorkspaceConfig(config);
+    assert.equal(result.global.symbolVersion, 2);
+    assert.equal(result.global.channelDefinitions[0].expression, 'INT(CH00001)');
+    assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(result))), result);
+    result.global.channelDefinitions[0].expression = 'int(CH01)';
+    assert.throws(() => validateWorkspaceConfig(result), /大写/);
+});
+
+test('legacy sequence paths migrate for mappings, visible fields and both sending modes', () => {
+    const config = migrateWorkspaceConfig(null);
+    const old = { id: 'old', framing: { fixedLength: 2 }, headerFields: [{ id: 'seq-id', name: 'seq', type: 'uint8', offset: 0 }],
+        payloadOffset: 1, messages: [{ id: 'm', fields: [{ id: 'v', name: 'value', type: 'uint8' }] }] };
+    config.dataEngine.protocols = [old];
+    config.dataEngine.mappings = [{ protocolId: 'old', messageId: 'm', path: 'header.seq', fieldId: 'seq-id', channel: 0 }];
+    config.send.protocol = { protocolId: 'old', messageId: 'm', fields: { header: { seq: 5 }, value: 9 }, fieldsText: '{"header":{"seq":5},"value":9}' };
+    config.send.commands = [{ id: 'send1', type: 'command', name: 'old', mode: 'protocol', content: '', protocol: config.send.protocol }];
+    config.widgets.push({ id: 'byte-1', type: 'byte', title: 'Byte', settings: { protocolFieldPaths: ['header.seq'] } });
+    const result = validateWorkspaceConfig(config);
+    assert.equal(result.dataEngine.protocols[0].headerFields[0].name, 'rm_seq');
+    assert.equal(result.dataEngine.protocols[0].headerFields[0].id, 'seq-id');
+    assert.equal(result.dataEngine.mappings[0].path, 'header.rm_seq');
+    assert.equal(result.widgets[0].settings.protocolFieldPaths[0], 'header.rm_seq');
+    assert.equal(result.send.protocol.fields.header.rm_seq, 5);
+    assert.equal(JSON.parse(result.send.protocol.fieldsText).header.rm_seq, 5);
+    assert.equal(result.send.commands[0].protocol.fields.header.rm_seq, 5);
+    assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(result))), result);
+});
+
+
+test('stored sample values migrate field keys without changing their independently saved wire bytes', () => {
+    const config = migrateWorkspaceConfig(null);
+    config.dataEngine.protocols = [{ id: 'old-sample', framing: { fixedLength: 1 }, messages: [{ id: 'm', fields: [{ id: 'x-id', name: 'X', type: 'uint8' }] }] }];
+    config.dataEngine.editorState.samples = { 'old-sample': [{ id: 's1', messageId: 'm', values: '{"X":5}', hex: '05' }, { id: 's2', values: '{broken' }] };
+    const result = validateWorkspaceConfig(config), sample = result.dataEngine.editorState.samples['old-sample'][0];
+    assert.equal(JSON.parse(sample.values).field_X, 5);
+    assert.equal(sample.hex, '05');
+    const { Protocol } = require('../protocolEngine');
+    assert.deepEqual([...Protocol.encode(result.dataEngine.protocols[0], 'm', JSON.parse(sample.values))], [5]);
+    assert.equal(result.dataEngine.editorState.samples['old-sample'][1].values, '{broken');
+    assert.deepEqual(validateWorkspaceConfig(result), result);
+});
+
+
+test('legacy names newly reserved by the common catalog keep their channel identity in saved formulas', () => {
+    const config = migrateWorkspaceConfig(null); delete config.global.symbolVersion;
+    config.global.channelNames = ['MIN'];
+    config.global.channelDefinitions = [{ number: 2, type: 'formula', expression: 'MIN+1' }];
+    const saved = validateWorkspaceConfig(config);
+    assert.equal(saved.global.channelNames[0], 'MIN');
+    assert.equal(saved.global.channelDefinitions[0].expression, 'CH00001+1');
+    assert.deepEqual(validateWorkspaceConfig(saved), saved);
 });

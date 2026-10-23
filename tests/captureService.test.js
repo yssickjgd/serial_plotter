@@ -102,6 +102,18 @@ test('large formula lookbacks reserve their memory before sampling and reject ed
     assert.deepEqual(s.channelDefinitions, []);
 });
 
+test('invalid lowercase edits are rejected before memory reservation can evict retained samples', t => {
+    const s = service(); t.after(() => s.dispose());
+    s.receive(Uint8Array.of(1, 2, 3));
+    s.memory.setLimit(s.memory.measure().usedBytes + 65536 * 8 - 1, false);
+    const firstByte = s.history.startByte;
+    assert.throws(() => s.updateChannelDefinitions([{ number: 2, type: 'formula', expression: 'diff(CH01[-65536])' }],
+        { rebuild: false }), /DIFF/);
+    assert.deepEqual(s.numericSource.frames.channelSlice(0), [1, 2, 3]);
+    assert.equal(s.history.startByte, firstByte);
+    assert.deepEqual(s.channelDefinitions, []);
+});
+
 test('an unstoreable TX record reports pressure without allocating or deleting the retained history', t => {
     const notices = [];
     const s = service({ memoryLimitBytes: 2 * 1048576, onMemoryPressure: state => notices.push(state) });
@@ -189,7 +201,7 @@ test('numeric widgets share derived samples once and parser replay rebuilds comp
     s.receive(Uint8Array.of(1, 2, 3));
     assert.equal(a.frames, b.frames);
     assert.deepEqual(a.frames.channelSlice(1), [1, 3, 6]);
-    await s.updateChannelDefinitions([{ number: 2, type: 'formula', expression: 'int(CH01*2)' }], { rebuild: false });
+    await s.updateChannelDefinitions([{ number: 2, type: 'formula', expression: 'INT(CH01*2)' }], { rebuild: false });
     s.receive(Uint8Array.of(4));
     assert.deepEqual(a.frames.channelSlice(1), [1, 3, 6, 8]);
     await s.updateNumericFormat(numericFormat);

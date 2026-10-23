@@ -84,10 +84,12 @@ test('plot window points are bounded by the canvas limit and retained capacity',
         /波形监视台内采样点数/);
 });
 
-test('one hour at 1000 Hz supports 50 channels while rejecting larger limits', () => {
+test('one hour at 1000 Hz supports up to 65535 channels while rejecting larger channel and point limits', () => {
     assert.equal(validateConfig({ channelsCount: '50', maxPoints: '3600000',
         plotWindowPoints: '65536' }).channelsCount, '50');
-    assert.throws(() => validateConfig({ channelsCount: '51' }), /通道数/);
+    assert.equal(validateConfig({ channelsCount: '51' }).channelsCount, '51');
+    assert.equal(validateConfig({ channelsCount: '65535', maxPoints: '3600000' }).channelsCount, '65535');
+    assert.throws(() => validateConfig({ channelsCount: '65536' }), /通道数/);
     assert.throws(() => validateConfig({ maxPoints: '3600001' }), /采样点数/);
 });
 

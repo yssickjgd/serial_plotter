@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
 async function fixture(t) {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    f.change('channels-count', '3'); await f.settle();
+    f.change('channels-count', '3'); const applied = f.app.engineView.apply(); await f.settle(); await applied;
     const pose = f.app.widgets.create({ type: 'pose', settings: { bindings: { euler: [0, 2, 2] } } });
     const wave = f.app.widgets.create({ type: 'wave' });
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });

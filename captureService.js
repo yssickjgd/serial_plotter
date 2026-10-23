@@ -19,6 +19,7 @@ class CaptureService {
         if (options.clearTimeout) this.parserOptions.clearTimeout = options.clearTimeout;
         this.yieldControl = options.yieldControl;
         this.channelDefinitions = options.channelDefinitions ?? [];
+        this.channelNames = options.channelNames ?? options.numericFormat?.channelNames ?? [];
         this.onChange = options.onChange ?? (() => {});
         this.onProgress = options.onProgress ?? (() => {});
         this.onError = options.onError ?? (() => {});
@@ -40,6 +41,8 @@ class CaptureService {
         const numeric = { captureMode: 'number', channelsCount: 1, enableHeader: true,
             headerHex: 'AB', dataType: 'float32', ...options.numericFormat };
         numeric.isLittleEndian ??= numeric.endianness !== 'big';
+        this.catalogCount = Math.max(Number(numeric.channelsCount), Number(options.catalogCount ?? numeric.catalogCount ?? numeric.channelsCount));
+        numeric.catalogCount = this.catalogCount;
         this.numericSource = this._createSource(numeric, true, 'numeric', 0);
         const baseFormat = this._rawFormat({ captureMode: 'hex' });
         const baseKey = this._sourceKey(baseFormat, true);
@@ -81,9 +84,9 @@ class CaptureService {
     _createSource(format, persistent, key, startByte) {
         const parser = this._newParser(format, startByte);
         const numeric = format.captureMode === 'number';
-        let frames = new captureServiceDependencies.FrameBuffer(numeric ? Number(format.channelsCount) : 1, this.capacity);
+        let frames = new captureServiceDependencies.FrameBuffer(numeric ? Number(format.catalogCount ?? format.channelsCount) : 1, this.capacity);
         if (numeric) frames = new captureServiceDependencies.ComputedFrames(frames, this.channelDefinitions,
-            { yieldControl: this.yieldControl });
+            { yieldControl: this.yieldControl, names: this.channelNames });
         if (!numeric) frames.setRawMode(true);
         const source = { id: `source-${this.nextSource++}`, kind: numeric ? 'numeric' : 'raw',
             frames, parser, format: { ...format }, refs: 0, persistent, key, startByte,
@@ -125,6 +128,12 @@ class CaptureService {
             if (!this.receiving) { this._prune(); this.memory?.check(); }
         };
         if (source.kind === 'numeric') parser.onFrameParsed = (values, time, bytes, timestamp, metadata) => {
+            const count = source.frames.rawChannelCount;
+            if (values.length !== count) {
+                const padded = new Array(count).fill(NaN);
+                for (let channel = 0; channel < Math.min(count, values.length); channel++) padded[channel] = values[channel];
+                values = padded;
+            }
             source.frames.append(values, bytes, time, metadata.order, timestamp, metadata);
             changed();
         };
@@ -165,13 +174,14 @@ class CaptureService {
         this.receiving = true;
         try {
             for (const source of this.sources) {
-                if (source.rebuilding) continue;
+                if (source.rebuilding || this.dataEngine && !this.dataEngine.shouldFeed(source)) continue;
                 try {
                     source.parser.appendData(bytes, stamp);
                     source.sampleRate?.observe(source.parser.frameCount, stamp.arrival);
                 }
                 catch (error) { this._error(source, error); }
             }
+            this.dataEngine?.receive(bytes, stamp);
             for (const entry of this.textStats.values()) {
                 if (!entry.rebuilding && entry.counter) {
                     entry.counter.write(bytes);
@@ -185,9 +195,10 @@ class CaptureService {
 
     acquireSource(format = {}, { rebuild = this.rebuildHistory } = {}) {
         if (this.disposed) throw new Error('Capture service disposed');
-        if ((format.captureMode ?? 'number') === 'number') {
-            this.numericSource.refs++;
-            return this.numericSource;
+        if (['number', 'engine'].includes(format.captureMode ?? 'number')) {
+            const source = this.dataEngine?.output(format.engineSource, format.enginePresentation === true || format.captureMode === 'engine') ?? this.numericSource;
+            source.refs++;
+            return source;
         }
         const normalized = this._rawFormat(format), key = this._sourceKey(normalized, rebuild);
         let source = this.sourceKeys.get(key);
@@ -217,18 +228,23 @@ class CaptureService {
     }
 
     updateNumericFormat(format, { rebuild = this.rebuildHistory } = {}) {
-        const source = this.numericSource;
+        const source = this.dataEngine?.arraySource ?? this.numericSource;
         const next = { ...source.format, ...format, captureMode: 'number' };
+        this.catalogCount = Math.max(this.catalogCount, Number(this.dataEngine?.globals.channelsCount ?? 0), Number(next.channelsCount));
+        next.catalogCount = this.catalogCount;
         if (!Object.hasOwn(format, 'isLittleEndian') && Object.hasOwn(format, 'endianness'))
             next.isLittleEndian = format.endianness !== 'big';
         this._newParser(next, this.history.endByte); // Validate before changing a live source.
-        new captureServiceDependencies.ChannelOperations(Number(next.channelsCount), this.channelDefinitions);
+        new captureServiceDependencies.ChannelOperations(next.catalogCount, this.channelDefinitions, { names: this.channelNames });
         source.format = next;
         return this._restart(source, rebuild);
     }
 
     updateChannelDefinitions(definitions, { rebuild = this.rebuildHistory, reapply = [], numberMap = null } = {}) {
-        const engine = new captureServiceDependencies.ChannelOperations(this.numericSource.frames.rawChannelCount, definitions);
+        if (this.dataEngine)
+            return this.dataEngine.updateChannelDefinitions(definitions, { rebuild, reapply, numberMap });
+        const engine = new captureServiceDependencies.ChannelOperations(this.numericSource.frames.rawChannelCount, definitions,
+            { names: this.channelNames, symbolVersion: 2 });
         const reserve = engine.requiredMemoryBytes * (rebuild && this.numericSource.frames.length ? 2 : 1);
         if (reserve > this.memory.limitBytes)
             throw new RangeError('运算通道的历史状态超过内存预算，请缩短历史索引、提高预算或关闭历史重建');
@@ -249,7 +265,7 @@ class CaptureService {
         const start = rebuild ? this.history.startByte : this.history.endByte;
         source.startByte = start;
         if (rebuild && this.history.endByte > start) return this._rebuild(source, start);
-        if (source.kind === 'numeric') source.frames.resetFormat(Number(source.format.channelsCount), this.channelDefinitions);
+        if (source.kind === 'numeric') source.frames.resetFormat(Number(source.format.catalogCount ?? source.format.channelsCount), this.channelDefinitions);
         else source.frames.clear();
         source.parser = this._newParser(source.format, start);
         source.rebuilding = false; source.pin = null; source.progress = null;
@@ -332,7 +348,7 @@ class CaptureService {
                     this._error(source, error);
                     source.rebuilding = false; source.pin = null;
                     source.frames.clear();
-                    if (source.kind === 'numeric') source.frames.setChannelCount(Number(source.format.channelsCount));
+                    if (source.kind === 'numeric') source.frames.setChannelCount(Number(source.format.catalogCount ?? source.format.channelsCount));
                     source.parser = this._newParser(source.format, this.history.endByte);
                     this._attach(source);
                 }
@@ -393,11 +409,13 @@ class CaptureService {
 
     endStream() {
         if (this.disposed) return;
-        this.history.markBoundary();
+        const boundary = { timestamp: this.wallNow(), arrival: this.now() };
+        this.history.markBoundary(boundary);
+        this.dataEngine?.endStream(boundary);
         this.receiving = true;
         try {
             for (const source of this.sources) {
-                if (source.rebuilding) continue;
+                if (source.rebuilding || source.engineManaged) continue;
                 try {
                     source.parser.flushPending();
                     source.sampleRate?.reset({ keepRate: true });
@@ -491,6 +509,8 @@ class CaptureService {
             if (source.kind === 'raw' && parser.length) earliest = Math.min(earliest, parser.frameMetadata.byteOffset);
             if (source.kind === 'numeric' && parser.writeOffset > parser.readOffset)
                 earliest = Math.min(earliest, parser.bufferBaseByte + parser.readOffset);
+            if (source.kind === 'protocol' && parser.length)
+                earliest = Math.min(earliest, parser.nextByte - parser.length);
         }
         for (const entry of this.textStats.values()) if (entry.pin !== null) earliest = Math.min(earliest, entry.pin);
         this.history.pruneBefore(earliest);
@@ -505,7 +525,9 @@ class CaptureService {
         this.sourceKeys.clear();
         this.workerPool.clearFftCache?.();
         this.memory.reset();
+        this.dataEngine?.clear();
         for (const source of this.sources) {
+            if (source.engineManaged) continue;
             source.key = source.kind === 'numeric' ? 'numeric' : this._sourceKey(source.format, true);
             this.sourceKeys.set(source.key, source);
             this._restart(source, false);
@@ -516,6 +538,7 @@ class CaptureService {
     dispose() {
         if (this.disposed) return;
         this.disposed = true; this.epoch++;
+        this.dataEngine?.dispose();
         for (const source of this.sources) {
             source.generation++; source.parser.reset(); source.frames.dispose?.(); source.frames.clear();
             source.replayStorage = null; source.errors.length = 0; source.errorBytes = 0;

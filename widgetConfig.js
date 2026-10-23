@@ -2,19 +2,23 @@
 const widgetConfigUtils = typeof module !== 'undefined' ? require('./configValidation') : globalThis.SerialPlotter;
 const widgetDisplayUtils = typeof module !== 'undefined' ? require('./monitorDisplay') : globalThis.SerialPlotter.MonitorDisplay;
 const widgetChannelUtils = typeof module !== 'undefined' ? require('./channelOperations') : globalThis.SerialPlotter;
+const widgetRegistryUtils = typeof module !== 'undefined' ? require('./channelRegistry') : globalThis.SerialPlotter;
 const widgetViewportUtils = () => typeof module !== 'undefined' ? require('./widgetViewport') : globalThis.SerialPlotter.WidgetViewport;
 const widgetPoseUtils = () => typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : globalThis.SerialPlotter.PoseConfig;
 const widgetCommandUtils = () => typeof module !== 'undefined' ? require('./commandLibrary') : globalThis.SerialPlotter;
 
+const widgetSymbolUtils = () => typeof module !== 'undefined' ? require('./configSymbols') : globalThis.SerialPlotter;
+
 const GLOBAL_DEFAULTS = {
+    symbolVersion: 2,
     connType: 'serial', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
     netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
     maxRawFrameBytes: 1048576, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
     endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
-    footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH01'], channelColors: [], channelDefinitions: []
+    footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
 const WAVE_DEFAULTS = {
-    plotViewMode: 'time', plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
+    engineSource: null, plotViewMode: 'time', plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
     plotResponseSampleRate: '0', plotResponseTimePoints: '1000', responseChannels: [], responseViewport: null,
@@ -24,9 +28,9 @@ const WAVE_DEFAULTS = {
     plotYMinFreq: '0.001', plotYMaxFreq: '1', channels: [], viewport: null, exportSettings: null
 };
 const BYTE_DEFAULTS = {
-    captureMode: 'hex', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
+    engineSource: null, protocolFieldPaths: null, captureMode: 'hex', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
 };
-const UI_LAYOUT_DEFAULTS = { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200 };
+const UI_LAYOUT_DEFAULTS = { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200, leftSplitRatio: .5 };
 const copy = value => JSON.parse(JSON.stringify(value));
 const isValidWidgetId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]+$/.test(id) && !['numeric', 'base'].includes(id);
 const pick = (object, defaults) => Object.fromEntries(Object.keys(defaults)
@@ -94,11 +98,13 @@ function legacyWindowPoints(settings = {}) {
 
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
+    if (settings.engineSource !== undefined && settings.engineSource !== null &&
+        (typeof settings.engineSource !== 'string' || settings.engineSource.length > 512)) throw new Error('控件数据源无效');
     if (type === 'pose') {
         const originalCount = Number(globals.channelsCount);
-        const engine = new widgetChannelUtils.ChannelOperations(originalCount, globals.channelDefinitions ?? []);
-        return widgetPoseUtils().normalize(settings, { channelCount: engine.channelCount,
-            isSignal: index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula' });
+        const engine = new widgetChannelUtils.ChannelOperations(originalCount, globals.channelDefinitions ?? [], { names: globals.channelNames, symbolVersion: globals.symbolVersion });
+        return { ...widgetPoseUtils().normalize(settings, { channelCount: engine.channelCount,
+            isSignal: index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula' }), engineSource: settings.engineSource ?? null };
     }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
@@ -123,6 +129,10 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     }
     if (type !== 'byte') throw new Error('控件类型无效');
     const result = pick(settings, BYTE_DEFAULTS);
+    if (result.captureMode === 'number') result.captureMode = 'engine';
+    if (result.protocolFieldPaths !== null && (!Array.isArray(result.protocolFieldPaths) ||
+        result.protocolFieldPaths.some(path => typeof path !== 'string' || !path.trim()) || result.protocolFieldPaths.length > 65535))
+        throw new Error('结构化字段显示配置无效');
     result.exportSettings = normalizeWidgetExportSettings(type, result.exportSettings);
     result.monitorDisplay = widgetDisplayUtils.normalizeDisplayOptions(settings.monitorDisplay ?? {});
     widgetConfigUtils.validateConfig({ ...globals, ...result });
@@ -134,9 +144,10 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
 }
 
 function validateWorkspaceConfig(config) {
-    if (!config || config.version !== 2 || !config.global || typeof config.global !== 'object' ||
+    if (!config || ![2, 3].includes(config.version) || !config.global || typeof config.global !== 'object' ||
         Array.isArray(config.global) || !Array.isArray(config.widgets))
         throw new Error('工作区配置版本或结构无效');
+    if (config.global.symbolVersion !== undefined && config.global.symbolVersion !== 2) throw new Error('通道符号版本无效');
     const globals = pick(config.global, GLOBAL_DEFAULTS);
     const legacyText = config.widgets.find(widget => widget?.type === 'byte' && widget.settings?.captureMode === 'text') ??
         config.widgets.find(widget => widget?.type === 'byte');
@@ -154,13 +165,27 @@ function validateWorkspaceConfig(config) {
     if (!Array.isArray(globals.channelColors) || globals.channelColors.some(color =>
         typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color))) throw new Error('通道颜色无效');
     if (!Array.isArray(globals.channelDefinitions)) throw new Error('通道运算配置无效');
-    new widgetChannelUtils.ChannelOperations(Number(globals.channelsCount), globals.channelDefinitions);
+    if (!Array.isArray(globals.channelRecords) || globals.channelRecords.length > 65535) throw new Error('通道身份记录无效');
+    const stableIds = new Set(), stableNumbers = new Set();
+    for (const entry of globals.channelRecords) {
+        if (!entry || typeof entry.id !== 'string' || !entry.id || entry.id.length > 240 ||
+            !Number.isInteger(entry.number) || entry.number < 1 || entry.number > 65535 ||
+            stableIds.has(entry.id) || stableNumbers.has(entry.number)) throw new Error('通道稳定身份或编号重复、无效');
+        stableIds.add(entry.id); stableNumbers.add(entry.number);
+    }
+    const operations = new widgetChannelUtils.ChannelOperations(Number(globals.channelsCount), globals.channelDefinitions, { names: globals.channelNames, symbolVersion: config.global.symbolVersion });
+    globals.channelDefinitions = operations.definitions;
+    const registry = new widgetRegistryUtils.ChannelRegistry({ rawCount: Number(globals.channelsCount), definitions: globals.channelDefinitions, names: globals.channelNames, channels: globals.channelRecords });
+    globals.channelRecords = registry.toJSON();
+    globals.channelNames = globals.channelNames.map((name, index) => /^CH0*\d+$/.test(name) && Number(name.slice(2)) === index + 1 ? `CH${String(index + 1).padStart(5, '0')}` : name);
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
         if (!['wave', 'byte', 'pose'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
             throw new Error('控件类型或标题无效');
         ids.add(widget.id);
+        if (widget.settings?.engineSource !== undefined && widget.settings.engineSource !== null &&
+            (typeof widget.settings.engineSource !== 'string' || widget.settings.engineSource.length > 512)) throw new Error('控件数据源无效');
         return { id: widget.id, type: widget.type, title: widget.title,
             settings: normalizeWidgetSettings(widget.type, widget.settings, globals) };
     });
@@ -208,7 +233,7 @@ function validateWorkspaceConfig(config) {
         throw new Error('缓冲区导出配置无效');
     const profiles = tools.exportProfiles ?? {};
     for (const [id, profile] of Object.entries(profiles)) {
-        if (!['numeric', 'base'].includes(id) && !isValidWidgetId(id)) throw new Error('导出数据来源无效');
+        if (!['numeric', 'base'].includes(id) && !isValidWidgetId(id) && !/^engine:[^\u0000-\u001f\u007f]{1,512}$/u.test(id)) throw new Error('导出数据来源无效');
         if (profile === null) throw new Error('缓冲区导出配置无效');
         profiles[id] = normalizeBufferExportSettings(profile);
     }
@@ -235,11 +260,12 @@ function validateWorkspaceConfig(config) {
     if (config.send !== undefined && (!config.send || typeof config.send !== 'object' || Array.isArray(config.send)))
         throw new Error('发送设置无效');
     const send = { interval: '0', unit: 's', mode: 'hex', tab: 'regular', ...config.send };
-    if (!['hex', 'text'].includes(send.mode) || !['s', 'hz'].includes(send.unit) ||
+    if (!['hex', 'text', 'protocol'].includes(send.mode) || !['s', 'hz'].includes(send.unit) ||
         !['string', 'number'].includes(typeof send.interval) || String(send.interval).trim() === '' ||
         !Number.isFinite(Number(send.interval)) || Number(send.interval) < 0 || !['regular', 'commands'].includes(send.tab))
         throw new Error('发送模式、间隔或单位无效');
     send.commands = widgetCommandUtils().normalizeCommands(send.commands);
+    if (send.protocol !== undefined) send.protocol = (typeof module !== 'undefined' ? require('./protocolSendView') : globalThis.SerialPlotter).normalizeProtocolCommand(send.protocol);
     if (!globals.channelColors.length) {
         const colors = widgets.find(widget => widget.type === 'wave')?.settings.channels ?? [];
         globals.channelColors = colors.map(channel => channel.color ?? '#ff0000');
@@ -249,20 +275,34 @@ function validateWorkspaceConfig(config) {
     const uiLayout = pick(config.uiLayout ?? {}, UI_LAYOUT_DEFAULTS);
     if (['leftWidth', 'rightWidth'].some(key => !Number.isFinite(uiLayout[key]) || uiLayout[key] < 240 || uiLayout[key] > 700) ||
         ['leftOpen', 'rightOpen'].some(key => typeof uiLayout[key] !== 'boolean') ||
+        !Number.isFinite(uiLayout.leftSplitRatio) || uiLayout.leftSplitRatio <= 0 || uiLayout.leftSplitRatio >= 1 ||
         !Number.isFinite(uiLayout.sendHeight) || uiLayout.sendHeight < 160 || uiLayout.sendHeight > 1e7)
         throw new Error('界面布局尺寸或收起状态无效');
-    return { version: 2, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout };
+    const engineApi = typeof module !== 'undefined' ? require('./dataEngine') : globalThis.SerialPlotter;
+    const migration = widgetSymbolUtils().migrateEngineSymbols(config.dataEngine);
+    const dataEngine = engineApi.normalizeDataEngine(migration.settings, globals);
+    if (send.protocol) send.protocol = widgetSymbolUtils().migrateCommandSymbols(send.protocol, migration.renamesByProtocol);
+    const migrateCommands = nodes => nodes.forEach(node => {
+        if (node.protocol) node.protocol = widgetSymbolUtils().migrateCommandSymbols(node.protocol, migration.renamesByProtocol);
+        if (node.children) migrateCommands(node.children);
+    });
+    migrateCommands(send.commands);
+    for (const widget of widgets) if (widget.settings.protocolFieldPaths) {
+        const renames = [...migration.renamesByProtocol.values()].flat();
+        widget.settings.protocolFieldPaths = widget.settings.protocolFieldPaths.map(path => widgetSymbolUtils().migrateSymbolPath(path, renames));
+    }
+    return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine };
 }
 
 function migrateWorkspaceConfig(legacy, legacyLayout) {
-    if (legacy?.version === 2) return validateWorkspaceConfig(legacy);
+    if ([2, 3].includes(legacy?.version)) return validateWorkspaceConfig(legacy);
     if (legacy?.version !== undefined) throw new Error('工作区配置版本无效');
     if (legacy === null || legacy === undefined) return validateWorkspaceConfig({
         version: 2, global: GLOBAL_DEFAULTS, widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1
     });
     widgetConfigUtils.validateConfig(legacy);
-    const globals = { ...GLOBAL_DEFAULTS, ...pick(legacy, GLOBAL_DEFAULTS),
-        channelNames: legacy.channels?.map((channel, index) => channel.name ?? `CH${String(index + 1).padStart(2, '0')}`) ?? ['CH01'] };
+    const globals = { ...GLOBAL_DEFAULTS, ...pick(legacy, GLOBAL_DEFAULTS), symbolVersion: legacy.symbolVersion,
+        channelNames: legacy.channels?.map((channel, index) => channel.name ?? `CH${String(index + 1).padStart(5, '0')}`) ?? ['CH00001'] };
     globals.plotWindowPoints = String(Math.min(Number(legacyWindowPoints(legacy) ?? GLOBAL_DEFAULTS.plotWindowPoints), Number(globals.maxPoints)));
     const waveSettings = normalizeWidgetSettings('wave', legacy, globals);
     const widgets = [

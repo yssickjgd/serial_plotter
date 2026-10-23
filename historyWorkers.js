@@ -1,5 +1,78 @@
-/** Lazy historical decode workers with two logical cores reserved for the UI. */
+/** Lazy historical decode workers with two logical cores reserved for the UI.
+ * protocol-decode tasks take {schema,records:[{bytes}|Uint8Array],maxDecodedFields?}
+ * and return decoded records in input order, retaining exact64 BigInts and spans.
+ * Batches are bounded to 256 frames, 4 MiB input and 65536 output fields (a lower
+ * maxDecodedFields is allowed). protocol-batch-limit errors permit split retries;
+ * protocol-record-limit identifies one frame exceeding the caller's field budget.
+ */
+function validateProtocolHistoryTask(task) {
+    if (!task.schema || typeof task.schema !== 'object' || Array.isArray(task.schema))
+        throw new TypeError('Protocol history task requires a schema');
+    if (!Array.isArray(task.records) || task.records.length > 256)
+        throw new RangeError('Protocol decode batch must contain at most 256 records');
+    if (task.maxDecodedFields !== undefined && (!Number.isInteger(task.maxDecodedFields) ||
+        task.maxDecodedFields < 1 || task.maxDecodedFields > 65536))
+        throw new RangeError('Protocol decoded field budget must be between 1 and 65536');
+    let byteLength = 0;
+    for (const record of task.records) {
+        const bytes = record instanceof Uint8Array ? record : record?.bytes;
+        if (!(bytes instanceof Uint8Array)) throw new TypeError('Protocol history record bytes must be a Uint8Array');
+        byteLength += bytes.length;
+        if (byteLength > 4194304) throw new RangeError('Protocol decode batch exceeds the 4 MiB byte limit');
+    }
+}
 function createHistoryTaskProcessor(task, dependencies) {
+    if (task?.kind === 'protocol-stream-check') {
+        if (!task.schema || typeof task.schema !== 'object' || Array.isArray(task.schema) ||
+            !(task.bytes instanceof Uint8Array) || task.bytes.length > 1048576)
+            throw new TypeError('Protocol stream checks require a schema and at most 1 MiB of bytes');
+        const chunkSize = task.chunkSize ?? 2048;
+        if (!Number.isSafeInteger(chunkSize) || chunkSize < 1 || chunkSize > 16384)
+            throw new RangeError('Protocol stream chunk size must be between 1 and 16384');
+        const parser = new dependencies.Protocol.StreamParser(task.schema);
+        let offset = 0, frames = 0, errors = 0, invalidFrames = 0;
+        parser.onFrameParsed = record => { frames++; if (record.valid === false) { errors++; invalidFrames++; } };
+        parser.onFrameError = () => { errors++; };
+        return {
+            step(byteBudget) {
+                let remaining = byteBudget === Infinity ? Infinity : Math.max(1, Math.floor(byteBudget) || 1);
+                while (offset < task.bytes.length && remaining > 0) {
+                    const end = Math.min(task.bytes.length, offset + Math.min(chunkSize, remaining));
+                    parser.appendData(task.bytes.subarray(offset, end), { byteOffset: offset, timestamp: 0 });
+                    remaining -= end - offset; offset = end;
+                }
+                return offset === task.bytes.length;
+            },
+            result() { return { frames, errors, invalidFrames, pending: parser.length }; }
+        };
+    }
+    if (task?.kind === 'protocol-decode') {
+        validateProtocolHistoryTask(task);
+        const compiled = dependencies.Protocol.compile(task.schema), records = [];
+        let index = 0, decodedFields = 0;
+        const fieldBudget = task.maxDecodedFields ?? 65536;
+        const limitError = (code, message) => { const error = new RangeError(message); error.code = code; return error; };
+        return {
+            step(byteBudget) {
+                let remaining = byteBudget === Infinity ? Infinity : Math.max(1, Math.floor(byteBudget) || 1);
+                while (index < task.records.length) {
+                    const source = task.records[index], bytes = source instanceof Uint8Array ? source : source.bytes;
+                    let record;
+                    try { record = dependencies.Protocol.decode(bytes, compiled, { maxFields: Math.min(fieldBudget, 32768) }); }
+                    catch (error) {
+                        if (error.code === 'field-limit') throw limitError('protocol-record-limit', 'Protocol record exceeds its decoded field budget');
+                        throw error;
+                    }
+                    decodedFields += record.flatFields.length;
+                    if (decodedFields > fieldBudget) throw limitError('protocol-batch-limit', 'Protocol batch exceeds its decoded field budget; split this batch');
+                    records.push(record); index++; remaining -= Math.max(1, bytes.length);
+                    if (remaining <= 0) break;
+                }
+                return index === task.records.length;
+            },
+            result() { return records; }
+        };
+    }
     if (task?.kind === 'fft') {
         if (!(task.values instanceof Float64Array))
             throw new TypeError('FFT values must be a Float64Array');
@@ -147,8 +220,9 @@ function historyWorkerDependencies() {
         : globalThis.SerialPlotter.MonitorTextLayout;
     const spectrum = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
     const phase = typeof module !== 'undefined' ? require('./systemResponse') : globalThis.SerialPlotter;
+    const Protocol = typeof module !== 'undefined' ? require('./protocolEngine').Protocol : globalThis.SerialPlotter.Protocol;
     return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
-        TYPE_LENGTH: parser.TYPE_LENGTH };
+        TYPE_LENGTH: parser.TYPE_LENGTH, Protocol };
 }
 
 /** Self-contained classic worker source; no network requests are needed for file:// use. */
@@ -164,16 +238,29 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
             .map(name => dependencies[name].toString()).join('\n') + '\n' +
         dependencies.decodeNumericPayload.toString() + '\n' +
         functions.map(name => dependencies[name].toString()).join('\n') + '\n' +
+        `const Protocol = (${dependencies.Protocol.createFactorySource()})(globalThis,
+            { normalizeTextEncoding, MappedTextDecoder, CHARSETS: TEXT_CHARSETS });\n` +
+        validateProtocolHistoryTask.toString() + '\n' +
         createHistoryTaskProcessor.toString() + `\nself.onmessage = ({ data }) => {
             try {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
-                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees });
+                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees, Protocol });
                 processor.step(Infinity);
                 const result = processor.result();
                 const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
                 if (data.task.kind === 'fft') transfer.push(result.mags.buffer, result.phases.buffer,
                     result.logMags.buffer, result.unwrappedPhases.buffer);
+                if (data.task.kind === 'protocol-decode') {
+                    const buffers = new Set(), seen = new Set();
+                    const visit = value => {
+                        if (!value || typeof value !== 'object' || seen.has(value)) return;
+                        seen.add(value);
+                        if (ArrayBuffer.isView(value)) buffers.add(value.buffer);
+                        else for (const item of Object.values(value)) visit(item);
+                    };
+                    visit(result); transfer.push(...buffers);
+                }
                 if (result.chunks) {
                     for (const chunk of result.chunks) {
                         for (const key of ['offsets', 'cells', 'starts', 'ends', 'crosses', 'failed', 'breaks'])
@@ -183,7 +270,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 }
                 self.postMessage({ id: data.id, result }, transfer);
             } catch (error) {
-                self.postMessage({ id: data.id, error: { name: error.name, message: error.message } });
+                self.postMessage({ id: data.id, error: { name: error.name, message: error.message, code: error.code } });
             }
         };\n`;
 }
@@ -287,7 +374,11 @@ class HistoryWorkerPool {
         if (this.disposed) return Promise.reject(historyAbortError());
         if (task?.kind === 'fft' && !(task.values instanceof Float64Array))
             return Promise.reject(new TypeError('FFT values must be a Float64Array'));
-        if (task?.kind !== 'fft' && !(task?.bytes instanceof Uint8Array))
+        if (task?.kind === 'protocol-decode') {
+            try { validateProtocolHistoryTask(task); }
+            catch (error) { return Promise.reject(error); }
+        }
+        if (!['fft', 'protocol-decode'].includes(task?.kind) && !(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
         if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
             task.parts.some(part => !(part instanceof Uint8Array))))
@@ -337,10 +428,14 @@ class HistoryWorkerPool {
                 const job = this.queue.shift();
                 slot.job = job;
                 try {
-                    const fft = job.task.kind === 'fft';
-                    const data = fft ? new Float64Array(job.task.values) : new Uint8Array(job.task.bytes);
-                    const task = fft ? { ...job.task, values: data } : { ...job.task, bytes: data };
-                    const transfer = [data.buffer];
+                    const fft = job.task.kind === 'fft', protocol = job.task.kind === 'protocol-decode';
+                    const data = fft ? new Float64Array(job.task.values) : protocol ? null : new Uint8Array(job.task.bytes);
+                    const task = fft ? { ...job.task, values: data } : protocol ? { ...job.task } : { ...job.task, bytes: data };
+                    const transfer = data ? [data.buffer] : [];
+                    if (protocol) task.records = task.records.map(record => {
+                        const bytes = new Uint8Array(record instanceof Uint8Array ? record : record.bytes);
+                        transfer.push(bytes.buffer); return { bytes };
+                    });
                     if (task.kind === 'hex-assemble') {
                         task.parts = task.parts.map(part => {
                             const copy = new Uint8Array(part);
@@ -396,6 +491,7 @@ class HistoryWorkerPool {
             if (data.error) {
                 const error = new Error(data.error.message);
                 error.name = data.error.name || 'Error';
+                if (data.error.code) error.code = data.error.code;
                 this._settle(job, error);
             } else this._settle(job, null, data.result);
             this._pump();

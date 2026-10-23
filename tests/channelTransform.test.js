@@ -1,6 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transformChannelValue } = require('../channelTransform');
+const { transformChannelValue, formatChannelId, formatChannelNumber, parseChannelId } = require('../channelTransform');
+
+test('formal channel labels use five digits while parsing accepts legacy reference widths', () => {
+    assert.equal(formatChannelId(0), 'CH00001');
+    assert.equal(formatChannelNumber(65535), 'CH65535');
+    for (const text of ['CH1', 'CH01', 'CH00001']) assert.equal(parseChannelId(text), 1);
+    for (const text of ['CH0', 'CH65536', 'CH-1', 'ch1', 'CH1x', '', null]) assert.equal(parseChannelId(text), null);
+});
 
 test('channel transform applies enabled gain before enabled offset', () => {
     const channel = { gainEnabled: true, gain: -2, offsetEnabled: true, offset: 3 };

@@ -33,11 +33,13 @@ test('monitor properties stay on the right while export is a peer left sidebar c
     assert.ok(!wave.includes('id="channels-list-panel"'));
     assert.ok(panel('tab-waveform-channels').includes('id="channels-list-panel"'));
     assert.ok(panel('tab-monitor-channels').includes('id="monitor-channel-list"'));
-    assert.ok(panel('tab-byte-frame').includes('id="capture-mode"'));
-    assert.ok(panel('tab-byte-frame').includes('id="rebuild-history-byte"'));
-    assert.ok(panel('tab-waveform-frame').includes('id="rebuild-history"'));
-    assert.ok(panel('tab-waveform-frame').indexOf('id="rebuild-history"') <
-        panel('tab-waveform-frame').indexOf('id="frame-numeric-settings"'));
+    assert.ok(bytes.includes('id="capture-mode"'));
+    assert.ok(bytes.includes('id="frame-text-settings"'));
+    assert.doesNotMatch(panel('monitor-settings-tabs'), /tab-(?:byte|waveform|pose)-frame/);
+    assert.ok(panel('engine-parsing').includes('id="rebuild-history"'));
+    assert.ok(panel('engine-parsing').includes('id="frame-numeric-settings"'));
+    assert.ok(panel('engine-parsing').includes('id="engine-apply"'));
+    assert.ok(!panel('sidebar-top').includes('id="data-type"'));
     assert.doesNotMatch(html, /id="tab-frame"|data-tab="tab-frame"/);
     assert.ok(!wave.includes('tab-bar'));
     assert.ok(exportPanel.includes('id="export-panel"'));

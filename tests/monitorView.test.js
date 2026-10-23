@@ -59,13 +59,13 @@ test('numeric rows use two columns when their scientific values fit in the avail
     try {
         const frames = new FrameBuffer(4, 10);
         frames.append([1, -2, Number.MAX_VALUE, Number.MIN_VALUE], Uint8Array.of(1), '', 1);
-        const view = monitorFixture(frames, 350, 100);
+        const view = monitorFixture(frames, 430, 100);
         view.setDisplayOptions({ timestamp: 'none', showDirection: false });
         view.setMode('number');
         const layout = view._rowLayouts([{ ...frames.frameAt(0), frameIndex: 0 }], view._columns())[0];
         assert.equal(layout.lineCount, 2);
-        assert.match(layout.numberText.split('\n')[0], /CH01=.*CH02=/);
-        assert.match(layout.numberText.split('\n')[1], /CH03=.*CH04=/);
+        assert.match(layout.numberText.split('\n')[0], /CH00001=.*CH00002=/);
+        assert.match(layout.numberText.split('\n')[1], /CH00003=.*CH00004=/);
         view.dispose();
     } finally { global.document = oldDocument; }
 });
@@ -590,7 +590,7 @@ test('time jumps, display changes and clearing release a log selection so explic
         selectBody();
         view.setMode('number');
         assert.equal(selection.isCollapsed, true);
-        assert.match(view.spacer.children.at(-1).children[1].textContent, /CH01=/);
+        assert.match(view.spacer.children.at(-1).children[1].textContent, /CH00001=/);
         selectBody();
         view.setDisplayOptions({ showRx: false });
         assert.equal(selection.isCollapsed, true);
@@ -843,7 +843,7 @@ test('Hex display groups bytes with offsets and ASCII while preserving both sear
         assert.equal(frames.version, version);
         assert.deepEqual(frames.rawBytesAt(0), Uint8Array.of(65, 66, 0, 255, 67, 68, 69, 70, 71));
         view.setMode('number');
-        assert.equal(view.spacer.children[0].children[1].textContent, 'CH01= 1.00000e+0');
+        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.00000e+0');
     } finally { global.document = oldDocument; }
 });
 
@@ -1215,14 +1215,14 @@ test('numeric log alignment resizes and preserves search highlighting by channel
         frames.append(Array.from({ length: 12 }, (_, i) => i + 0.5), Uint8Array.of(1), 't', 1);
         const view = monitorFixture(frames, 620, 600);
         view.setMode('number');
-        const layout = view._rowLayout({ ...frames.frameAt(0), frameIndex: 0 }, 90);
+        const layout = view._rowLayout({ ...frames.frameAt(0), frameIndex: 0 }, 105);
         assert.equal(layout.numberText.split('\n').length, 3);
-        assert.equal(layout.numberText.split('\n')[0].indexOf('CH02=') + 'CH02='.length,
-            layout.numberText.split('\n')[2].indexOf('CH10=') + 'CH10='.length);
+        assert.equal(layout.numberText.split('\n')[0].indexOf('CH00002=') + 'CH00002='.length,
+            layout.numberText.split('\n')[2].indexOf('CH00010=') + 'CH00010='.length);
         view.setSearchResults([{ startOrder: 1, endOrder: 1, channel: 9 }], 0);
         const body = view.spacer.children[0].children[1];
         assert.ok(body.children.some(span => span.className === 'monitor-search-current' &&
-            /^CH10= +9\.50000e\+0$/.test(span.textContent)));
+            /^CH00010= +9\.50000e\+0$/.test(span.textContent)));
         const oldHeight = view.rowPositions[0].height;
         view.container.clientWidth = 1200;
         view.render();
@@ -1243,15 +1243,15 @@ test('numeric channel visibility updates cached rows without changing samples or
         view.setDisplayOptions({ numericHiddenChannels: [1] });
         const row = { ...frames.frameAt(0), frameIndex: 0 };
         const layout = view._rowLayouts([row], 90)[0];
-        assert.match(layout.numberText, /CH01=/);
-        assert.doesNotMatch(layout.numberText, /CH02=/);
-        assert.match(layout.numberText, /CH03=/);
+        assert.match(layout.numberText, /CH00001=/);
+        assert.doesNotMatch(layout.numberText, /CH00002=/);
+        assert.match(layout.numberText, /CH00003=/);
         assert.equal(frames.getValue(1, 0), -2);
         assert.equal(view.matches, matches);
         view.setDisplayOptions({ numericHiddenChannels: [0, 1, 2] });
         assert.equal(view._rowLayouts([row], 90)[0].numberText, '');
         view.setDisplayOptions({ numericHiddenChannels: [] });
-        assert.match(view._rowLayouts([row], 90)[0].numberText, /CH02=/);
+        assert.match(view._rowLayouts([row], 90)[0].numberText, /CH00002=/);
     } finally { global.document = oldDocument; }
 });
 
@@ -1283,13 +1283,13 @@ test('numeric monitor aligns e across frames, resizing and precision edits witho
         assert.equal(search.matches.length, 1);
         view.setSearchResults(search.matches, 0);
         view.setDisplayOptions({ numericSignificantDigits: 3 });
-        assert.match(bodies()[0][0], /CH01= 1\.25e\+0/);
-        assert.match(bodies()[1][0], /CH01=-1\.23e\+2/);
+        assert.match(bodies()[0][0], /CH00001= 1\.25e\+0/);
+        assert.match(bodies()[1][0], /CH00001=-1\.23e\+2/);
         assert.deepEqual(exponents(bodies()[0]), exponents(bodies()[1]));
         view.setDisplayOptions({ numericSignificantDigits: 1 });
-        assert.match(bodies()[1][0], /CH01=-1e\+2/);
+        assert.match(bodies()[1][0], /CH00001=-1e\+2/);
         assert.ok(view.spacer.children[1].children[1].children.some(span =>
-            span.className === 'monitor-search-current' && span.textContent === 'CH01=-1e+2'));
+            span.className === 'monitor-search-current' && span.textContent === 'CH00001=-1e+2'));
         assert.equal(view.matches, search.matches);
         assert.equal(view.followTail, true);
         assert.equal(frames.getValue(0, 1), -123.456, 'display precision must not change samples');
@@ -1326,7 +1326,7 @@ test('large numeric logs align only nearby frames and reset padding when cleared
         view.clear({ deferRender: true });
         frames.append([1.5, 2.5, 3.5, 4.5], Uint8Array.of(1), 't', 1);
         view.render();
-        assert.ok(view.spacer.children[0].children[1].textContent.startsWith('CH01= 1.5'));
+        assert.ok(view.spacer.children[0].children[1].textContent.startsWith('CH00001= 1.5'));
     } finally { global.document = oldDocument; }
 });
 
@@ -2129,12 +2129,12 @@ test('ASCII and decoded display modes retain all bytes and show active cross-fra
         assert.ok(view.spacer.children[1].children[1].children.some(span =>
             span.className === 'monitor-search-current' && span.textContent === 'C'));
         view.setMode('number');
-        assert.equal(view.spacer.children[0].children[1].textContent, 'CH01= 1.50000e+0');
+        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.50000e+0');
         const numeric = new MonitorSearchSession(frames, parseMonitorSearch('number', '1.5', 0, 0));
         numeric.step(10);
         view.setSearchResults(numeric.matches, 0);
         assert.ok(view.spacer.children[0].children[1].children.some(span =>
-            span.className === 'monitor-search-current' && span.textContent === 'CH01= 1.50000e+0'));
+            span.className === 'monitor-search-current' && span.textContent === 'CH00001= 1.50000e+0'));
     } finally { global.document = oldDocument; }
 });
 

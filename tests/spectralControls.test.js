@@ -130,6 +130,57 @@ test('sampled and response spectra share global count while response time remain
     assert.equal(restored.app.widgets.widgets.get(second.id).responseFrames.frequencyForChannel(1).fftSize, 32);
 });
 
+test('raising the shared plot count expands all source capacities and survives switching and reload', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const first = f.app.widgets.create({ type: 'wave' });
+    const raw = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    const response = f.app.widgets.create({ type: 'wave', settings: { plotContent: 'response', plotViewMode: 'frequency' } });
+    f.app.service.receive(Uint8Array.of(1, 2, 3));
+    f.app.service.endStream();
+    const retained = raw.source.frames.length;
+    assert.equal(f.app.service.capacity, 1000);
+    assert.equal(f.get('plot-window-points').max, '65536');
+    f.change('plot-window-points', '5000');
+    const config = f.app.getConfig();
+    assert.equal(config.global.maxPoints, '5000');
+    assert.equal(config.global.plotWindowPoints, '5000');
+    assert.equal(f.get('max-points').value, '5000');
+    assert.equal(f.app.service.capacity, 5000);
+    for (const source of f.app.service.sources) assert.equal(source.frames.capacity, 5000);
+    assert.equal(f.app.service.txFrames.capacity, 5000);
+    assert.equal(raw.source.frames.length, retained);
+    assert.equal(first.view.plotWindowPoints, 5000);
+    assert.equal(response.responseFrames.gridSize, 5000);
+    assert.equal(response.responseFrames.count, 1000);
+    f.app.widgets.activate(first.id);
+    assert.equal(f.get('plot-window-points').value, '5000');
+    const restored = bootApplication(config); t.after(() => restored.app.dispose());
+    restored.app.widgets.activate(first.id);
+    assert.equal(restored.get('plot-window-points').value, '5000');
+    assert.equal(restored.get('max-points').value, '5000');
+    assert.equal(restored.app.service.capacity, 5000);
+    f.change('plot-window-points', '128');
+    assert.equal(f.app.service.capacity, 5000);
+    assert.equal(f.get('max-points').value, '5000');
+});
+
+test('independent response time counts and invalid shared counts never expand capture storage', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const response = f.app.widgets.create({ type: 'wave', settings: { plotContent: 'response' } });
+    f.change('plot-window-points', '5000');
+    assert.equal(response.settings.plotResponseTimePoints, '5000');
+    assert.equal(f.app.service.capacity, 1000);
+    assert.equal(f.get('max-points').value, '1000');
+    assert.equal(f.app.getConfig().global.plotWindowPoints, '1000');
+    f.change('plot-view-mode', 'phase');
+    for (const invalid of ['65537', '5000.5', 'not a count', '1']) {
+        assert.throws(() => f.app.widgets.setPlotWindowPoints(invalid), /整数/);
+        assert.equal(f.app.service.capacity, 1000);
+        assert.equal(f.app.getConfig().global.plotWindowPoints, '1000');
+        assert.equal(f.get('max-points').value, '1000');
+    }
+});
+
 test('phase checkbox defaults to unwrapped and keeps each waveform choice through reload', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'phase' } });

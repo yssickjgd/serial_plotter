@@ -12,9 +12,10 @@ class FrameBuffer {
             capacity > frameLimits.maxPoints)
             throw new RangeError(`最大采样点数需为 ${frameLimits.minPoints}–${frameLimits.maxPoints}`);
         this.channelCount = channelCount;
+        this.chunkSize = channelCount > 256 ? Math.max(1, 2 ** Math.floor(Math.log2(1048576 / (channelCount * 8)))) : FRAME_CHUNK_SIZE;
         this.capacity = capacity;
         this.storageCapacity = capacity;
-        this.values = Array.from({ length: channelCount }, () => []);
+        this.values = [];
         this.frames = [];
         this.head = 0;
         this.length = 0;
@@ -29,7 +30,7 @@ class FrameBuffer {
     get estimatedMemoryBytes() {
         let bytes = this.length * (this.rawMode ? 192 : 64);
         if (this.rawMode) bytes += this.retainedByteLength;
-        for (const chunks of this.values) for (const chunk of chunks) if (chunk) bytes += chunk.byteLength;
+        for (const chunks of this.values) if (chunks) for (const chunk of chunks) if (chunk) bytes += chunk.byteLength;
         for (const chunk of this.frames) if (chunk) for (const value of Object.values(chunk)) {
             if (ArrayBuffer.isView(value)) bytes += value.byteLength;
             else if (Array.isArray(value)) bytes += value.length * 8;
@@ -37,17 +38,17 @@ class FrameBuffer {
         return bytes;
     }
 
-    estimateAppendMemory(count, byteLength, frameLength = 0) {
+    estimateAppendMemory(count, byteLength, frameLength = 0, activeChannels = this.channelCount) {
         count = Math.min(this.capacity, Math.max(1, Math.ceil(count)));
         let bytes = byteLength + count * (this.rawMode ? 192 : 64);
         const start = (this.head + this.length) % this.storageCapacity;
         for (let offset = 0; offset < count;) {
-            const slot = (start + offset) % this.storageCapacity, index = Math.floor(slot / FRAME_CHUNK_SIZE);
+            const slot = (start + offset) % this.storageCapacity, index = Math.floor(slot / this.chunkSize);
             const chunk = this.frames[index];
-            if (!chunk) bytes += FRAME_CHUNK_SIZE * (this.rawMode ? 67 : 44 + this.channelCount * 8);
+            if (!chunk) bytes += this.chunkSize * (this.rawMode ? 67 : 44 + Math.min(this.channelCount, activeChannels) * 8);
             if (!this.rawMode && frameLength > (chunk?.stride ?? 0))
-                bytes += FRAME_CHUNK_SIZE * frameLength;
-            offset += Math.min(count - offset, FRAME_CHUNK_SIZE - slot % FRAME_CHUNK_SIZE, this.storageCapacity - slot);
+                bytes += this.chunkSize * frameLength;
+            offset += Math.min(count - offset, this.chunkSize - slot % this.chunkSize, this.storageCapacity - slot);
         }
         return bytes;
     }
@@ -58,8 +59,8 @@ class FrameBuffer {
         if (!count) return 0;
         const touched = new Set();
         for (let i = 0; i < count; i++) {
-            const slot = (this.head + i) % this.storageCapacity, index = Math.floor(slot / FRAME_CHUNK_SIZE);
-            const chunk = this.frames[index], offset = slot % FRAME_CHUNK_SIZE;
+            const slot = (this.head + i) % this.storageCapacity, index = Math.floor(slot / this.chunkSize);
+            const chunk = this.frames[index], offset = slot % this.chunkSize;
             this.retainedByteLength -= this.rawMode ? chunk.rawRecords[offset].length : chunk.lengths[offset];
             if (this.rawMode) this._releaseRawSlot(slot);
             else { chunk.times[offset] = undefined; chunk.lengths[offset] = 0; }
@@ -69,12 +70,12 @@ class FrameBuffer {
         this.length -= count;
         const end = this.head + this.length;
         for (const index of touched) {
-            const first = index * FRAME_CHUNK_SIZE, last = Math.min(first + FRAME_CHUNK_SIZE, this.storageCapacity);
+            const first = index * this.chunkSize, last = Math.min(first + this.chunkSize, this.storageCapacity);
             const live = this.length && (first < Math.min(end, this.storageCapacity) && last > this.head ||
                 end > this.storageCapacity && first < end - this.storageCapacity);
             if (!live) {
                 delete this.frames[index];
-                for (const chunks of this.values) delete chunks[index];
+                for (const chunks of this.values) if (chunks) delete chunks[index];
             }
         }
         this.version++;
@@ -87,19 +88,19 @@ class FrameBuffer {
             chunk = {
                 stride: 0,
                 raw: new Uint8Array(0),
-                lengths: new Uint32Array(FRAME_CHUNK_SIZE),
-                times: new Array(FRAME_CHUNK_SIZE),
-                orders: new Float64Array(FRAME_CHUNK_SIZE),
-                timestamps: new Float64Array(FRAME_CHUNK_SIZE),
-                byteOffsets: new Float64Array(FRAME_CHUNK_SIZE),
-                endBytes: new Float64Array(FRAME_CHUNK_SIZE)
+                lengths: new Uint32Array(this.chunkSize),
+                times: new Array(this.chunkSize),
+                orders: new Float64Array(this.chunkSize),
+                timestamps: new Float64Array(this.chunkSize),
+                byteOffsets: new Float64Array(this.chunkSize),
+                endBytes: new Float64Array(this.chunkSize)
             };
             this.frames[chunkIndex] = chunk;
         }
         if (byteLength > chunk.stride) {
             const stride = Math.max(byteLength, Math.ceil(chunk.stride * 1.5));
-            const raw = new Uint8Array(FRAME_CHUNK_SIZE * stride);
-            for (let i = 0; i < FRAME_CHUNK_SIZE; i++) {
+            const raw = new Uint8Array(this.chunkSize * stride);
+            for (let i = 0; i < this.chunkSize; i++) {
                 const length = chunk.lengths[i];
                 if (length) raw.set(chunk.raw.subarray(i * chunk.stride, i * chunk.stride + length), i * stride);
             }
@@ -119,11 +120,14 @@ class FrameBuffer {
                 timestamp < lastTimestamp) this.timestampsMonotonic = false;
         }
         const slot = (this.head + this.length) % this.storageCapacity;
-        const chunkIndex = Math.floor(slot / FRAME_CHUNK_SIZE);
-        const offset = slot % FRAME_CHUNK_SIZE;
+        const chunkIndex = Math.floor(slot / this.chunkSize);
+        const offset = slot % this.chunkSize;
         for (let c = 0; c < this.channelCount; c++) {
-            const chunks = this.values[c];
-            if (!chunks[chunkIndex]) chunks[chunkIndex] = new Float64Array(FRAME_CHUNK_SIZE);
+            let chunks = this.values[c];
+            if (!chunks && Number.isNaN(samples[c])) continue;
+            chunks ??= this.values[c] = [];
+            if (!chunks[chunkIndex] && Number.isNaN(samples[c])) continue;
+            if (!chunks[chunkIndex]) chunks[chunkIndex] = new Float64Array(this.chunkSize).fill(NaN);
             chunks[chunkIndex][offset] = samples[c];
         }
         const chunk = this._frameChunk(chunkIndex, bytes.length);
@@ -147,7 +151,7 @@ class FrameBuffer {
         if (this.length) throw new Error('不能在同一缓冲区混合原始和通道数值模式');
         this.rawMode = next;
         this.frames = [];
-        this.values = Array.from({ length: this.channelCount }, () => []);
+        this.values = [];
         this.version++;
     }
 
@@ -163,16 +167,16 @@ class FrameBuffer {
                 this.timestampsMonotonic = false;
         }
         const slot = (this.head + this.length) % this.storageCapacity;
-        const chunkIndex = Math.floor(slot / FRAME_CHUNK_SIZE);
-        const offset = slot % FRAME_CHUNK_SIZE;
+        const chunkIndex = Math.floor(slot / this.chunkSize);
+        const offset = slot % this.chunkSize;
         let chunk = this.frames[chunkIndex];
         if (!chunk) {
-            chunk = { rawRecords: new Array(FRAME_CHUNK_SIZE), times: new Array(FRAME_CHUNK_SIZE),
-                orders: new Float64Array(FRAME_CHUNK_SIZE), timestamps: new Float64Array(FRAME_CHUNK_SIZE),
-                incomplete: new Uint8Array(FRAME_CHUNK_SIZE), byteOffsets: new Float64Array(FRAME_CHUNK_SIZE),
-                segmented: new Uint8Array(FRAME_CHUNK_SIZE), endReasons: new Array(FRAME_CHUNK_SIZE),
-                kinds: new Array(FRAME_CHUNK_SIZE),
-                streamEnded: new Uint8Array(FRAME_CHUNK_SIZE), streamStartBytes: new Float64Array(FRAME_CHUNK_SIZE) };
+            chunk = { rawRecords: new Array(this.chunkSize), times: new Array(this.chunkSize),
+                orders: new Float64Array(this.chunkSize), timestamps: new Float64Array(this.chunkSize),
+                incomplete: new Uint8Array(this.chunkSize), byteOffsets: new Float64Array(this.chunkSize),
+                segmented: new Uint8Array(this.chunkSize), endReasons: new Array(this.chunkSize),
+                kinds: new Array(this.chunkSize),
+                streamEnded: new Uint8Array(this.chunkSize), streamStartBytes: new Float64Array(this.chunkSize) };
             this.frames[chunkIndex] = chunk;
         }
         if (this.length === this.capacity) this._releaseRawSlot(this.head);
@@ -194,8 +198,8 @@ class FrameBuffer {
     }
 
     _releaseRawSlot(slot) {
-        const chunk = this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)];
-        const offset = slot % FRAME_CHUNK_SIZE;
+        const chunk = this.frames[Math.floor(slot / this.chunkSize)];
+        const offset = slot % this.chunkSize;
         chunk.rawRecords[offset] = undefined;
         chunk.times[offset] = undefined;
     }
@@ -204,7 +208,7 @@ class FrameBuffer {
         if (index < 0 || index >= this.length || channel < 0 || channel >= this.channelCount) return undefined;
         if (this.rawMode) return undefined;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.values[channel][Math.floor(slot / FRAME_CHUNK_SIZE)][slot % FRAME_CHUNK_SIZE];
+        return this.values[channel]?.[Math.floor(slot / this.chunkSize)]?.[slot % this.chunkSize] ?? NaN;
     }
 
     /** Copy a chronological column in contiguous chunks, without per-sample lookup. */
@@ -216,9 +220,9 @@ class FrameBuffer {
         if (!chunks) { result.fill(NaN); return result; }
         for (let offset = 0; offset < result.length;) {
             const slot = (this.head + first + offset) % this.storageCapacity;
-            const within = slot % FRAME_CHUNK_SIZE;
-            const count = Math.min(result.length - offset, FRAME_CHUNK_SIZE - within, this.storageCapacity - slot);
-            const chunk = chunks[Math.floor(slot / FRAME_CHUNK_SIZE)];
+            const within = slot % this.chunkSize;
+            const count = Math.min(result.length - offset, this.chunkSize - within, this.storageCapacity - slot);
+            const chunk = chunks[Math.floor(slot / this.chunkSize)];
             if (chunk) result.set(chunk.subarray(within, within + count), offset);
             else result.fill(NaN, offset, offset + count);
             offset += count;
@@ -229,8 +233,8 @@ class FrameBuffer {
     frameAt(index) {
         if (index < 0 || index >= this.length) return null;
         const slot = (this.head + index) % this.storageCapacity;
-        const chunk = this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)];
-        const offset = slot % FRAME_CHUNK_SIZE;
+        const chunk = this.frames[Math.floor(slot / this.chunkSize)];
+        const offset = slot % this.chunkSize;
         if (this.rawMode) return {
             bytes: chunk.rawRecords[offset].slice(), time: chunk.times[offset], order: chunk.orders[offset],
             timestamp: chunk.timestamps[offset], kind: chunk.kinds[offset], incomplete: chunk.incomplete[offset] === 1,
@@ -251,7 +255,7 @@ class FrameBuffer {
     timestampAt(index) {
         if (index < 0 || index >= this.length) return NaN;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].timestamps[slot % FRAME_CHUNK_SIZE];
+        return this.frames[Math.floor(slot / this.chunkSize)].timestamps[slot % this.chunkSize];
     }
 
     get originTimestamp() { return this.timestampAt(0); }
@@ -259,7 +263,7 @@ class FrameBuffer {
     orderAt(index) {
         if (index < 0 || index >= this.length) return NaN;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].orders[slot % FRAME_CHUNK_SIZE];
+        return this.frames[Math.floor(slot / this.chunkSize)].orders[slot % this.chunkSize];
     }
 
     indexAtOrAfterOrder(order) {
@@ -275,8 +279,8 @@ class FrameBuffer {
     rawBytesAt(index) {
         if (index < 0 || index >= this.length) return null;
         const slot = (this.head + index) % this.storageCapacity;
-        const chunk = this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)];
-        const offset = slot % FRAME_CHUNK_SIZE;
+        const chunk = this.frames[Math.floor(slot / this.chunkSize)];
+        const offset = slot % this.chunkSize;
         if (this.rawMode) return chunk.rawRecords[offset];
         const start = offset * chunk.stride;
         return chunk.raw.subarray(start, start + chunk.lengths[offset]);
@@ -285,19 +289,19 @@ class FrameBuffer {
     rawByteOffsetAt(index) {
         if (index < 0 || index >= this.length) return undefined;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].byteOffsets[slot % FRAME_CHUNK_SIZE];
+        return this.frames[Math.floor(slot / this.chunkSize)].byteOffsets[slot % this.chunkSize];
     }
 
     streamEndedAt(index) {
         if (!this.rawMode || index < 0 || index >= this.length) return false;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].streamEnded[slot % FRAME_CHUNK_SIZE] === 1;
+        return this.frames[Math.floor(slot / this.chunkSize)].streamEnded[slot % this.chunkSize] === 1;
     }
 
     markStreamEnded(index = this.length - 1) {
         if (!this.rawMode || index < 0 || index >= this.length || this.streamEndedAt(index)) return false;
         const slot = (this.head + index) % this.storageCapacity;
-        this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].streamEnded[slot % FRAME_CHUNK_SIZE] = 1;
+        this.frames[Math.floor(slot / this.chunkSize)].streamEnded[slot % this.chunkSize] = 1;
         this.version++;
         return true;
     }
@@ -305,7 +309,7 @@ class FrameBuffer {
     streamStartByteAt(index) {
         if (!this.rawMode || index < 0 || index >= this.length) return undefined;
         const slot = (this.head + index) % this.storageCapacity;
-        return this.frames[Math.floor(slot / FRAME_CHUNK_SIZE)].streamStartBytes[slot % FRAME_CHUNK_SIZE];
+        return this.frames[Math.floor(slot / this.chunkSize)].streamStartBytes[slot % this.chunkSize];
     }
 
     nearestTimestampIndex(timestamp) {
@@ -369,6 +373,7 @@ class FrameBuffer {
         }
         this.capacity = capacity;
         this.storageCapacity = replacement.storageCapacity;
+        this.chunkSize = replacement.chunkSize;
         this.values = replacement.values;
         this.frames = replacement.frames;
         this.rawBytesWritten = replacement.rawBytesWritten;
@@ -379,11 +384,17 @@ class FrameBuffer {
         this.version++;
     }
 
-    setChannelCount(count) {
+    setChannelCount(count, { preserve = false } = {}) {
         if (!Number.isSafeInteger(count) || count < frameLimits.minChannels || count > frameLimits.maxChannels)
             throw new RangeError(`通道数需为 ${frameLimits.minChannels}–${frameLimits.maxChannels}`);
         if (count === this.channelCount) return;
+        if (preserve) {
+            if (this.values.length > count) this.values.length = count;
+            this.channelCount = count; this.version++;
+            return;
+        }
         this.channelCount = count;
+        this.chunkSize = count > 256 ? Math.max(1, 2 ** Math.floor(Math.log2(1048576 / (count * 8)))) : FRAME_CHUNK_SIZE;
         this.clear();
     }
 
@@ -401,7 +412,7 @@ class FrameBuffer {
     clear() {
         this.rawBytesWritten = 0;
         this.retainedByteLength = 0;
-        this.values = Array.from({ length: this.channelCount }, () => []);
+        this.values = [];
         this.frames = [];
         this.timestampsMonotonic = true;
         this.head = 0;

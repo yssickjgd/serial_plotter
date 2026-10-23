@@ -98,9 +98,9 @@ class MonitorDisplayView {
         this.renderChannels();
     }
 
-    setChannels(channels) {
+    setChannels(channels, { render = true } = {}) {
         this.channels = channels;
-        this.renderChannels();
+        if (render) this.renderChannels();
     }
 
     renderChannels() {
@@ -114,7 +114,7 @@ class MonitorDisplayView {
             checkbox.type = 'checkbox';
             checkbox.checked = !hidden.has(index);
             const text = this.document.createElement('span');
-            const id = `CH${String(index + 1).padStart(2, '0')}`;
+            const id = `CH${String(index + 1).padStart(5, '0')}`;
             text.textContent = name && name !== id ? `${id} · ${name}` : id;
             checkbox.addEventListener('change', () => {
                 if (checkbox.checked) hidden.delete(index);

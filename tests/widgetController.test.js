@@ -252,13 +252,11 @@ test('byte widgets fix idle framing to one millisecond including legacy settings
     assert.equal(restored.app.widgets.widgets.get(byte.id).source.format.idleGapSeconds, 0.001);
 });
 
-test('byte-only numeric channel names update global settings and tool labels', async t => {
+test('byte-only workspaces edit shared channel names in the persistent global engine', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
-    await f.settle(); f.app.service.paused = true; f.app.tools.syncSources({ sourceId: byte.id, referenceId: byte.id });
-    const row = f.get('monitor-channel-list').children[0];
-    const input = row.children.find(child => child.type === 'text');
-    assert.ok(input, 'a byte-only workspace must expose shared name editing');
+    const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
+    await f.settle(); f.app.service.paused = true; f.app.tools.syncSources({ referenceId: byte.id });
+    const input = f.app.engineView.channels.list.children[0].querySelector('[data-role="channel-name"]');
     input.value = '温度'; input.dispatchEvent({ type: 'change' });
     assert.equal(f.app.getConfig().global.channelNames[0], '温度');
     assert.match(f.get('monitor-search-channel-options').textContent, /温度/);
@@ -280,35 +278,22 @@ test('direct creation rejects reserved source identities without modifying the w
     assert.equal(f.app.widgets.widgets.size, 0);
 });
 
-test('byte numeric framing shows shared rules inline and preserves them when switching widgets or modes', async t => {
+test('widget selection and viewing mode cannot move or apply the global parsing draft', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    const first = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
-    f.app.widgets.selectTab('tab-byte-frame');
-    assert.equal(f.get('tab-waveform-frame').hidden, true);
-    assert.ok(f.get('data-type').closest('#tab-byte-frame'));
-    assert.ok(!f.document.getElementById('open-numeric-format'));
-    f.change('data-type', 'uint16'); await f.settle();
-    assert.equal(f.app.getConfig().global.dataType, 'uint16');
-    assert.equal(f.get('tab-byte-frame').hidden, false);
+    const first = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
+    f.change('data-type', 'uint16');
     const wave = f.app.widgets.create({ type: 'wave' });
-    assert.ok(f.get('data-type').closest('#tab-waveform-frame'));
+    assert.ok(f.get('data-type').closest('#data-engine'));
     assert.equal(f.get('data-type').value, 'uint16');
+    assert.equal(first.source.format.dataType, 'float32');
+    await f.app.engineView.apply(); await f.settle();
+    assert.equal(first.source.format.dataType, 'uint16');
     const hex = f.app.widgets.create({ type: 'byte' });
-    f.app.widgets.selectTab('tab-byte-frame');
-    assert.equal(f.get('frame-raw-settings').hidden, true);
-    assert.equal(f.get('byte-numeric-settings').hidden, true);
-    f.change('capture-mode', 'text');
-    assert.equal(f.get('frame-raw-settings').hidden, false);
-    f.change('capture-mode', 'number');
-    assert.ok(f.get('data-type').closest('#tab-byte-frame'));
-    assert.equal(f.get('byte-numeric-settings').hidden, false);
-    f.app.workspace.activate(first.id);
-    assert.equal(f.get('tab-waveform-frame').hidden, true);
-    assert.ok(f.get('data-type').closest('#tab-byte-frame'));
-    assert.equal(first.source, wave.source);
-    assert.equal(hex.source, wave.source);
-    f.get('workspace-surface').dispatchEvent({ type: 'pointerdown', button: 0 });
-    assert.equal(f.get('widget-selection-prompt').hidden, false);
+    f.change('capture-mode', 'text'); assert.equal(f.get('frame-raw-settings').hidden, false);
+    f.change('capture-mode', 'engine'); assert.equal(f.get('frame-raw-settings').hidden, true);
+    assert.ok(f.get('data-type').closest('#data-engine'));
+    assert.equal(first.source, wave.source); assert.equal(hex.source, wave.source);
+    assert.equal(f.get('tab-byte-frame'), null);
 });
 
 test('new byte views include retained TX and parser errors once after ready', async t => {

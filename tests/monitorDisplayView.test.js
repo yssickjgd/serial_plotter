@@ -78,7 +78,7 @@ test('byte channel controls retain independent visibility and show channel names
     const list = getElement('monitor-channel-list');
     assert.equal(list.children[0].children[0].checked, true);
     assert.equal(list.children[1].children[0].checked, false);
-    assert.equal(list.children[1].children[1].textContent, 'CH02 · <img src=x>');
+    assert.equal(list.children[1].children[1].textContent, 'CH00002 · <img src=x>');
     const input = list.children[0].children[0];
     input.checked = false; input.listeners.change();
     assert.deepEqual(applied.at(-1).numericHiddenChannels, [0, 1]);

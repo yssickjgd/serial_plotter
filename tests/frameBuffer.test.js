@@ -1,6 +1,24 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+test('very wide frames use bounded adaptive chunks and sparse missing columns', () => {
+    const wide = new FrameBuffer(65535, 10), samples = new Array(65535).fill(NaN);
+    samples[0] = 1; samples[65534] = 7;
+    wide.append(samples, new Uint8Array(524280), 't', 1, 1);
+    assert.equal(wide.getValue(65534, 0), 7);
+    assert.ok(Number.isNaN(wide.getValue(30000, 0)));
+    assert.ok(wide.chunkSize <= 2);
+    assert.ok(wide.estimatedMemoryBytes < 4 * 1048576);
+    samples[0] = 2;
+    wide.append(samples, Uint8Array.of(8), 't', 2, 2);
+    assert.equal(wide.getValue(0, 1), 2);
+    wide.resize(2);
+    assert.equal(wide.getValue(65534, 1), 7);
+    assert.equal(wide.rawBytesAt(0).length, 524280);
+    wide.discardOldest(1);
+    assert.equal(wide.getValue(0, 0), 2);
+});
+
 test('memory accounting includes allocated sample chunks raw payload and retained metadata', () => {
     const frames = new FrameBuffer(23, 10000);
     assert.equal(frames.estimatedMemoryBytes, 0);
@@ -151,7 +169,7 @@ test('marking an already emitted raw frame ends its stream without duplicating b
 });
 
 test('constructor enforces the same channel and capacity limits as resizing', () => {
-    assert.throws(() => new FrameBuffer(51, 1000), /通道数/);
+    assert.throws(() => new FrameBuffer(65536, 1000), /通道数/);
     assert.throws(() => new FrameBuffer(1, 3600001), /最大采样点数/);
     const large = new FrameBuffer(50, 3600000);
     assert.equal(large.capacity, 3600000);

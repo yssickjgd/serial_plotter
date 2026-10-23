@@ -1,5 +1,6 @@
 /** Persistent command tree; payloads are compiled before a sequence starts. */
 const commandBytes = typeof module !== 'undefined' ? require('./byteUtils').ByteUtils : globalThis.SerialPlotter.ByteUtils;
+const commandProtocol = () => typeof module !== 'undefined' ? require('./protocolSendView') : globalThis.SerialPlotter;
 const COMMAND_LIMITS = Object.freeze({ nodes: 1000, depth: 32, content: 1048576, totalContent: 8388608 });
 
 function normalizeCommands(input = []) {
@@ -22,10 +23,20 @@ function normalizeCommands(input = []) {
                 throw new Error('指令总发送次数（1–1000000）或间隔（0–86400 s）无效');
             const common = { id: node.id, type: node.type, name: node.name.trim(), collapsed: node.collapsed ?? false, repeat, interval };
             if (node.type === 'group') return { ...common, children: visit(node.children ?? [], depth + 1) };
+            if (node.mode === 'protocol') {
+                const protocol = commandProtocol().normalizeProtocolCommand(node.protocol ?? {});
+                const content = typeof node.content === 'string' ? node.content : '';
+                if (content.length > COMMAND_LIMITS.content || (characters += JSON.stringify(protocol).length + content.length) > COMMAND_LIMITS.totalContent)
+                    throw new Error('协议指令总内容超出限制');
+                return { ...common, mode: 'protocol', content, protocol };
+            }
             if (!['hex', 'text'].includes(node.mode) || typeof node.content !== 'string' ||
                 node.content.length > COMMAND_LIMITS.content || (characters += node.content.length) > COMMAND_LIMITS.totalContent)
                 throw new Error('指令格式、内容、总发送次数（1–1000000）或间隔（0–86400 s）无效');
-            return { ...common, mode: node.mode, content: node.content, repeat, interval };
+            const protocol = node.protocol === undefined ? undefined : commandProtocol().normalizeProtocolCommand(node.protocol);
+            if (protocol && (characters += JSON.stringify(protocol).length) > COMMAND_LIMITS.totalContent) throw new Error('协议指令总内容超出限制');
+            return { ...common, mode: node.mode, content: node.content, repeat, interval,
+                ...(protocol ? { protocol } : {}) };
         });
     }
     return visit(input, 0);
@@ -42,7 +53,10 @@ function locateCommand(nodes, id, parent = null) {
 }
 
 class CommandLibrary {
-    constructor(nodes = []) { this.nodes = normalizeCommands(nodes); this.nextId = 1; }
+    constructor(nodes = [], { getProtocol = () => null } = {}) {
+        this.nodes = normalizeCommands(nodes); this.nextId = 1; this.getProtocol = getProtocol;
+    }
+    setProtocolResolver(getProtocol) { this.getProtocol = getProtocol; }
     serialize() { return normalizeCommands(this.nodes); }
     replace(nodes) { this.nodes = normalizeCommands(nodes); }
     find(id) { return locateCommand(this.nodes, id)?.node ?? null; }
@@ -65,7 +79,7 @@ class CommandLibrary {
         this._edit(nodes => {
             const node = locateCommand(nodes, id)?.node;
             if (!node) throw new Error('指令不存在');
-            for (const key of ['name', 'collapsed', 'mode', 'content', 'repeat', 'interval'])
+            for (const key of ['name', 'collapsed', 'mode', 'content', 'protocol', 'repeat', 'interval'])
                 if (Object.hasOwn(changes, key)) node[key] = changes[key];
         });
     }
@@ -128,9 +142,17 @@ class CommandLibrary {
         visit(this.prepareTree(id));
         return plan;
     }
-    prepareTree(id) {
+    prepareTree(id, { protocolSession } = {}) {
         const root = this.find(id);
         if (!root) throw new Error('指令不存在');
+        const schemas = new Map();
+        const getProtocol = id => {
+            if (!schemas.has(id)) {
+                const source = protocolSession ? protocolSession.getProtocol(id) : this.getProtocol(id);
+                schemas.set(id, source ? JSON.parse(JSON.stringify(source.schema || source)) : null);
+            }
+            return schemas.get(id);
+        };
         const visit = node => {
             if (node.type === 'group') {
                 const children = node.children.map(visit).filter(child => child.total > 0);
@@ -139,6 +161,12 @@ class CommandLibrary {
                 return { id: node.id, type: 'group', name: node.name, repeat: node.repeat, interval: node.interval, children, total };
             }
             try {
+                if (node.mode === 'protocol') {
+                    const protocol = protocolSession ? protocolSession.prepare(node.protocol, { getProtocol })
+                        : commandProtocol().prepareProtocolCommand(node.protocol, { getProtocol });
+                    return { id: node.id, type: 'command', mode: 'protocol', name: node.name,
+                        protocol, bytes: protocol.bytes, repeat: node.repeat, interval: node.interval, total: node.repeat };
+                }
                 const bytes = node.mode === 'hex' ? commandBytes.hexToBytes(node.content) : commandBytes.textToBytes(node.content);
                 if (!bytes.length) throw new Error('发送内容不能为空');
                 return { id: node.id, type: 'command', name: node.name, bytes, repeat: node.repeat,

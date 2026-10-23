@@ -71,8 +71,8 @@ test('export channel choices are independent, preserve physical indices and rend
     const { view, getElement } = exportFixture();
     view.setChannels([{ index: 0, name: '温度' }, { index: 1, name: '<img src=x>' }, { index: 2, name: 'CH03' }]);
     const list = getElement('export-channel-list');
-    assert.equal(list.children[1].children[1].textContent, 'CH02 · <img src=x>');
-    assert.equal(list.children[2].children[1].textContent, 'CH03');
+    assert.equal(list.children[1].children[1].textContent, 'CH00002 · <img src=x>');
+    assert.equal(list.children[2].children[1].textContent, 'CH00003');
     assert.deepEqual(view.read().channelIndices, [0, 1, 2]);
     const second = list.children[1].children[0]; second.checked = false; second.listeners.change();
     assert.deepEqual(view.read().channelIndices, [0, 2]);
@@ -86,6 +86,38 @@ test('export channel choices are independent, preserve physical indices and rend
     assert.equal(getElement('btn-export').disabled, false);
     const snapshot = view.read(); snapshot.channelIndices.pop();
     assert.deepEqual(view.read().channelIndices, [0, 1, 2, 3]);
+});
+
+test('65535 export channels use searchable pages while all-on and all-off still cover the entire source', () => {
+    const { view, getElement } = exportFixture();
+    const channels = Array.from({ length: 65535 }, (_, index) => ({ id: 'channel-' + index, name: index === 65534 ? '末通道' : 'CH' + (index + 1) }));
+    view.setChannels(channels);
+    const list = getElement('export-channel-list');
+    assert.ok(list.children.length <= 40);
+    const picker = view.channelPicker;
+    picker.filter.value = '末通道'; picker.filter.listeners.input();
+    assert.equal(list.children.length, 1);
+    assert.equal(list.children[0].children[1].textContent, 'CH65535 · 末通道');
+    list.children[0].children[0].checked = false; list.children[0].children[0].listeners.change();
+    picker.filter.value = ''; picker.filter.listeners.input();
+    assert.equal(view.selectedChannels().length, 65534);
+    picker.next.listeners.click();
+    assert.match(list.children[0].children[1].textContent, /^CH00041/);
+    getElement('btn-export-channels-all-off').listeners.click();
+    assert.deepEqual(view.selectedChannels(), []);
+    getElement('btn-export-channels-all-on').listeners.click();
+    assert.equal(view.selectedChannels().length, 65535);
+});
+
+test('export channel exclusions follow stable channel identities across reordering', () => {
+    const { view, getElement } = exportFixture();
+    view.setChannels([{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }]);
+    const first = getElement('export-channel-list').children[0].children[0]; first.checked = false; first.listeners.change();
+    view.setChannels([{ id: 'b', name: 'B' }, { id: 'a', name: 'A' }]);
+    assert.deepEqual(view.selectedChannels(), [0]);
+    view.applyProfile({ direction: 'rx', encoding: 'utf-8', timestamps: false, markers: false,
+        encodingEdited: false, channelIndices: [1] }, [{ id: 'c', name: 'C' }, { id: 'd', name: 'D' }], 'utf-8');
+    assert.deepEqual(view.selectedChannels(), [1], 'a source profile uses indices in its own scope');
 });
 
 test('text export source charset is validated independently of the capture decoder', () => {

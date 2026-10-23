@@ -51,6 +51,74 @@ function loadPool() {
     return exports;
 }
 
+test('real workers migrate legacy protocol words lexically and execute strict uppercase schemas', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const old = { id: 'worker.symbols', framing: { fixedLength: 3 }, messages: [{ id: 'm', fields: [
+        { name: 'frameLength', type: 'uint8' }, { name: 'data', type: 'bytes', length: 'min(frameLength, remaining)', condition: 'true' }
+    ] }] };
+    const current = structuredClone(old); current.symbolVersion = 2;
+    current.messages[0].fields[1].length = 'MIN(frameLength, REMAINING)'; current.messages[0].fields[1].condition = 'TRUE && FRAME_LENGTH == 3';
+    for (const workerFactory of [undefined, nodeWorkerFactory()]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory }); t.after(() => pool.dispose());
+        for (const schema of [old, current]) {
+            const [record] = await pool.runTask({ kind: 'protocol-decode', schema, records: [Uint8Array.of(2, 41, 42)] });
+            assert.equal(record.valid, true); assert.equal(record.fields.frameLength, 2);
+            assert.deepEqual([...record.fields.data], [41, 42]); assert.equal(record.frameLength, 3);
+        }
+    }
+});
+
+test('whole-frame fields and migrated command aliases agree in real workers and fallback', async t => {
+    const { Protocol } = require('../protocolEngine'), { ProtocolModel } = require('../protocolModel');
+    const { RoboMasterProtocol } = require('../robomasterProtocol'), { HistoryWorkerPool } = loadPool();
+    const schema = ProtocolModel.toUnified(RoboMasterProtocol.schema);
+    const bytes = Protocol.encode(schema, 'rm2026.0002', { winner: 2 }, { sequence: 18 });
+    for (const workerFactory of [undefined, nodeWorkerFactory()]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: workerFactory ? 4 : 2, workerFactory }); t.after(() => pool.dispose());
+        const [record] = await pool.runTask({ kind: 'protocol-decode', schema, records: [bytes] });
+        assert.equal(record.messageId, 'rm2026.0002'); assert.equal(record.header.rm_seq, 18); assert.equal(record.valid, true);
+        assert.equal(record.fields.winner, 2);
+        const result = await pool.runTask({ kind: 'protocol-stream-check', schema, bytes: Uint8Array.from([...bytes, ...bytes]), chunkSize: 1 });
+        assert.equal(result.frames, 2); assert.equal(result.invalidFrames, 0); assert.equal(result.errors, 0);
+    }
+});
+
+test('bit group workers preserve wide exact values and reserved-bit spans in worker and fallback', async t => {
+    const { Protocol } = require('../protocolEngine'), { HistoryWorkerPool } = loadPool();
+    const schema = { id: 'wide.bits', framing: { fixedLength: 12 }, messages: [{ id: 'status', fields: [
+        { name: 'flags', type: 'bitfield', byteLength: 12, bits: [
+            { name: 'count', offset: 0, length: 80, type: 'uint' }, { name: 'padding', offset: 80, length: 16, type: 'reserved' }
+        ] }
+    ] }] };
+    const counter = (1n << 79n) + 37n, bytes = Protocol.encode(schema, 'status', { flags: { _raw: (65535n << 80n).toString(), count: counter.toString() } });
+    for (const workerFactory of [undefined, nodeWorkerFactory()]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: workerFactory ? 3 : 2, workerFactory });
+        t.after(() => pool.dispose());
+        const [record] = await pool.runTask({ kind: 'protocol-decode', schema, records: [bytes] });
+        assert.equal(record.values['flags.count'], counter); assert.equal(record.valid, true);
+        const padding = record.flatFields.find(field => field.path === 'flags.padding');
+        assert.equal(padding.numeric, null); assert.equal(padding.byteOffset, 10); assert.equal(padding.endByte, 12);
+    }
+});
+
+test('protocol stream checks share the worker budget, retain source bytes and report invalid and incomplete frames', async t => {
+    const schema = { id: 'stream.samples', framing: { header: [170], fixedLength: 4 }, payloadOffset: 1,
+        messages: [{ id: 'sample', fields: [{ name: 'items', type: 'tlv', until: 'end',
+            headerFields: [{ name: 'tag', type: 'uint8' }, { name: 'length', type: 'uint8' }],
+            selector: 'tag', lengthField: 'length', branches: [] }] }] };
+    const bytes = Uint8Array.of(170, 1, 1, 7, 170, 1, 8, 9, 170, 1), original = [...bytes];
+    for (const workerFactory of [undefined, nodeWorkerFactory()]) {
+        const { HistoryWorkerPool } = loadPool();
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: workerFactory ? 4 : 2, workerFactory, sliceBytes: 2 });
+        t.after(() => pool.dispose());
+        const result = await pool.runTask({ kind: 'protocol-stream-check', schema, bytes, chunkSize: 1 });
+        assert.deepEqual(result, { frames: 2, errors: 1, invalidFrames: 1, pending: 2 });
+        assert.deepEqual([...bytes], original);
+        if (workerFactory) assert.ok(pool.workerCount > 0 && pool.workerCount <= 2);
+        await assert.rejects(pool.runTask({ kind: 'protocol-stream-check', schema, bytes, chunkSize: 0 }), /chunk size/);
+    }
+});
+
 test('idle history workers retire individually and clearing FFT cache permits a fresh snapshot', async t => {
     const { HistoryWorkerPool } = loadPool();
     const timers = new Map(), workers = [];
@@ -658,4 +726,72 @@ test('text layout workers keep UTF16 alignment at odd retained origins and suppl
     assert.deepEqual(result.chunks.flatMap(chunk => [...chunk.crosses]), [0, 0, 1]);
     assert.deepEqual(result.chunks.flatMap(chunk => [...chunk.failed]), [1, 0, 0]);
     assert.equal(result.byteOffset, 41);
+});
+
+function protocolTask() {
+    const { Protocol } = require('../protocolEngine');
+    const { RoboMasterProtocol } = require('../robomasterProtocol');
+    return { kind: 'protocol-decode', schema: RoboMasterProtocol.schema, records: [
+        { bytes: Protocol.encode(RoboMasterProtocol.compiled, 'rm2026.0001', {
+            game_type_progress: 0x41, stage_remain_time: 300, SyncTimeStamp: '9007199254740993' }) },
+        Protocol.encode(RoboMasterProtocol.compiled, 'rm2026.0308', { sender_id: 1, receiver_id: 0x101, user_data: '测试中文' }),
+        { bytes: Protocol.encode(RoboMasterProtocol.compiled, 'rm2026.0301.0101', { sender_id: 1, receiver_id: 0x101 }) }
+    ] };
+}
+
+test('protocol batches preserve BigInt, bit spans, order and source bytes in worker and sliced fallback', async t => {
+    const { HistoryWorkerPool } = loadPool(), { Protocol } = require('../protocolEngine');
+    const task = protocolTask(), bytes = task.records.map(record => record.bytes || record);
+    const expected = bytes.map(raw => Protocol.decode(raw, Protocol.compile(task.schema)));
+    for (const hardwareConcurrency of [2, 4]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency, workerFactory: nodeWorkerFactory(), sliceBytes: 1 });
+        t.after(() => pool.dispose());
+        const result = await pool.runTask(task);
+        assert.deepEqual(result, expected);
+        assert.equal(result[0].fields.SyncTimeStamp, 9007199254740993n);
+        assert.equal(result[1].fields.user_data, '测试中文');
+        assert.equal(result[2].flatFields.find(field => field.path.endsWith('.config1.layer')).bitLength, 4);
+        assert.deepEqual(task.records.map(record => [...(record.bytes || record)]), bytes.map(raw => [...raw]));
+    }
+});
+
+test('protocol decode tasks share the existing reserved-core pool with FFT jobs', async t => {
+    const { HistoryWorkerPool } = loadPool(), pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const jobs = Array.from({ length: 8 }, (_, index) => pool.runTask(index % 2 ? protocolTask()
+        : { kind: 'fft', values: Float64Array.of(1, 0, -1, 0), windowType: 'rectangular' }));
+    const results = await Promise.all(jobs);
+    assert.ok(pool.peakWorkers <= 2);
+    assert.equal(results.filter(Array.isArray).length, 4);
+});
+
+test('protocol processors yield between frames and reject oversized or malformed batches before dispatch', async t => {
+    const { HistoryWorkerPool, createHistoryTaskProcessor } = loadPool(), { Protocol } = require('../protocolEngine');
+    const task = protocolTask(), processor = createHistoryTaskProcessor(task, { Protocol });
+    assert.equal(processor.step(1), false); assert.equal(processor.step(1), false); assert.equal(processor.step(1), true);
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2 }); t.after(() => pool.dispose());
+    await assert.rejects(pool.runTask({ ...task, records: Array(257).fill(task.records[0]) }), /256|batch|批/i);
+    await assert.rejects(pool.runTask({ ...task, records: [new Uint8Array(4194305)] }), /batch|large|limit|批/i);
+    await assert.rejects(pool.runTask({ ...task, records: [[1, 2, 3]] }), /Uint8Array|bytes/i);
+    await assert.rejects(pool.runTask({ ...task, schema: null }), /schema|协议/i);
+});
+
+test('generated classic workers embed trusted protocol code without imports or user expressions', () => {
+    const { buildHistoryWorkerSource } = loadPool();
+    const source = buildHistoryWorkerSource();
+    assert.match(source, /createProtocolEngine/);
+    assert.doesNotMatch(source, /importScripts\s*\(|\beval\s*\(|new Function\s*\(/);
+    assert.doesNotMatch(source, /RoboMaster 2026|rm2026\.0001/);
+});
+
+test('protocol output budgets reject expanding batches and oversized records with recoverable error codes', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    for (const hardwareConcurrency of [2, 4]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency, workerFactory: nodeWorkerFactory() });
+        t.after(() => pool.dispose());
+        await assert.rejects(pool.runTask({ ...protocolTask(), maxDecodedFields: 15 }), error => error.code === 'protocol-batch-limit');
+        await assert.rejects(pool.runTask({ ...protocolTask(), maxDecodedFields: 5 }), error => error.code === 'protocol-record-limit');
+        await assert.rejects(pool.runTask({ ...protocolTask(), maxDecodedFields: 0 }), /field|limit|budget/i);
+        assert.equal((await pool.runTask(protocolTask())).length, 3);
+    }
 });

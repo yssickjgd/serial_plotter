@@ -4,7 +4,8 @@ const sendByteUtils = typeof module !== 'undefined'
 /** Owns send-panel state, file bytes, and repeated-send lifecycle. */
 class SendController {
     constructor({ mode, input, fileInput, interval, intervalUnit, button, loadButton,
-        getEngine, onSent, onInputError, onSendError, onStart = () => {} }) {
+        getEngine, onSent, onInputError, onSendError, onStart = () => {},
+        protocolSession = null, getProtocolCommand = () => null }) {
         this.mode = mode;
         this.input = input;
         this.fileInput = fileInput;
@@ -28,6 +29,10 @@ class SendController {
         this.fileGeneration = 0;
         this.sendGeneration = 0;
         this.pendingWrite = null;
+        this.protocolSession = protocolSession;
+        this.getProtocolCommand = getProtocolCommand;
+        this.activeProtocol = null;
+        this.protocolInFlight = false;
 
         this.listen(mode, 'change', () => this.changeMode());
         this.listen(input, 'input', () => {
@@ -56,6 +61,7 @@ class SendController {
     stop() {
         this.sendGeneration++;
         this.starting = false;
+        this.activeProtocol = null;
         if (this.timer !== null) clearInterval(this.timer);
         this.timer = null;
         this.button.textContent = '发送';
@@ -71,8 +77,22 @@ class SendController {
     }
 
     async sendOnce({ queue = false } = {}) {
-        if (this.disposed || this.inFlight && !queue) return false;
+        if (this.disposed || (this.inFlight || this.protocolInFlight) && !queue) return false;
         if (!this.getEngine()) { this.stop(); return false; }
+        if (this.mode.value === 'protocol') {
+            const generation = this.sendGeneration;
+            this.protocolInFlight = true;
+            try {
+                const prepared = this.activeProtocol || this.prepareProtocol();
+                const sent = await this.sendProtocol(prepared, () => generation === this.sendGeneration);
+                if (!sent && generation === this.sendGeneration) this.stop();
+                return sent;
+            } catch (error) {
+                this.onInputError(error);
+                if (generation === this.sendGeneration) this.stop();
+                return false;
+            } finally { this.protocolInFlight = false; }
+        }
         let bytes;
         try {
             bytes = this.loadedBytes || this.previewBytes || (this.mode.value === 'hex'
@@ -113,10 +133,27 @@ class SendController {
         return result;
     }
 
+    prepareProtocol(binding = this.getProtocolCommand()) {
+        if (!this.protocolSession) throw new Error('协议发送尚未配置');
+        if (!binding) throw new Error('请选择协议和消息');
+        return this.protocolSession.prepare(binding);
+    }
+
+    sendProtocol(prepared, isCurrent = () => true) {
+        if (!this.protocolSession) throw new Error('协议发送尚未配置');
+        const engine = this.getEngine();
+        return this.protocolSession.send(prepared, (bytes, current) => this.sendBytes(bytes, current),
+            () => !this.disposed && this.getEngine() === engine && isCurrent());
+    }
+
     async handleClick() {
         if (this.disposed) return;
         if (this.timer !== null || this.starting) { this.stop(); return; }
         this.onStart();
+        if (this.mode.value === 'protocol') {
+            try { this.activeProtocol = this.prepareProtocol(); }
+            catch (error) { this.onInputError(error); this.stop(); return; }
+        }
         const period = this.periodMs();
         const generation = this.sendGeneration;
         if (period > 0) {
@@ -138,6 +175,11 @@ class SendController {
     }
 
     changeMode() {
+        if (this.mode.value === 'protocol' || this.previousMode === 'protocol') {
+            this.previousMode = this.mode.value;
+            this.stop();
+            return;
+        }
         try {
             const bytes = this.loadedBytes || this.previewBytes ||
                 (this.previousMode === 'hex'

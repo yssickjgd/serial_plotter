@@ -1,43 +1,83 @@
 /** Assemble persistent acquisition and independently configured workspace views. */
 document.addEventListener('DOMContentLoaded', () => {
+    globalThis.SerialPlotter.applicationReady = startSerialPlotterApplication();
+});
+
+async function startSerialPlotterApplication() {
     'use strict';
     const S = globalThis.SerialPlotter, el = id => document.getElementById(id);
     const CONFIG_KEY = 'serialplot_v3_config', WORKSPACE_KEY = 'serialplot_v3_workspace';
     const cleanups = [], progressRows = new Map(), rates = new Map(), draws = new Map();
-    let disposed = false, restoring = true, saveTimer = null, exporting = false;
+    let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
     let boundExportSourceId = null, boundExportFormat = null, boundExportSource = null, bindingExport = false;
-    let activeEngine = null, connecting = false, widgets = null, tools = null, exportView = null, uiFrame = null;
+    let activeEngine = null, connecting = false, widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
     let previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: 0 };
     const listen = (target, name, fn) => { target?.addEventListener(name, fn); cleanups.push(() => target?.removeEventListener(name, fn)); };
     const status = (id, message) => { const node = el(id); if (node) { node.textContent = message; node.hidden = !message; } };
     const report = error => status('cfg-save-status', error.message ?? String(error));
     const bytesLabel = n => n < 1024 ? Math.round(n) + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+    let storageBlocked = false, storageLoadError = null, storageWarnings = 0, configRevision = 0;
+    const validateStoredConfig = (candidate, layout) => {
+        const config = S.WidgetConfig.migrateWorkspaceConfig(candidate, layout);
+        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: config.global.captureMemoryMiB * 1048576 });
+        return config;
+    };
+    const workspaceStorage = new S.WorkspaceStorage({ indexedDB: globalThis.indexedDB, localStorage: globalThis.localStorage,
+        configKey: CONFIG_KEY, workspaceKey: WORKSPACE_KEY,
+        validate: validateStoredConfig,
+        onError(error) { storageWarnings++; report(error); } });
     let initial;
     try {
-        const raw = localStorage.getItem(CONFIG_KEY), layout = localStorage.getItem(WORKSPACE_KEY);
-        initial = S.WidgetConfig.migrateWorkspaceConfig(raw ? JSON.parse(raw) : null, layout ? JSON.parse(layout) : null);
-    } catch (error) { initial = S.WidgetConfig.migrateWorkspaceConfig(null); report(error); }
+        if (workspaceStorage.hasIndexedDB) {
+            initial = await workspaceStorage.load() ?? S.WidgetConfig.migrateWorkspaceConfig(null);
+        } else {
+            // Legacy-only environments initialize synchronously, including the browser test harness.
+            const raw = localStorage.getItem(CONFIG_KEY), layout = localStorage.getItem(WORKSPACE_KEY);
+            let candidate = raw ? JSON.parse(raw) : null;
+            if (candidate?.storage === 'indexedDB') {
+                const backup = localStorage.getItem(workspaceStorage.backupKey);
+                if (!backup) throw new Error('IndexedDB 工作区不可用，且没有旧配置备份');
+                candidate = JSON.parse(backup);
+                if (candidate?.storage === 'indexedDB') throw new Error('旧配置备份无效');
+                report(new Error('IndexedDB 工作区不可用，已加载旧配置备份'));
+            }
+            if (raw && (!candidate || typeof candidate !== 'object' || Array.isArray(candidate))) throw new Error('保存的工作区配置无效');
+            initial = validateStoredConfig(candidate, layout ? JSON.parse(layout) : null);
+        }
+    } catch (error) {
+        storageBlocked = true; storageLoadError = error;
+        initial = S.WidgetConfig.migrateWorkspaceConfig(null);
+        report(new Error('配置读取失败，自动保存已停止；导入有效配置后可重新保存：' + (error.message ?? String(error))));
+    }
     const globals = { ...initial.global, channelNames: [...initial.global.channelNames] };
     const uiLayout = { ...initial.uiLayout };
     let exportSourceId = initial.tools.exportSourceId, exportProfiles = initial.tools.exportProfiles;
     let exportFormat = initial.tools.exportFormat, exportRecordSourceId = initial.tools.exportRecordSourceId;
     let exportRecordSource = null;
     let exportCsvSourceId = initial.tools.exportCsvSourceId;
-    function saveNow() {
-        if (disposed || restoring) return;
+    async function saveNow() {
+        if (disposed || restoring || storageBlocked) return null;
         if (saveTimer !== null) clearTimeout(saveTimer);
         saveTimer = null;
+        const revision = ++configRevision, warnings = storageWarnings;
         try {
             const config = S.WidgetConfig.validateWorkspaceConfig(getConfig());
-            localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
-            localStorage.setItem(WORKSPACE_KEY, JSON.stringify(config.workspace));
-            status('cfg-save-status', '配置已保存');
-        } catch (error) { report(error); }
+            status('cfg-save-status', '正在保存配置…');
+            const saved = await workspaceStorage.save(config);
+            if (!disposed && revision === configRevision && warnings === storageWarnings) status('cfg-save-status', '配置已保存');
+            return saved;
+        } catch (error) { if (!disposed && revision === configRevision) report(error); return null; }
     }
     function saveSoon() {
-        if (disposed || restoring) return;
+        if (disposed || restoring || storageBlocked) return;
+        configRevision++;
         if (saveTimer !== null) clearTimeout(saveTimer);
         saveTimer = setTimeout(saveNow, 150);
+    }
+    async function flushConfig() {
+        if (storageBlocked) throw storageLoadError ?? new Error('自动保存已停止');
+        if (saveTimer !== null) await saveNow();
+        return workspaceStorage.flush();
     }
     function showProgress(source, progress) {
         if (disposed) return;
@@ -65,7 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const service = new S.CaptureService({ capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes,
         memoryLimitBytes: Number(globals.captureMemoryMiB) * 1048576,
-        rebuildHistory: globals.rebuildHistory, numericFormat: globals, channelDefinitions: globals.channelDefinitions,
+        rebuildHistory: globals.rebuildHistory, numericFormat: { ...globals, ...initial.dataEngine.array }, channelNames: globals.channelNames, channelDefinitions: globals.channelDefinitions,
         onChange(source) {
             if (disposed) return;
             widgets?.syncData(source);
@@ -84,6 +124,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scheduleSourceUi();
         }
     });
+    const dataEngine = new S.DataEngine(service, initial.dataEngine, globals, { onProgress: showProgress });
     const serialAdapter = new S.SerialEngine(), netAdapter = new S.NetEngine();
     const workspace = new S.WidgetWorkspace({ document, window, viewport: el('workspace-viewport'), surface: el('workspace-surface'),
         step: initial.workspace.step, zoom: initial.workspace.zoom,
@@ -100,6 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
             tools?.syncSources(); syncExportSources(); showProgress(null, null); saveSoon();
         },
         onRulesChange() { tools?.invalidate(); rates.clear(); syncExportSources(); },
+        onChannelMetadataChange(index, patch) { engineView?.channels.updateMetadata(index, patch); },
         onBeforeChannelRenumber(numberMap) {
             saveExportProfile(); boundExportSourceId = null;
             for (const settings of Object.values(exportProfiles)) for (const profile of Object.values(settings.formats))
@@ -110,6 +152,21 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         onActivate() { tools?.syncSources(); syncExportSources(); }
     });
+    engineView = new S.DataEngineView({ document, engine: dataEngine, controller: widgets, onChange: saveSoon,
+        getProtocolReferences(id) {
+            const references = [], visit = nodes => {
+                for (const node of nodes) {
+                    if (node.mode === 'protocol' && node.protocol?.protocolId === id) references.push({ kind: 'command', id: node.id, label: `一键发送 · ${node.name}` });
+                    if (node.children) visit(node.children);
+                }
+            };
+            visit(commandLibrary.nodes);
+            if (el('send-mode').value === 'protocol' && regularProtocolView.getDraft().protocolId === id)
+                references.push({ kind: 'regular-send', id: 'regular', label: '常规发送 · 协议消息' });
+            return references;
+        },
+        onLayout: syncEngineSplit,
+        onApply() { tools?.invalidate(); rates.clear(); syncExportSources(); regularProtocolView.refresh(); commandView.render(); } });
     tools = new S.WorkspaceTools({ document, service, getWidgets: () => widgets.widgets,
         getActiveWidget: () => widgets.active,
         getChannelNames: () => globals.channelNames, onStateChange: saveSoon });
@@ -118,8 +175,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function exportSources() {
         const items = [
             { id: 'base', title: '基础原始记录', source: service.baseSource, aliases: ['base'], associated: [] },
-            { id: 'numeric', title: '成功解析的数值帧', source: service.numericSource, aliases: ['numeric'], associated: [] }
+            { id: 'numeric', title: dataEngine.mode === 'Self_Defined_Frame' ? '同步采样表' : '成功解析的数值帧', source: service.numericSource, aliases: ['numeric'], associated: [] }
         ];
+        for (const source of dataEngine.outputs.values()) if (source !== service.numericSource && source !== dataEngine.emptySource) {
+            const name = dataEngine.choices().find(item => 'engine:' + item.id === source.id)?.name;
+            items.push({ id: source.id, title: source.kind === 'protocol' ? '结构化消息记录' : name ?? source.id, source, aliases: [source.id], associated: [] });
+        }
         for (const widget of widgets.widgets.values()) {
             let item = items.find(item => item.source === widget.source);
             if (!item && widget.type === 'byte') {
@@ -132,13 +193,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (widget.type === 'byte') item.aliases.push(widget.id);
             }
         }
-        return items.map(item => ({ ...item, numeric: item.source.kind === 'numeric' }));
+        return items.filter(item => exportFormat === 'csv' || item.source.kind !== 'numeric' ||
+            dataEngine.mode === 'Data_Array' && item.source === service.numericSource)
+            .map(item => ({ ...item, numeric: item.source.kind === 'numeric' }));
     }
     const exportFormats = () => ['binary', 'hex-text', 'text', 'csv'];
     exportView.sync = options => {
+        const structured = exportSources().find(item => item.id === exportSourceId)?.source.kind === 'protocol';
         baseExportSync({ ...options, numericAvailable: true,
             allowedFormats: exportFormats(), directionAvailable: true, busy: exporting });
         el('export-source').disabled = exporting;
+        if (structured && exportFormat === 'csv') {
+            el('wrap-export-numeric-parsing').hidden = true; el('export-channels-wrap').hidden = true;
+            exportView.parseError = ''; el('export-parse-status').hidden = true;
+        }
+        el('engine-export-options').hidden = exportFormat !== 'csv' || (!structured && !service.numericSource.frames.provenanceAt);
+        el('export-field-paths-wrap').hidden = !structured;
+        el('export-sync-states-wrap').hidden = structured;
         syncExportAvailability();
     };
     function exportSource() {
@@ -152,7 +223,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function exportChannels() {
         const configured = Number(el('export-channels-count').value), original = Number(globals.channelsCount);
         const count = exportView.numericFormatEdited ? configured : original;
-        if (!Number.isInteger(count) || count < 1 || count > 50) return [];
+        if (!Number.isInteger(count) || count < 1 || count > 65535) return [];
         const same = count === original;
         return Array.from({ length: same ? service.numericSource.frames.channelCount : count }, (_, index) => ({
             name: index < original || same ? globals.channelNames[index] ?? S.formatChannelId(index) : S.formatChannelId(index),
@@ -227,7 +298,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const selected = exportSource(), csv = el('export-format').value === 'csv';
         const direction = csv ? 'rx' : el('export-direction').value;
         const count = selected ? (direction !== 'tx' ? selected.source.frames.length : 0) + (direction !== 'rx' ? service.txFrames.length : 0) : 0;
-        el('btn-export').disabled = exporting || !selected || !count || csv && !exportView.selectedChannels().length ||
+        el('btn-export').disabled = exporting || !selected || !count || csv && selected.source.kind !== 'protocol' && !exportView.selectedChannels().length ||
             direction !== 'tx' && selected.source.rebuilding || csv && selected.source.frames.rebuilding || Boolean(exportView.parseError);
         el('wrap-export-source').hidden = !csv && direction === 'tx';
         const rx = selected?.source.frames.length ?? 0, tx = service.txFrames.length;
@@ -276,7 +347,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const frames = source.frames, tx = service.txFrames;
         const sources = csv || options.direction === 'rx' ? [frames] : options.direction === 'tx' ? [tx] : [frames, tx];
         const count = sources.reduce((sum, buffer) => sum + buffer.length, 0);
-        if (!count || !txOnly && source.rebuilding || csv && (frames.rebuilding || !options.channelIndices.length)) return false;
+        if (!count || !txOnly && source.rebuilding || csv && (frames.rebuilding || source.kind !== 'protocol' && !options.channelIndices.length)) return false;
         const epoch = service.epoch, generation = source.generation, computedGeneration = frames.generation;
         const firstOrders = sources.map(buffer => buffer.orderAt(0));
         const check = () => {
@@ -297,18 +368,24 @@ document.addEventListener('DOMContentLoaded', () => {
         exporting = true; exportView.sync({ busy: true });
         let writable, failure = '';
         try {
-            const customCsv = csv && (source !== service.numericSource || S.EXPORT_NUMERIC_FIELDS.some(key =>
+            const structuredCsv = csv && source.kind === 'protocol';
+            const syncCsv = csv && typeof frames.provenanceAt === 'function';
+            const engineCsv = structuredCsv || syncCsv;
+            const customCsv = !engineCsv && csv && (source.kind !== 'numeric' || exportView.numericFormatEdited && S.EXPORT_NUMERIC_FIELDS.some(key =>
                 String(options.numericFormat[key]) !== String(globals[key])));
             const customText = options.format === 'text';
             const encodedText = options.format === 'text';
-            if (customCsv || customText || encodedText) {
+            if (engineCsv || customCsv || customText || encodedText) {
                 el('btn-export').textContent = '准备导出…';
                 const encoder = await S.createExportTextEncoder(encodedText ? options.outputEncoding : 'utf-8');
                 check();
                 const context = { check, onProgress(done, total) {
                     check(); el('btn-export').textContent = `正在解析 ${total ? Math.round(done / total * 100) : 100}%`;
                 }, definitions: Number(options.numericFormat?.channelsCount) === Number(globals.channelsCount) ? globals.channelDefinitions : [] };
-                const chunks = customCsv ? S.reparsedCsvChunks(frames, options.numericFormat, selected.channels, options, context)
+                const selectedPaths = el('export-field-paths').value.split(/[\n,]/).map(path => path.trim()).filter(Boolean);
+                const chunks = structuredCsv ? S.structuredCsvChunksAsync(frames, source.decodeRecord, { check, timestamps: options.timestamps, fieldPaths: selectedPaths.length ? selectedPaths : null })
+                    : syncCsv ? S.synchronizedCsvChunks(frames, selected.channels, { ...options, check, syncStates: el('export-sync-states').checked })
+                    : customCsv ? S.reparsedCsvChunks(frames, options.numericFormat, selected.channels, options, context)
                     : customText ? S.reparsedTextChunks(frames, tx, options, context) : S.captureExportChunks(frames, tx, options);
                 const parts = [];
                 if (large) {
@@ -400,15 +477,20 @@ document.addEventListener('DOMContentLoaded', () => {
             tools.invalidate(); saveSoon(); status('cfg-save-status', '');
         } catch (error) { report(error); }
     });
+    const protocolSession = new S.ProtocolSendSession({ getProtocols: () => dataEngine.config.protocols,
+        getProtocol: id => dataEngine.config.protocols.find(schema => schema.id === id) });
+    const regularProtocolView = new S.ProtocolSendView({ root: el('protocol-send-panel'), session: protocolSession,
+        value: initial.send.protocol ?? {}, onChange: saveSoon });
     const commandLibrary = new S.CommandLibrary(initial.send.commands);
+    commandLibrary.setProtocolResolver(id => protocolSession.getProtocol(id));
     let commandView = null, sendTab = 'regular';
-    const commandRunner = new S.CommandRunner({ library: commandLibrary,
+    const commandRunner = new S.CommandRunner({ library: commandLibrary, protocolSession,
         getEngine: () => disposed ? null : activeEngine,
         send: (bytes, isCurrent) => sendController.sendBytes(bytes, isCurrent),
         beforeStart: () => sendController.stop(),
         onState: state => commandView?.setState(state),
         onError: error => commandView?.showError(error) });
-    const sendController = new S.SendController({ mode: el('send-mode'), input: el('send-input'), fileInput: el('send-file-input'),
+    const sendController = new S.SendController({ protocolSession, getProtocolCommand: () => regularProtocolView.getCommand(), mode: el('send-mode'), input: el('send-input'), fileInput: el('send-file-input'),
         interval: el('send-interval'), intervalUnit: el('send-interval-unit'), button: el('btn-send'), loadButton: el('btn-load-file'),
         getEngine: () => disposed ? null : activeEngine,
         onStart: () => commandRunner.stop(),
@@ -419,7 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 time: S.RawFrameParser.formatTime(Date.now()) }); status('connection-status', error.message);
         }
     });
-    commandView = new S.CommandSendView({ library: commandLibrary, runner: commandRunner, tree: el('command-tree'),
+    commandView = new S.CommandSendView({ protocolSession, library: commandLibrary, runner: commandRunner, tree: el('command-tree'),
         addButton: el('command-add'), groupButton: el('command-add-group'), stopButton: el('command-stop'),
         status: el('command-status'), error: el('command-error'), onChange: saveSoon });
     function setSendTab(tab, save = true) {
@@ -445,6 +527,12 @@ document.addEventListener('DOMContentLoaded', () => {
             setSendTab(next); el(`send-tab-${next}`).focus?.();
         });
     }
+    function syncProtocolSend() {
+        const protocol = el('send-mode').value === 'protocol';
+        el('protocol-send-panel').hidden = !protocol; el('send-input').hidden = protocol; el('btn-load-file').disabled = protocol;
+        if (protocol) regularProtocolView.refresh();
+    }
+    listen(el('send-mode'), 'change', syncProtocolSend);
     for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) listen(el(id), 'change', saveSoon);
     for (const adapter of [serialAdapter, netAdapter]) {
         adapter.onData(bytes => service.receive(bytes));
@@ -552,12 +640,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     function getConfig() {
         saveExportProfile();
-        return { version: 2, global: { ...globals, channelNames: [...globals.channelNames] }, widgets: widgets.serialize(),
+        return { version: 3, global: { ...globals, channelNames: [...globals.channelNames], channelRecords: widgets.getChannelRegistry().toJSON() }, widgets: widgets.serialize(),
             workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
+            dataEngine: dataEngine.serialize(),
             tools: { ...tools.serialize(), exportSourceId, exportRecordSourceId, exportCsvSourceId, exportFormat,
                 exportProfiles: JSON.parse(JSON.stringify(exportProfiles)) },
             send: { mode: el('send-mode').value, interval: el('send-interval').value, unit: el('send-interval-unit').value,
-                tab: sendTab, commands: commandLibrary.serialize() } };
+                tab: sendTab, protocol: regularProtocolView.getDraft(), commands: commandLibrary.serialize() } };
     }
     function installWidgets(config) {
         exportSourceId = config.tools.exportSourceId;
@@ -572,6 +661,7 @@ document.addEventListener('DOMContentLoaded', () => {
         workspace.restore(config.workspace); el('workspace-step').value = String(config.workspace.step);
         tools.syncSources(config.tools);
         el('send-mode').value = config.send.mode; sendController.previousMode = config.send.mode;
+        regularProtocolView.setValue(config.send.protocol ?? {}); syncProtocolSend();
         el('send-interval').value = config.send.interval; el('send-interval-unit').value = config.send.unit;
         commandLibrary.replace(config.send.commands); commandView.selectedId = null; commandView.render();
         commandView.error.hidden = true; commandView.status.textContent = '拖动排序，名称直接修改';
@@ -579,7 +669,9 @@ document.addEventListener('DOMContentLoaded', () => {
         widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout);
     }
     function applyConfig(input) {
-        const config = S.WidgetConfig.migrateWorkspaceConfig(input), wasRestoring = restoring; restoring = true;
+        const config = S.WidgetConfig.migrateWorkspaceConfig(input);
+        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: config.global.captureMemoryMiB * 1048576 });
+        const wasRestoring = restoring, revision = ++importRevision; restoring = true;
         try {
             tools.invalidate();
             sendController.stop(); commandRunner.stop();
@@ -587,11 +679,15 @@ document.addEventListener('DOMContentLoaded', () => {
             Object.assign(globals, config.global); service.rebuildHistory = globals.rebuildHistory;
             service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
             // Install validated definitions against the incoming raw count atomically.
-            service.channelDefinitions = globals.channelDefinitions;
+            service.channelDefinitions = globals.channelDefinitions; service.channelNames = globals.channelNames; widgets.channelRegistry = null;
             service.setCapacity(Number(globals.maxPoints)); void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
-            void service.updateNumericFormat(globals);
+            const ready = dataEngine.apply(config.dataEngine, { rebuild: globals.rebuildHistory, force: true });
             installWidgets(config); rates.clear(); draws.clear();
+            engineView.draft = JSON.parse(JSON.stringify(config.dataEngine.draft ?? config.dataEngine)); engineView.render(); engineView.channels.refresh();
+            ready.then(() => { if (!disposed && revision === importRevision) widgets.rebindEngineSources(); })
+                .catch(error => { if (!disposed && revision === importRevision) report(error); });
         } finally { restoring = wasRestoring; }
+        storageBlocked = false; storageLoadError = null;
         saveSoon(); return config;
     }
     listen(el('btn-export-cfg'), 'click', () => download([JSON.stringify(getConfig(), null, 2)], 'serialplot-config.json', 'application/json'));
@@ -657,7 +753,36 @@ document.addEventListener('DOMContentLoaded', () => {
         el('workspace-zoom-percent').value = String(Math.round(workspace.zoom * 100));
     });
     let panelDrag = null;
-    const resizeViews = () => { workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
+    let engineSplitDrag = null;
+    function syncEngineSplit() {
+        const sidebar = el('sidebar'), title = sidebar.querySelector('.app-title');
+        const available = Math.max(0, sidebar.clientHeight - (title?.offsetHeight ?? 40) - 8);
+        const preferred = uiLayout.leftSplitRatio ?? .5;
+        const upperMinimum = Math.min(100, available / 3);
+        const engineMinimum = Math.min(engineView?.minimumHeight() ?? 140, available - upperMinimum);
+        const height = Math.max(upperMinimum, Math.min(available - engineMinimum, available * preferred));
+        sidebar.style.setProperty('--sidebar-upper-height', height + 'px');
+        el('engine-splitter').setAttribute('aria-valuenow', String(Math.round(preferred * 100)));
+    }
+    listen(el('engine-splitter'), 'pointerdown', event => {
+        if (event.button !== 0) return;
+        engineSplitDrag = { pointerId: event.pointerId }; el('engine-splitter').setPointerCapture?.(event.pointerId); event.preventDefault();
+    });
+    listen(el('engine-splitter'), 'pointermove', event => {
+        if (!engineSplitDrag || event.pointerId !== engineSplitDrag.pointerId) return;
+        const rect = el('sidebar').getBoundingClientRect(), title = el('sidebar').querySelector('.app-title')?.offsetHeight ?? 40;
+        uiLayout.leftSplitRatio = Math.max(.15, Math.min(.85, (event.clientY - rect.top - title) / Math.max(160, rect.height - title - 8)));
+        syncEngineSplit();
+    });
+    const finishEngineSplit = () => { if (!engineSplitDrag) return; engineSplitDrag = null; saveSoon(); };
+    listen(el('engine-splitter'), 'pointerup', finishEngineSplit); listen(el('engine-splitter'), 'pointercancel', finishEngineSplit);
+    listen(el('engine-splitter'), 'keydown', event => {
+        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); uiLayout.leftSplitRatio = event.key === 'Home' ? .15 : event.key === 'End' ? .85 :
+            Math.max(.15, Math.min(.85, uiLayout.leftSplitRatio + (event.key === 'ArrowUp' ? -.025 : .025)));
+        syncEngineSplit(); saveSoon();
+    });
+    const resizeViews = () => { syncEngineSplit(); workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
     syncSidebarLayout();
     const sendSizeTarget = () => el('global-send');
     const sendMinimum = (target = sendSizeTarget()) => parseFloat(window.getComputedStyle?.(target).minHeight) || 160;
@@ -684,6 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     function applyUiLayout(layout) {
         Object.assign(uiLayout, layout);
+        syncEngineSplit();
         preferredSidebarOpen.left = layout.leftOpen; preferredSidebarOpen.right = layout.rightOpen;
         el('sidebar').style.setProperty('--sidebar-w', layout.leftWidth + 'px');
         el('channel-sidebar').style.setProperty('--channel-sidebar-w', layout.rightWidth + 'px');
@@ -746,24 +872,34 @@ document.addEventListener('DOMContentLoaded', () => {
         syncSidebarLayout();
         setPanelSize({ minimum: sendMinimum() }, uiLayout.sendHeight);
     });
-    S.bindAllSelectWheels(document);
+    // Leave wheel scrolling to the containing pane; a focused native select can otherwise change its value.
+    const scrollPastSelect = event => {
+        if (event.ctrlKey || !event.deltaY) return;
+        const select = event.target?.closest?.('select');
+        if (select && document.activeElement === select) select.blur();
+    };
+    document.addEventListener('wheel', scrollPastSelect, { capture: true, passive: true });
+    cleanups.push(() => document.removeEventListener('wheel', scrollPastSelect, true));
     function dispose() {
         if (disposed) return;
         endPanelResize(null);
         if (saveTimer !== null) saveNow();
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
-        clearInterval(statsTimer); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose?.();
-        tools.dispose(); widgets.dispose(); workspace.dispose(); service.dispose();
+        clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose?.();
+        engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose(); service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
         for (const adapter of [serialAdapter, netAdapter]) {
             adapter.onData(null); adapter.onStatusChange(null);
             void (adapter.dispose ? adapter.dispose() : adapter.disconnect());
         }
+        return workspaceStorage.dispose();
     }
     installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
     const statsTimer = setInterval(updateStats, 1000);
     S.application = { service, widgets, workspace, tools, serialAdapter, netAdapter, sendController,
-        commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, updateStats };
+        protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, updateStats,
+        dataEngine, engineView, workspaceStorage, saveNow, saveSoon, flushConfig };
     listen(window, 'pagehide', dispose);
-});
+    return S.application;
+}
