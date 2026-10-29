@@ -185,7 +185,7 @@
             for (const field of fields) {
                 let value = target[field.name];
                 if (value !== undefined) continue;
-                if (field.expectedBytes || field.type === 'checksum' || field.autoFrameLength || field.autoLengthTargets?.length) continue;
+                if (field.expectedBytes && field.count === undefined && field.until !== 'end' || field.type === 'checksum' || field.autoFrameLength || field.autoLengthTargets?.length) continue;
                 const single = () => field.type === 'struct' ? this.defaults(field.fields, {}, depth + 1)
                     : field.type === 'choice' ? {} : ['repeat', 'tlv'].includes(field.type) ? []
                     : field.type === 'fixed' ? field.bytes ?? []
@@ -195,7 +195,7 @@
                     let count = 0;
                     try { count = Number(Protocol.evaluateExpression(field.count, target)); } catch { /* Dynamic count awaits its prerequisite. */ }
                     value = Number.isSafeInteger(count) && count >= 0 && count <= 4096 ? Array.from({ length: count }, single) : [];
-                } else value = single();
+                } else value = field.until==='end'?[]:single();
                 if (['repeat', 'tlv'].includes(field.type) && field.count !== undefined) {
                     let count = 0;
                     try { count = Number(Protocol.evaluateExpression(field.count, target)); } catch { /* The user can finish prerequisites before updating the form. */ }
@@ -218,7 +218,7 @@
             for (const field of headerNode ? headerNode.fields : compiled.headerFields) if (field.valueSource === 'SEQ') header[field.name] = sequence;
             return { ...this.value.fields, ...parentContext, ...target, PARENT: parentContext, CURRENT: target,
                 FRAME_LENGTH: frameLength, PAYLOAD_LENGTH: frameLength === undefined ? undefined : payloadEnd - (schema.payloadOffset || 0),
-                HEADER: header, SEQ: sequence, SEQUENCE: sequence };
+                HEADER: header, SEQ: sequence };
         }
         initializeFields(message) {
             if (this.compiled.unified) {
@@ -252,8 +252,8 @@
         }
         inputField(parent, field, target, key, path, bit = false) {
             const label = field.description ? `${path} · ${field.description}` : path;
-            const isArray = field.count !== undefined, structured = isArray || field.type === 'struct';
-            const isBool = field.type === 'bool', enumeration = field.enum;
+            const isArray = field.count !== undefined || field.until==='end', structured = isArray || field.type === 'struct';
+            const isBool = !isArray && field.type === 'bool', enumeration = isArray ? null : field.enum;
             const control = this.control(parent, label, `field:${path}`, enumeration ? 'select' : structured ? 'textarea' : 'input');
             control.title = [field.type || (bit ? 'bits' : ''), field.unit, field.description].filter(Boolean).join(' · ');
             if (enumeration) this.options(control, Object.entries(enumeration).map(([value, title]) => [value, `${valueText(value, field)} · ${title}`]), String(target[key] ?? 0));
@@ -289,12 +289,13 @@
             if (depth > 16) return;
             for (const field of list) {
                 const path = prefix ? `${prefix}.${field.name}` : field.name;
-                if (field.type === 'fixed' || field.type === 'checksum' || field.valueSource === 'SEQ' || field.autoFrameLength || field.autoLengthTargets?.length || field.expectedBytes) continue;
+                const repeated=field.count !== undefined || field.until === 'end';
+                if ((field.type === 'fixed' || field.expectedBytes) && !repeated || field.type === 'checksum' || field.valueSource === 'SEQ' || field.autoFrameLength || field.autoLengthTargets?.length) continue;
                 if (field.condition !== undefined) {
                     try { if (!Protocol.evaluateExpression(field.condition, this.expressionContext(target, parentContext))) continue; }
                     catch { continue; }
                 }
-                if (field.type === 'choice') {
+                if (field.type === 'choice' && !repeated) {
                     if (!field.inline) target[field.name] ||= {};
                     const group = this.element('fieldset', 'protocol-send-segment');
                     group.appendChild(this.element('legend', '', field.name));
@@ -304,10 +305,10 @@
                 if (['repeat', 'tlv'].includes(field.type)) {
                     this.repeatFields(parent, field, target, path, depth + 1, parentContext); continue;
                 }
-                if (field.type === 'struct' && field.count === undefined) {
+                if (field.type === 'struct' && field.count === undefined && field.until!=='end') {
                     target[field.name] ||= {};
                     this.fields(parent, field.fields, target[field.name], path, depth + 1, target);
-                } else if (field.bits && field.count === undefined) {
+                } else if (field.bits && !repeated) {
                     if (typeof target[field.name] !== 'object') target[field.name] = { _raw: target[field.name] ?? 0 };
                     for (const bit of field.bits) if (bit.type !== 'reserved') this.inputField(parent, { ...bit, displayBase: field.displayBase ?? 'dec', type: bit.type || 'uint' },
                         target[field.name], bit.name, `${path}.${bit.name}`, true);

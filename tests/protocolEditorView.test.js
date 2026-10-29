@@ -5,6 +5,18 @@ const { ProtocolEditorView } = require('../protocolEditorView');
 const { ProtocolModel } = require('../protocolModel');
 const named = (schema, name) => ProtocolModel.flattenFields(schema).find(row => row.field.name === name)?.field;
 
+test('sum and XOR checksum forms expose initial output XOR and inversion options in the field radix',()=>{
+    const f=fixture();f.view.open({id:'checksum-form',schemaVersion:3,messages:[{id:'frame',byteLength:4,fields:[
+        {id:'data',name:'data',type:'bytes',byteLength:3},
+        {id:'check',name:'check',type:'checksum',byteLength:1,displayBase:'hex',checksum:{type:'sum',start:{fieldId:'data',edge:'start'},end:{fieldId:'data',edge:'end'}}}
+    ]}]});f.view._selectField(named(f.view.draft,'check'));
+    f.change('field.checksum.init','10');f.change('field.checksum.xorOut','0F');f.change('field.checksum.invertResult',true);
+    assert.deepEqual([...Protocol.encode(f.view.draft,'frame',{data:[1,2,3]})],[1,2,3,230]);
+    assert.equal(f.control('field.checksum.init').value,'0x10');assert.ok(!f.control('field.checksum.polynomial'));
+    f.change('field.checksum.type','xor');assert.equal(f.control('field.checksum.invertResult').checked,true);
+    assert.equal(named(f.view.draft,'check').checksum.init,16);
+});
+
 test('field actions omit movement buttons and keep the template in a separate bottom dock', () => {
     const f=fixture();f.view.open();f.view.selectLeft('edit');
     assert.ok(!f.action('field-up'),'field-up removed');assert.ok(!f.action('field-down'),'field-down removed');
@@ -469,11 +481,76 @@ test('navigating to another card description restores focus to that field rather
     assert.equal(f.view.selectedField.id,'b.value');
 });
 
+test('property edits and undo redo preserve inspector scroll and text caret without native focus scrolling', () => {
+    const f=fixture();simulateFocusScrolling(f);f.view.open(branchingSchema());f.view._selectField(named(f.view.draft,'payload'));
+    const input=f.control('field.selector');input.focus();input.setSelectionRange(1,2);
+    f.view.propertyScroll.scrollTop=120;f.view.body.scrollTop=200;f.view.outlineHost.scrollTop=45;
+    f.change('field.endian','big');
+    for(const action of [null,'undo','redo']){
+        if(action)f.action(action).click();
+        assert.equal(f.view.propertyScroll.scrollTop,120,action||'edit');assert.equal(f.view.body.scrollTop,200);
+        assert.equal(f.view.outlineHost.scrollTop,45);assert.equal(f.document.activeElement?.getAttribute('data-control'),'field.selector');
+        assert.equal(f.document.activeElement.selectionStart,1);assert.equal(f.document.activeElement.selectionEnd,2);
+    }
+});
+
+test('branch input focus follows its stable identity through reorder undo and redo', () => {
+    for(const standalone of [false,true]){
+        const f=fixture();simulateFocusScrolling(f);f.view.open(branchingSchema());
+        if(standalone)f.root.querySelector('[data-branch-id="a"]').click();else f.view._selectField(named(f.view.draft,'payload'));
+        f.control('branch.0.label').focus();f.view.propertyScroll.scrollTop=90;f.view.body.scrollTop=220;
+        f.view._reorderBranch(named(f.view.draft,'payload'),ProtocolModel.findNode(f.view.draft,'a'),1);
+        assert.equal(f.document.activeElement?.getAttribute('data-control'),'branch.1.label');
+        assert.equal(f.document.activeElement.value,'第一个较长名称的条件分支');assert.equal(f.view.propertyScroll.scrollTop,90);
+        f.action('undo').click();assert.equal(f.document.activeElement?.getAttribute('data-control'),'branch.0.label');
+        f.action('redo').click();assert.equal(f.document.activeElement?.getAttribute('data-control'),'branch.1.label');
+        assert.equal(f.view.body.scrollTop,220);assert.equal(f.view.propertyScroll.scrollTop,90);
+    }
+});
+
+test('field drag handles retain focus and canvas scroll through sorting undo and redo', () => {
+    const f=fixture();simulateFocusScrolling(f);f.view.open({id:'drag-focus',schemaVersion:3,messages:[{id:'frame',byteLength:2,fields:[
+        {id:'first',name:'first',type:'uint8',byteLength:1},{id:'second',name:'second',type:'uint8',byteLength:1}
+    ]}]});
+    const handle=f.root.querySelector('[data-drag-id="first"]');handle.focus();f.view.body.scrollTop=150;
+    handle.dispatchEvent({type:'dragstart',bubbles:true,dataTransfer:{setData(){}}});
+    const target=f.root.querySelector('[data-field-id="second"]');target.getBoundingClientRect=()=>({left:0,right:100,top:0,bottom:100,width:100,height:100});
+    target.dispatchEvent({type:'dragover',bubbles:true,clientX:90,clientY:90});target.dispatchEvent({type:'drop',bubbles:true});
+    for(const action of [null,'undo','redo']){
+        if(action)f.action(action).click();
+        assert.equal(f.document.activeElement?.getAttribute('data-drag-id'),'first',action||'drop');
+        assert.equal(f.view.body.scrollTop,150);
+    }
+});
+
+test('undoing a newly inserted nested field selects its surviving parent rather than the first frame field', () => {
+    const f=fixture();f.view.open({id:'undo-parent',schemaVersion:3,messages:[{id:'frame',byteLength:0,fields:[
+        {id:'tag',name:'tag',type:'uint8',byteLength:1},
+        {id:'group',name:'group',type:'struct',byteLength:0,lengthFrom:'contents',fields:[]}
+    ]}]});
+    f.view._addField('uint8',named(f.view.draft,'group'));
+    f.root.querySelector(`[data-field-id="${f.view.selectedField.id}"]`).querySelector('.protocol-field-select').focus();
+    f.view.body.scrollTop=175;f.action('undo').click();
+    assert.equal(f.view.selectedField.id,'group');assert.equal(f.view.body.scrollTop,175);
+    assert.equal(f.document.activeElement?.closest('[data-field-id]')?.getAttribute('data-field-id'),'group');
+});
+
+test('undo and redo toolbar focus survives button replacement and moves to the enabled counterpart',()=>{
+    const f=fixture();simulateFocusScrolling(f);f.view.open(branchingSchema());
+    f.view._selectField(named(f.view.draft,'tag'));f.change('field.endian','big');f.change('field.endian','little');
+    f.action('undo').focus();f.view.body.scrollTop=205;f.view.libraryHost.scrollTop=75;f.action('undo').click();
+    assert.equal(f.document.activeElement?.getAttribute('data-action'),'undo');
+    assert.ok(f.root.contains(f.document.activeElement));
+    f.action('undo').click();assert.equal(f.document.activeElement?.getAttribute('data-action'),'redo');
+    f.action('redo').click();f.action('redo').click();assert.equal(f.document.activeElement?.getAttribute('data-action'),'undo');
+    assert.equal(f.view.body.scrollTop,205);assert.equal(f.view.libraryHost.scrollTop,75);
+});
+
 test('data types are always complete and scalar selection fills and locks the storage width', () => {
     const f = fixture(); f.view.open(); f.root.querySelector('[data-field-path="value"]').click();
     const values = () => f.control('field.type').children.map(option => option.value);
-    const all=['uint8','int8','uint16','int16','uint32','int32','uint64','int64','float32','float64','bool',
-        'bytes','reserved','string','struct','choice','repeat','tlv','bitfield'];
+    const all=['bitfield','uint8','int8','uint16','int16','uint32','int32','uint64','int64','float32','float64','bool',
+        'bytes','reserved','string','struct','choice','tlv'];
     assert.deepEqual(values(),all);
     const id=f.view.selectedField.id;
     for(const [type,width] of [['uint8',1],['int8',1],['uint16',2],['int16',2],['uint32',4],['int32',4],
@@ -486,6 +563,96 @@ test('data types are always complete and scalar selection fills and locks the st
     f.change('field.type','bytes');assert.equal(f.control('field.byteLength').disabled,false);
     f.change('field.byteLength','0');assert.ok(f.control('field.lengthMode'));assert.deepEqual(values(),all);
     assert.equal(f.control('field.type').children.find(option => option.value === 'struct').textContent, '结构体');
+});
+
+test('all field kinds use one repetition count and cards show per-item size and count on the same line', () => {
+    const f=fixture();f.view.open({id:'repeat-card',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'values',name:'values',type:'uint16',byteLength:2,count:3}
+    ]}]});
+    assert.equal(f.control('field.count').getAttribute('aria-label'),'重复次数');
+    assert.equal(f.root.querySelector('[data-field-id="values"]').querySelector('.protocol-field-size').textContent,'2 字节 · 重复 3 次');
+    for(const type of ['uint8','bool','bytes','string','bitfield','struct','choice','tlv']){
+        f.view._addField(type);
+        assert.equal(f.root.querySelectorAll('[data-control="field.count"]').length,1,type);
+        assert.equal(f.control('field.count').getAttribute('aria-label'),'重复次数');
+        assert.ok(!f.control('field.type').children.some(option=>option.value==='repeat'));
+    }
+});
+
+test('old repeated segments display as structures without changing their wire scope or references', () => {
+    const f=fixture();f.view.open({id:'old-repeat-view',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'items',name:'items',type:'repeat',byteLength:6,count:3,fields:[{id:'value',name:'value',type:'uint16',byteLength:2}]}
+    ]}]});
+    const before=JSON.stringify(f.view.draft);
+    assert.equal(f.control('field.type').value,'struct');assert.equal(f.control('field.count').value,'3');
+    assert.ok(!f.control('field.repeatCount'));assert.match(f.view.propertyHost.textContent,/旧.*整个重复区域/);
+    assert.equal(JSON.stringify(f.view.draft),before);
+    assert.deepEqual([...Protocol.encode(f.view.draft,'frame',{items:[{value:1},{value:2},{value:3}]})],[1,0,2,0,3,0]);
+});
+
+test('new structures switch to segment-end repetition without changing their element width', () => {
+    const f=fixture();f.view.open({id:'struct-to-end',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'items',name:'items',type:'struct',byteLength:2,count:3,fields:[{id:'value',name:'value',type:'uint16',byteLength:2}]}
+    ]}]});
+    f.change('field.count','-1');assert.equal(f.view.selectedField.type,'struct');
+    assert.equal(f.view.selectedField.byteLength,2);assert.equal(f.view.selectedField.until,'end');assert.equal(f.control('field.count').value,'-1');
+    assert.match(f.root.querySelector('[data-field-id="items"]').querySelector('.protocol-field-size').textContent,/2 字节.*至段末/);
+    assert.equal(f.view.applyButton.disabled,false);
+    assert.deepEqual(Protocol.decode([1,0,2,0,3,0],f.view.draft).fields.items,[{value:1},{value:2},{value:3}]);
+});
+
+test('one count input preserves numeric and expression configurations and enables literal minus-one repetition',()=>{
+    for(const count of [3,'3','item_count']){
+        const f=fixture();f.view.open({id:'count-mode',schemaVersion:3,messages:[{id:'frame',byteLength:7,fields:[
+            {id:'n',name:'item_count',type:'uint8',byteLength:1},
+            {id:'values',name:'values',type:'uint16',byteLength:2,count}
+        ]}]});f.view._selectField(named(f.view.draft,'values'));
+        const before=JSON.stringify(f.view.draft);
+        assert.ok(!f.control('field.repeatMode'));
+        assert.equal(f.control('field.count').value,String(count));assert.equal(JSON.stringify(f.view.draft),before);
+        f.change('field.count',String(count));assert.equal(named(f.view.draft,'values').count,count);
+        f.change('field.count','-1');assert.equal(named(f.view.draft,'values').until,'end');
+        assert.equal(f.control('field.count').value,'-1');assert.equal(named(f.view.draft,'values').id,'values');
+        assert.deepEqual(Protocol.decode([3,1,0,2,0,3,0],f.view.draft).fields.values,[1,2,3]);
+        const endSnapshot=JSON.stringify(f.view.draft);f.view._render();assert.equal(JSON.stringify(f.view.draft),endSnapshot);
+        assert.equal(f.control('field.count').value,'-1');
+        f.change('field.count','0');assert.equal(named(f.view.draft,'values').count,0);assert.equal(named(f.view.draft,'values').until,undefined);
+    }
+});
+
+test('unavailable segment-end modes explain the conflicting field and never change a saved framing role',()=>{
+    const f=fixture();f.view.open({id:'end-conflict',schemaVersion:3,messages:[{id:'frame',byteLength:2,fields:[
+        {id:'sync',name:'sync_bytes',type:'fixed',bytes:[170],byteLength:1,framingRole:'sync'},
+        {id:'tail',name:'tail',type:'uint8',byteLength:1}
+    ]}]});f.view._selectField(named(f.view.draft,'sync_bytes'));
+    const before=JSON.stringify(f.view.draft);
+    assert.ok(!f.control('field.repeatMode'));
+    assert.match(f.control('field.repeatReason').textContent,/帧头|同步/);
+    assert.equal(JSON.stringify(f.view.draft),before);
+    f.change('field.count','-1');assert.equal(JSON.stringify(f.view.draft),before);
+    assert.equal(f.control('field.count').getAttribute('aria-invalid'),'true');
+    assert.deepEqual(f.control('field.framingRole').children.map(option=>option.textContent),['仅验证固定字节','帧头','帧尾']);
+    f.view.open({id:'missing-item-size',schemaVersion:3,messages:[{id:'frame',byteLength:4,fields:[{id:'data',name:'data',type:'bytes',byteLength:0}]}]});
+    assert.ok(!f.control('field.repeatMode'));
+    assert.match(f.control('field.repeatReason').textContent,/长度|边界/);
+});
+
+test('negative and fractional count expressions are rejected without changing field references or becoming until-end',()=>{
+    const f=fixture();f.view.open({id:'count-errors',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'values',name:'values',type:'uint16',byteLength:2,count:3}
+    ]}]});
+    const before=JSON.stringify(f.view.draft);
+    for(const text of ['1 - 2','(-1)','-2','-1.0','1.5']){
+        f.change('field.count',text);assert.equal(JSON.stringify(f.view.draft),before,text);
+        assert.equal(f.control('field.count').getAttribute('aria-invalid'),'true',text);
+        assert.match(f.control('field.repeatReason').textContent,/非负整数|负数/);
+    }
+    f.change('field.count','3');assert.equal(JSON.stringify(f.view.draft),before);
+    assert.equal(f.control('field.repeatReason').hidden,true);
+    assert.equal(f.view.alert.hidden,true);
+    f.change('field.count','2 + 1');assert.equal(named(f.view.draft,'values').count,'2 + 1');
+    assert.equal(f.control('field.count').getAttribute('aria-invalid'),'false');
+    assert.equal(named(f.view.draft,'values').until,undefined);
 });
 
 test('non-scalar types keep editable widths and length controls while arrays retain per-element widths', () => {
@@ -826,6 +993,18 @@ function fixture(options = {}) {
             node.dispatchEvent({ type, bubbles: true }); }
     };
 }
+function simulateFocusScrolling(f) {
+    const create=f.document.createElement;
+    f.document.createElement=tag=>{
+        const node=create(tag),focus=node.focus.bind(node);
+        node.focus=options=>{
+            focus();if(options?.preventScroll)return;
+            for(let parent=node.parentNode;parent;parent=parent.parentNode)
+                if(parent===f.view.propertyScroll||parent===f.view.body||parent===f.view.outlineHost)parent.scrollTop=0;
+        };
+        return node;
+    };
+}
 const settle = async () => { for (let index = 0; index < 10; index++) await Promise.resolve(); };
 
 test('constraint page edits weak defaults, stages and backfill without changing the wire structure', () => {
@@ -1018,7 +1197,7 @@ test('zero-byte field properties require a visible length source and support sta
 
 test('counted TLV containers can explicitly derive their variable size from internal items', () => {
     const f = fixture(); f.view.open(); f.view._addField('tlv');
-    f.change('field.repeatMode', 'fixed'); f.change('field.repeatCount', '2');
+    f.change('field.count', '2');
     assert.ok(f.control('field.lengthMode').children.some(option => option.value === 'contents'));
     f.change('field.lengthMode', 'contents');
     assert.equal(f.view.selectedField.lengthFrom, 'contents');
@@ -1343,7 +1522,9 @@ test('branch, repeat, TLV and leftover controls write canonical schema attribute
     f.action('branch-0-add').click(); f.change('field.name', 'branch_payload');
     let choice = f.view.draft.messages[0].fields.at(-1);
     assert.deepEqual(choice.branches[0].range, [2, 5]); assert.equal(choice.branches[0].fields[0].name, 'branch_payload');
-    f.view._addField('repeat'); f.change('field.repeatMode', 'end');
+    f.view.open({id:'old-repeat-controls',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'repeated',name:'repeated',type:'repeat',byteLength:6,count:3,fields:[{id:'item',name:'item',type:'uint16',byteLength:2}]}
+    ]}]});f.change('field.count', '-1');
     assert.equal(f.view.draft.messages[0].fields.at(-1).until, 'end');
     f.view._addField('tlv'); f.change('tlv.0.type', 'uint16'); f.change('tlv.1.endian', 'big'); f.change('field.lengthIncludesHeader', true);
     f.change('field.leftover', 'padding'); f.change('field.paddingByte', '255'); f.change('field.invalidItem', 'skip');

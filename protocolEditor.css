@@ -125,6 +125,7 @@
 .protocol-field-card .protocol-field-select { grid-column: 2; min-width: 0; min-height: 24px; text-align: left; border: 0; background: transparent; font-size: var(--ui-label-size); font-weight: 600; line-height: 1.2; padding: 2px 0; overflow-wrap: anywhere; }
 .protocol-field-meta { grid-column: 2 / -1; grid-row: 2; display: grid; gap: 0; white-space: normal; font-size: var(--ui-note-size); line-height: 1.15; color: var(--protocol-muted); font-variant-numeric: tabular-nums; }
 .protocol-field-meta-line { display: block; min-width: 0; overflow-wrap: anywhere; }
+.protocol-field-size { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .protocol-field-condition { grid-column: 2 / -1; color: #eac891; font-size: var(--ui-note-size); line-height: 1.2; max-width: 100%; overflow-wrap: anywhere; }
 .protocol-field-usage { grid-column: 2 / -1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
 .protocol-field-card .protocol-usage-button { max-width: 100%; padding: 1px 0; min-height: 20px; border: 0; background: transparent; color: #bddcff; text-align: left; font-size: var(--ui-note-size); line-height: 1.25; overflow-wrap: anywhere; }

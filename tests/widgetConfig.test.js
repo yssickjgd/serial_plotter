@@ -217,13 +217,13 @@ test('legacy sequence paths migrate for mappings, visible fields and both sendin
     config.send.commands = [{ id: 'send1', type: 'command', name: 'old', mode: 'protocol', content: '', protocol: config.send.protocol }];
     config.widgets.push({ id: 'byte-1', type: 'byte', title: 'Byte', settings: { protocolFieldPaths: ['header.seq'] } });
     const result = validateWorkspaceConfig(config);
-    assert.equal(result.dataEngine.protocols[0].headerFields[0].name, 'rm_seq');
+    assert.equal(result.dataEngine.protocols[0].headerFields[0].name, 'seq');
     assert.equal(result.dataEngine.protocols[0].headerFields[0].id, 'seq-id');
-    assert.equal(result.dataEngine.mappings[0].path, 'header.rm_seq');
-    assert.equal(result.widgets[0].settings.protocolFieldPaths[0], 'header.rm_seq');
-    assert.equal(result.send.protocol.fields.header.rm_seq, 5);
-    assert.equal(JSON.parse(result.send.protocol.fieldsText).header.rm_seq, 5);
-    assert.equal(result.send.commands[0].protocol.fields.header.rm_seq, 5);
+    assert.equal(result.dataEngine.mappings[0].path, 'header.seq');
+    assert.equal(result.widgets[0].settings.protocolFieldPaths[0], 'header.seq');
+    assert.equal(result.send.protocol.fields.header.seq, 5);
+    assert.equal(JSON.parse(result.send.protocol.fieldsText).header.seq, 5);
+    assert.equal(result.send.commands[0].protocol.fields.header.seq, 5);
     assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(result))), result);
 });
 

@@ -2,7 +2,7 @@
 
 网页端实时数据可视化分析工具，支持串口、TCP 和 UDP 数据流的解析、监视与波形展示。
 
-近期更新：[协议编辑器与数据引擎更新（2026-10-24）](docs/updates/2026-10-24-protocol-editor.md)。
+近期更新：[协议编辑器与 RoboMaster 2027 模板更新（2026-10-29）](docs/updates/2026-10-29-protocol-editor-rm2027.md)。
 
 ![License](https://img.shields.io/badge/License-CC%20BY%20NC%20SA%204.0-blue.svg)![JavaScript](https://img.shields.io/badge/JavaScript-vanilla-yellow.svg)![Platform](https://img.shields.io/badge/platform-Web-green.svg)
 
@@ -34,7 +34,7 @@ SerialPlotter 是一个无需后端框架的浏览器端工具，适合调试单
 1. 在“帧解析”选择 Raw_Data、Data_Array 或 Self_Defined_Frame，并编辑草稿。
 2. 点击“校验草稿”核对参数，点击“应用解析配置”后才改变采集规则；选择控件不会应用或覆盖草稿。
 3. “重建历史数据”开启时异步重建受影响输出；关闭时从当前字节位置开始。Hex／文本查看规则不改变数值或协议的逻辑帧边界。
-4. 自定义协议可使用完整 RoboMaster 2026 串口模板，或打开宽面板编辑结构、字段、条件和 CRC，支持 JSON 导入导出及 Hex 样例的字段／位定位。
+4. 自定义协议可使用完整 RoboMaster 2027 V1.0.0 串口模板，或打开宽面板编辑结构、字段、条件和 CRC，支持 JSON 导入导出及 Hex 样例的字段／位定位。
 5. 字段映射须明确指定已有通道或新建通道；不映射的字段仍完整保留、可查看和导出。64 位整数保留精确值，超出安全范围时不投影到浮点数值通道。
 6. 自定义帧同时产生各消息独立序列和默认 1000 Hz 的同步表。同步表采用最近值保持，可设置逐字段有效期；缺失／过期为空，暂停或断开期间不补点。同步 FFT 使用配置的采样率，并不代表设备真实更新率。
 

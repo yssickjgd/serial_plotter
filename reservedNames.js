@@ -13,8 +13,8 @@
             { names: ['REMAINING','PARENT_REMAINING'], category: '协议变量', description: '当前段尚余字节数，以及父级传入的剩余范围；只能在有界范围内使用。', scopes: ['channel','field'] },
             { names: ['CURRENT','PARENT'], category: '协议作用域', description: '当前及父级字段作用域，例如 PARENT.data_length。', scopes: ['channel','field'] },
             { names: ['HEADER'], category: '协议作用域', description: '旧协议公共头字段作用域；真实结构体使用自己的变量名。', scopes: ['channel','field'] },
-            { names: ['INDEX'], category: '协议变量', description: '重复段／TLV 当前条目的索引，从 0 开始。', scopes: ['channel','field'] },
-            { names: ['SEQ','SEQUENCE'], category: '协议变量', description: '结构化发送的自动序号；线上字段可叫 rm_seq，数值来源绑定 SEQ。', scopes: ['channel','field'] },
+            { names: ['INDEX'], category: '协议变量', description: '重复字段或 TLV 当前条目的索引，从 0 开始。', scopes: ['channel','field'] },
+            { names: ['SEQ'], category: '协议变量', description: '结构化发送的自动序号；字段通过 valueSource: "SEQ" 显式绑定，仅在成功发送后推进。普通字段名称可自行定义。', scopes: ['channel','field'] },
             { names: ['TRUE','FALSE'], category: '协议常量', description: '布尔常量，用于条件表达式。', scopes: ['channel','field'] },
             { names: ['MIN','MAX','ABS'], category: '协议函数', description: '最小值、最大值、绝对值；例如 MIN(data_length, 64)。', scopes: ['channel','field'] },
             { names: ['LEN'], category: '协议函数', description: '返回指定字段或数据段实际编码所占的字节数，如 LEN(payload)；不是数组元素数或字符数，包含该段内的固定内容、校验和填充。普通表达式引用已读取字段，整帧长度表达式只引用可独立确定长度的段，禁止循环依赖。', scopes: ['channel','field'] },
@@ -30,7 +30,7 @@
         return Object.freeze({ version: 2, definitions: Object.freeze(definitions), conflict, error,
             channelFunctions: Object.freeze(['DIFF','INT','FILTER']), channelVariables: Object.freeze(['X','Y','N']),
             protocolFunctions: Object.freeze(['MIN','MAX','ABS','LEN']),
-            protocolVariables: Object.freeze(['TRUE','FALSE','FRAME_LENGTH','PAYLOAD_LENGTH','REMAINING','PARENT_REMAINING','PARENT','CURRENT','HEADER','INDEX','SEQUENCE','SEQ']),
+            protocolVariables: Object.freeze(['TRUE','FALSE','FRAME_LENGTH','PAYLOAD_LENGTH','REMAINING','PARENT_REMAINING','PARENT','CURRENT','HEADER','INDEX','SEQ']),
             createFactorySource: () => createReservedNames.toString() });
     }
     const ReservedNames = createReservedNames();

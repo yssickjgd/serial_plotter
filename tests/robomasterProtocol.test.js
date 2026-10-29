@@ -4,9 +4,40 @@ const { createHash } = require('node:crypto');
 const { Protocol } = require('../protocolEngine');
 const { RoboMasterProtocol } = require('../robomasterProtocol');
 
-test('V2.0.0 preset uses the official payload-only length and latest serial command catalog', () => {
+test('documented packed fields use explicit bitfield editors with complete widths and reserved slices', () => {
+    const { ProtocolModel } = require('../protocolModel');
+    const schema = RoboMasterProtocol.createSchema();
+    const rows = ProtocolModel.flattenFields(schema).filter(row => row.field.bits?.length);
+    assert.equal(rows.length, 20);
+    for (const { field } of rows) {
+        assert.equal(field.type, 'bitfield', field.id);
+        const occupied = new Set();
+        for (const bit of field.bits) {
+            if (bit.name.startsWith('reserved')) assert.equal(bit.type, 'reserved', bit.id);
+            for (let index = bit.offset; index < bit.offset + bit.length; index++) {
+                assert.ok(!occupied.has(index), field.id + ' overlapping bit ' + index);
+                occupied.add(index);
+            }
+        }
+        assert.equal(occupied.size, field.byteLength * 8, field.id + ' missing bit definition');
+    }
+    const game = rows.find(row => row.field.id === 'rm2026.0001.game_type_progress').field;
+    assert.equal(game.byteLength, 1);
+    const encoded = Protocol.encode(schema, 'rm2026.0001', {
+        game_type_progress: { game_type: 1, game_progress: 4 }, stage_remain_time: 300, SyncTimeStamp: 123n
+    });
+    assert.deepEqual(encoded, frame(1, [0x41, 0x2c, 1, 123, 0, 0, 0, 0, 0, 0, 0]));
+    const record = Protocol.decode(encoded, schema);
+    assert.equal(record.values['game_type_progress.game_progress'], 4);
+    assert.equal(record.flatFields.find(item => item.path === 'game_type_progress').type, 'bitfield');
+    const event = Protocol.decode(frame(0x101, [2, 0, 0, 0xc0, 0, 0, 0, 0xf0]), schema);
+    assert.equal(event.values['event_data'], 0xc0000002);
+    assert.equal(event.flatFields.find(item => item.path === 'event_data_2.unspecified').numeric, null);
+});
+
+test('2027 V1.0.0 preset uses the official payload-only length and latest serial command catalog', () => {
     const s=RoboMasterProtocol.createSchema();
-    assert.equal(s.source.version,'V2.0.0（20260626）');assert.equal(s.source.pages,'4–43');assert.equal(s.source.crcPages,'75–78');
+    assert.equal(s.source.version,'V1.0.0（20261029）');assert.equal(s.source.pages,'3–45');assert.equal(s.source.crcPages,'75–78');
     assert.equal(s.rules.find(rule=>rule.type==='length').value,'LEN(payload)');
     const bytes=Protocol.encode(s,'rm2026.0002',{winner:1});
     assert.equal(bytes[1],1);assert.equal(bytes.length,10);
@@ -14,51 +45,53 @@ test('V2.0.0 preset uses the official payload-only length and latest serial comm
     for(const command of [0x304,0xf01,0xf02])assert.ok(!RoboMasterProtocol.commands.some(item=>item.command===command),command.toString(16));
 });
 
-test('V2.0.0 HP, firing limit, sentry uint64 status and enlarged raw records follow independent offsets', () => {
-    checkPayloadLayout(3,20,v=>{v.setInt16(8,-2345,true);v.setUint16(16,1234,true);v.setUint16(18,4321,true);},
-        [['damage_difference',-2345,8,2],['enemy_outpost_HP',1234,16,2],['enemy_base_HP',4321,18,2]]);
+test('2027 HP, firing limit, sentry uint64 status and enlarged raw records follow independent offsets', () => {
+    checkPayloadLayout(3,24,v=>{v.setInt16(8,-2345,true);v.setUint16(16,1234,true);v.setUint16(18,4321,true);},
+        [['damage_difference',-2345,8,2],['outpost_B_HP',1234,16,2],['enemy_base_HP',4321,18,2]]);
     checkPayloadLayout(0x201,17,v=>{v.setFloat32(12,30.5,true);v.setUint8(16,5);},
         [['bullet_speed_limit',30.5,12,4],['power_management.gimbal_output',true,16,1,0,1],['power_management.chassis_output',false,16,1,1,1]]);
     checkPayloadLayout(0x20d,14,v=>v.setBigUint64(6,0xfedcba9876543210n,true),
         [['sentry_info_3',0xfedcba9876543210n,6,8],['sentry_info_3.strengthened_movement_seconds',0xdc,12,1,48,8]]);
-    for(const [command,size] of [[0x310,300],[0x311,30]]) {
+    for(const [command,size] of [[0x310,300],[0x311,60]]) {
         const bytes=Uint8Array.from({length:size},(_,i)=>i&255);
         assert.deepEqual(Protocol.decode(frame(command,bytes,0,false),RoboMasterProtocol.compiled).fields.data,bytes);
     }
 });
 
-test('V2.0.0 radar wireless messages follow hand-built offsets, unsigned widths and documented enums', () => {
-    checkPayloadLayout(0xa01,24,v=>{v.setUint16(16,12500,true);v.setUint16(22,28000,true);},
-        [['opponent_aerial_position_x',12500,16,2],['opponent_sentry_position_y',28000,22,2]]);
+test('2027 radar wireless messages follow hand-built offsets, unsigned widths and documented enums', () => {
+    checkPayloadLayout(0xa01,24,v=>{v.setUint16(0,12500,true);v.setUint16(22,28000,true);},
+        [['opponent_heavyengineer_position_x',12500,0,2],['opponent_sentry_position_y',28000,22,2]]);
     checkPayloadLayout(0xa02,12,v=>{v.setUint16(0,12345,true);v.setUint16(10,54321,true);},
-        [['opponent_hero_HP',12345,0,2],['opponent_sentry_HP',54321,10,2]]);
-    checkPayloadLayout(0xa03,10,v=>{v.setUint16(6,0xffff,true);v.setUint16(8,0x8123,true);},
-        [['opponent_aerial_projectile_allowance',65535,6,2],['opponent_sentry_projectile_allowance',0x8123,8,2]]);
-    const {record:status}=checkPayloadLayout(0xa04,8,v=>{v.setUint16(0,60000,true);v.setUint32(4,0xabcd0000|(1<<1)|(3<<4)|(2<<6)|(1<<15),true);},
-        [['opponent_remaining_gold_coin',60000,0,2],['opponent_status.central_highland',1,4,1,1,2],
-            ['opponent_status.fortress_buff',3,4,1,4,2],['opponent_status.outpost_buff',2,4,1,6,2],
-            ['opponent_status.crossing_highway_upper',true,5,1,15,1]]);
-    assert.equal(status.flatFields.find(f=>f.path==='opponent_status.central_highland').label,'对方占领');
-    assert.equal(status.flatFields.find(f=>f.path==='opponent_status.outpost_buff').label,'己方占领');
-    assert.equal(status.fields.opponent_status>>>16,0xabcd,'undefined upper bits remain intact');
-    const {record:buff}=checkPayloadLayout(0xa05,41,v=>{v.setUint16(1,0x8123,true);v.setUint16(12,0xfedc,true);
+        [['opponent_heavyengineer_HP',12345,0,2],['opponent_sentry_HP',54321,10,2]]);
+    checkPayloadLayout(0xa03,10,v=>{v.setUint16(0,0xffff,true);v.setUint16(8,0x8123,true);},
+        [['opponent_heavyengineer_projectile_allowance',65535,0,2],['opponent_sentry_projectile_allowance',0x8123,8,2]]);
+    const {record:status}=checkPayloadLayout(0xa04,12,v=>{v.setUint16(0,60000,true);v.setUint32(4,((1<<14)|(3<<1)|(2<<18)|0xab000000)>>>0,true);},
+        [['opponent_remaining_gold_coin',60000,0,2],['opponent_status.R_central_highland',1,5,1,14,2],
+            ['opponent_status.R_fortress_buff',3,4,1,1,3],['opponent_status.R_outpost_buff',2,6,1,18,3]]);
+    assert.equal(status.flatFields.find(f=>f.path==='opponent_status.R_central_highland').label,'对方激活');
+    assert.equal(status.flatFields.find(f=>f.path==='opponent_status.R_outpost_buff').label,'己方激活');
+    assert.equal(status.fields.opponent_status>>>24,0xab,'undefined upper bits remain intact');
+    const {record:buff}=checkPayloadLayout(0xa05,47,v=>{v.setUint16(1,0x8123,true);v.setUint16(19,0xfedc,true);
         v.setUint16(29,0xabcd,true);v.setUint8(35,6);v.setUint8(36,2);v.setUint8(40,3);},
-        [['hero_cooling_buff',0x8123,1,2],['engineer_attack_buff',0xfedc,12,2],['sentry_cooling_buff',0xabcd,29,2],
-            ['sentry_stance',6,35,1],['hero_status',2,36,1],['sentry_status',3,40,1]]);
-    assert.equal(buff.flatFields.find(f=>f.path==='hero_status').label,'无敌但不虚弱');
+        [['heavyengineer_cooling_buff',0x8123,1,2],['infantry_3_attack_buff',0xfedc,19,2],['sentry_cooling_buff',0xabcd,29,2],
+            ['sentry_stance',6,35,1],['heavyengineer_status',2,36,1],['sentry_status',3,40,1]]);
+    assert.equal(buff.flatFields.find(f=>f.path==='heavyengineer_status').label,'无敌但不虚弱');
     assert.equal(buff.flatFields.find(f=>f.path==='sentry_status').label,'无敌且虚弱');
     checkPayloadLayout(0xa06,6,(v,bytes)=>bytes.set(Buffer.from('A0b9Z7','ascii')),[['password','A0b9Z7',0,6]]);
 });
 
-test('V2.0.0 marker bits and relocated RFID references retain their precise meaning', () => {
-    const names=['enemy_hero_vulnerable','enemy_engineer_vulnerable','enemy_standard_3_vulnerable','enemy_standard_4_vulnerable',
-        'enemy_aerial_marked','enemy_sentry_vulnerable','ally_hero_marked','ally_engineer_marked','ally_standard_3_marked','ally_standard_4_marked',
-        'ally_aerial_marked','ally_sentry_marked','enemy_aerial_targeted_by_ally_radar_laser','enemy_aerial_countered',
-        'ally_aerial_targeted_by_enemy_radar_laser','ally_aerial_countered'];
+test('2027 marker bits, reserved slices and relocated RFID references retain their precise meaning', () => {
+    const names=['enemy_heavyengineer_vulnerable','reserved_1','enemy_standard_3_vulnerable','enemy_standard_4_vulnerable',
+        'reserved_4','enemy_sentry_vulnerable','ally_heavyengineer_marked','reserved_7','ally_standard_3_marked','ally_standard_4_marked',
+        'reserved_10','ally_sentry_marked','reserved_12','reserved_13','reserved_14','reserved_15'];
     for(let index=0;index<16;index++) {
         const payload=new Uint8Array(2);new DataView(payload.buffer).setUint16(0,2**index,true);
         const record=Protocol.decode(frame(0x20c,payload),RoboMasterProtocol.compiled);
-        for(let bit=0;bit<16;bit++)assert.equal(record.values['mark_progress.'+names[bit]],bit===index,names[bit]);
+        for(let bit=0;bit<16;bit++) {
+            const path='mark_progress.'+names[bit],reserved=names[bit].startsWith('reserved');
+            assert.equal(record.values[path],reserved?Number(bit===index):bit===index,names[bit]);
+            if(reserved)assert.equal(record.flatFields.find(field=>field.path===path).numeric,null);
+        }
     }
     const schema=RoboMasterProtocol.createSchema(),row=require('../protocolModel').ProtocolModel.flattenFields(schema)
         .find(row=>row.field.id==='rm2026.0209.rfid_status_2');
@@ -99,7 +132,7 @@ test('default template exposes exclusive length and checksum constraints with ex
         const field=[...header.fields,...root.fields].find(field=>field.id===rule.targetFieldId);
         assert.equal(field.contentConstraint,'checksum');
         assert.equal(rule.checksum.start.edge,'start');assert.equal(rule.checksum.end.edge,'end');
-        assert.equal(rule.checksum.end.fieldId,field.name==='CRC8'?header.fields.find(field=>field.name==='rm_seq').id:payload.id);
+        assert.equal(rule.checksum.end.fieldId,field.name==='CRC8'?header.fields.find(field=>field.name==='seq').id:payload.id);
     }
     const encoded=Protocol.encode(s,'rm2026.0002',{winner:1});
     assert.deepEqual(encoded,frame(2,[1]));assert.equal(Protocol.decode(encoded,s).valid,true);
@@ -201,8 +234,8 @@ test('RM2026 independently constructed game-status frame retains nibble fields a
     assert.equal(record.values['game_type_progress.game_progress'], 4);
     assert.equal(record.fields.stage_remain_time, 300);
     assert.equal(record.fields.SyncTimeStamp, 9007199254740993n);
-    assert.equal(record.header.rm_seq, 7);
-    assert.equal(record.flatFields.find(field => field.path === 'header.rm_seq').fieldId, 'robomaster-2026-v1.header.seq');
+    assert.equal(record.header.seq, 7);
+    assert.equal(record.flatFields.find(field => field.path === 'header.seq').fieldId, 'robomaster-2026-v1.header.seq');
     assert.deepEqual(Protocol.encode(RoboMasterProtocol.compiled, record.messageId, record.fields, { sequence: 7 }), golden);
     assert.equal(golden[4], 0x81);
 });
@@ -211,37 +244,36 @@ test('legacy RoboMaster imports migrate automatic sequence names without changin
     const old = JSON.parse(JSON.stringify(RoboMasterProtocol.legacySchema)); delete old.symbolVersion;
     // Saved official-layout protocols keep their own length convention on import.
     old.framing.length.adjustment = 9; old.framing.maxLength = 65544;
-    const seq = old.headerFields.find(field => field.name === 'rm_seq'); seq.name = 'seq'; delete seq.valueSource;
+    const seq = old.headerFields.find(field => field.name === 'seq'); seq.name = 'seq'; delete seq.valueSource;
     const migration = Protocol.migrateSymbols(old), compiled = Protocol.compile(old);
-    assert.equal(compiled.schema.symbolVersion, 2);
+    assert.equal(compiled.schema.symbolVersion, 3);
     assert.equal(compiled.headerFields.find(field => field.id === seq.id).valueSource, 'SEQ');
-    assert.ok(migration.renames.some(item => item.fieldId === seq.id && item.pathBefore === 'header.seq' && item.pathAfter === 'header.rm_seq'));
+    assert.ok(!migration.renames.some(item => item.fieldId === seq.id));
     const golden = frame(2, [1], 255, false);
     assert.deepEqual(Protocol.encode(compiled, 'rm2026.0002', { winner: 1 }, { sequence: 255 }), golden);
-    assert.equal(Protocol.decode(golden, compiled).header.rm_seq, 255);
+    assert.equal(Protocol.decode(golden, compiled).header.seq, 255);
 });
 
 test('first-chapter catalog covers every root command and documented interaction subcommand', () => {
     const roots = RoboMasterProtocol.legacySchema.messages;
     const expected = [1, 2, 3, 0x101, 0x104, 0x105, 0x201, 0x202, 0x203, 0x204,
         0x206, 0x207, 0x208, 0x209, 0x20a, 0x20b, 0x20c, 0x20d, 0x20e,
-        0x301, 0x302, 0x303, 0x305, 0x306, 0x307, 0x308, 0x309, 0x310, 0x311,0xa01,0xa02,0xa03,0xa04,0xa05,0xa06];
+        0x301, 0x303, 0x305, 0x307, 0x308, 0x310, 0x311,0xa01,0xa02,0xa03,0xa04,0xa05,0xa06];
     assert.deepEqual([...new Set(roots.map(message => message.command))].sort((a, b) => a - b), expected);
     const children = roots.find(message => message.command === 0x301).dispatch.messages;
     for (const command of [0x100, 0x101, 0x102, 0x103, 0x104, 0x110, 0x120, 0x121])
         assert.ok(children.some(child => child.command === command));
     assert.ok(children.some(child => child.commandRange?.[0] === 0x200 && child.commandRange[1] === 0x2ff));
-    assert.equal(RoboMasterProtocol.source.version, 'V2.0.0（20260626）');
+    assert.equal(RoboMasterProtocol.source.version, 'V1.0.0（20261029）');
 });
 
-test('document conflicts use detailed layouts; legacy bounded imports retain extensions', () => {
+test('resolved document conflicts need no layout selection; legacy bounded imports retain extensions', () => {
     for (const [command, length] of [[0x203, 12], [0x303, 12], [0x307, 105]]) {
         const id = `rm2026.${command.toString(16).padStart(4, '0')}`;
         const fields = command === 0x307 ? { delta_x: Array(49).fill(-1), delta_y: Array(49).fill(2) } : {};
-        assert.throws(() => Protocol.encode(RoboMasterProtocol.compiled, id, fields), /layout/i);
-        const encoded = Protocol.encode(RoboMasterProtocol.compiled, id, fields, { layout: 'detail' });
+        const encoded = Protocol.encode(RoboMasterProtocol.compiled, id, fields);
         assert.equal(encoded.length, length + 9);
-        assert.ok(Protocol.decode(encoded, RoboMasterProtocol.compiled).warnings.some(warning => warning.code === 'document-conflict'));
+        assert.deepEqual(Protocol.decode(encoded, RoboMasterProtocol.compiled).warnings, []);
     }
     const extended = frame(0x203, Array(16).fill(0));
     // With structural framing, unconfigured trailing bytes cannot extend a known
@@ -282,7 +314,7 @@ test('radar command, UTF16 client message and unknown bytes remain lossless', ()
             password: 'ABC123' } }, { layout: 'detail' });
     const record = Protocol.decode(radar, RoboMasterProtocol.compiled);
     assert.equal(record.fields.content.password, 'ABC123');
-    assert.equal(record.payloadLength, 14);
+    assert.equal(record.payloadLength, 19);
     const custom = Protocol.encode(RoboMasterProtocol.compiled, 'rm2026.0308',
         { sender_id: 1, receiver_id: 0x101, user_data: '能量机关' });
     assert.equal(Protocol.decode(custom, RoboMasterProtocol.compiled).fields.user_data, '能量机关');
@@ -329,18 +361,18 @@ test('every fixed first-chapter command layout encodes, independently checks, an
     }
 });
 
-test('event enums distinguish unspecified occupation state 3 from documented shared occupation', () => {
-    // PDF p11, table 1-8: only bits 23–24 and 25–26 define state 3.
-    const payload = new Uint8Array(4);
-    new DataView(payload.buffer).setUint32(0, (3 << 7) | (3 << 23) | (3 << 25) | (3 << 27), true);
+test('event enums distinguish undefined control state 3 from documented simultaneous activation', () => {
+    // 2027 PDF pp10–11: control states only define 0–2; activation fields define 3.
+    const payload = new Uint8Array(8);
+    new DataView(payload.buffer).setUint32(0, ((3 << 5) | (3 << 25) | (3 << 28)) >>> 0, true);
     const record = Protocol.decode(frame(0x101, payload), RoboMasterProtocol.compiled);
-    for (const name of ['central_highland', 'outpost_buff']) {
+    for (const name of ['R_outpost_control']) {
         const field = record.flatFields.find(item => item.path === `event_data.${name}`);
         assert.equal(field.value, 3);
         assert.equal(field.label, undefined, `${name}: state 3 has no PDF definition`);
     }
-    for (const name of ['central_buff', 'fortress_buff'])
-        assert.equal(record.flatFields.find(item => item.path === `event_data.${name}`).label, '双方占领');
+    for (const name of ['R_fortress_buff', 'B_outpost_buff'])
+        assert.equal(record.flatFields.find(item => item.path === `event_data.${name}`).label, '双方同时激活');
 });
 
 // Independently written payloads follow the PDF tables/packed definitions, not
@@ -374,48 +406,47 @@ function checkPayloadLayout(command, length, write, expected, child) {
     return { record, payload };
 }
 
-test('V2 PDF pp9–11: packed nibbles, unaligned uint64 and last HP slots', () => {
+test('2027 PDF pp7–9: packed nibbles, unaligned uint64 and HP slots', () => {
     checkPayloadLayout(1, 11, view => {
         view.setUint8(0, 0x45); view.setUint16(1, 0xff01, true);
         view.setBigUint64(3, 0xfedcba9876543210n, true);
     }, [['game_type_progress.game_type', 5, 0, 1, 0, 4],
         ['game_type_progress.game_progress', 4, 0, 1, 4, 4],
         ['stage_remain_time', 0xff01, 1, 2], ['SyncTimeStamp', 0xfedcba9876543210n, 3, 8]]);
-    checkPayloadLayout(3, 20, view => {
+    checkPayloadLayout(3, 24, view => {
         view.setUint16(10, 0xff00, true); view.setUint16(14, 0x8001, true);
     }, [['ally_7_robot_HP', 0xff00, 10, 2], ['ally_base_HP', 0x8001, 14, 2]]);
 });
 
-test('V2 PDF pp11–16: event bit ranges, robot status, reserved float, position and unaligned buffs', () => {
-    checkPayloadLayout(0x101, 4, view => view.setUint32(0, (2 << 3) | (5 << 20) | (3 << 25), true),
-        [['event_data.small_rune', 2, 0, 1, 3, 2], ['event_data.enemy_dart_target', 5, 2, 1, 20, 3],
-            ['event_data.fortress_buff', 3, 3, 1, 25, 2]]);
+test('2027 PDF pp10–15: event bit ranges, robot status, reserved bytes, position and unaligned buffs', () => {
+    checkPayloadLayout(0x101, 8, view => {view.setUint32(0, (2 << 1) | (3 << 25), true);view.setUint32(4,5<<13,true);},
+        [['event_data.small_rune', 2, 0, 1, 1, 2], ['event_data_2.enemy_dart_target', 5, 5, 1, 13, 3],
+            ['event_data.B_outpost_buff', 3, 3, 1, 25, 3]]);
     checkPayloadLayout(0x201, 17, view => {
         view.setUint16(2, 0xf001, true); view.setUint16(10, 0x8123, true); view.setUint8(16, 5);
     }, [['current_HP', 0xf001, 2, 2], ['chassis_power_limit', 0x8123, 10, 2],
         ['power_management.shooter_output', true, 16, 1, 2, 1]]);
     checkPayloadLayout(0x202, 14, view => {
         view.setFloat32(4, -12.5, true); view.setUint16(8, 0x8765, true); view.setUint16(12, 0xfffe, true);
-    }, [['reserved_3', -12.5, 4, 4], ['buffer_energy', 0x8765, 8, 2], ['shooter_42mm_barrel_heat', 0xfffe, 12, 2]]);
+    }, [['reserved_3', Uint8Array.of(0,0,0x48,0xc1), 4, 4], ['buffer_energy', 0x8765, 8, 2], ['shooter_42mm_barrel_heat', 0xfffe, 12, 2]]);
     checkPayloadLayout(0x203, 12, view => {
         view.setFloat32(0, -1.25, true); view.setFloat32(8, 359.5, true);
     }, [['x', -1.25, 0, 4], ['angle', 359.5, 8, 4]]);
-    checkPayloadLayout(0x204, 8, view => {
-        view.setUint16(1, 0x8123, true); view.setUint16(5, 0xfedc, true); view.setUint8(7, 0x81);
-    }, [['cooling_buff', 0x8123, 1, 2], ['attack_buff', 0xfedc, 5, 2],
-        ['remaining_energy', 0x81, 7, 1], ['remaining_energy.at_least_125_percent', true, 7, 1, 0, 1]]);
+    checkPayloadLayout(0x204, 7, view => {
+        view.setUint16(1, 0x8123, true); view.setUint16(5, 0xfedc, true);
+    }, [['cooling_buff', 0x8123, 1, 2], ['attack_buff', 0xfedc, 5, 2]]);
 });
 
-test('V2 PDF pp17–24: firing float and 2026 fortress, tunnel RFID, sentry stance and radar bits', () => {
+test('2027 PDF pp16–23: firing float, tunnel RFID, sentry stance and radar bits', () => {
     checkPayloadLayout(0x207, 7, view => {
         view.setUint8(0, 2); view.setFloat32(3, 30.25, true);
     }, [['bullet_type', 2, 0, 1], ['initial_speed', 30.25, 3, 4]]);
     checkPayloadLayout(0x208, 8, view => view.setUint16(6, 0xffff, true),
         [['projectile_allowance_fortress', 0xffff, 6, 2]]);
-    checkPayloadLayout(0x209, 5, view => {
-        view.setUint32(0, 0x84000000, true); view.setUint8(4, 0x24);
-    }, [['rfid_status.ally_tunnel_highway_lower', true, 3, 1, 26, 1],
-        ['rfid_status.ally_tunnel_trapezoid_upper', true, 3, 1, 31, 1],
+    checkPayloadLayout(0x209, 6, view => {
+        view.setUint32(0, (1<<22)|(1<<27), true); view.setUint16(4, 0x24, true);
+    }, [['rfid_status.ally_tunnel_highway_lower', true, 2, 1, 22, 1],
+        ['rfid_status.ally_tunnel_trapezoid_upper', true, 3, 1, 27, 1],
         ['rfid_status_2.enemy_tunnel_highway_upper', true, 4, 1, 2, 1],
         ['rfid_status_2.enemy_tunnel_trapezoid_upper', true, 4, 1, 5, 1]]);
     checkPayloadLayout(0x20d, 14, view => {
@@ -424,12 +455,12 @@ test('V2 PDF pp17–24: firing float and 2026 fortress, tunnel RFID, sentry stan
         ['sentry_info_2.is_disengaged', true, 4, 1, 0, 1],
         ['sentry_info_2.remaining_team_17mm_exchange_allowance', 0x52a, 4, 2, 1, 11],
         ['sentry_info_2.stance', 3, 5, 1, 12, 2], ['sentry_info_2.can_activate_rune', true, 5, 1, 14, 1]]);
-    checkPayloadLayout(0x20e, 1, view => view.setUint8(0, 0x3b),
+    checkPayloadLayout(0x20e, 8, view => view.setUint8(0, 0x3b),
         [['radar_info.double_vulnerability_chances', 3, 0, 1, 0, 2],
             ['radar_info.encryption_level', 3, 0, 1, 3, 2], ['radar_info.can_change_password', true, 0, 1, 5, 1]]);
 });
 
-test('V2 PDF pp26–32: seventh graphic, opaque character bytes and new interaction command bits', () => {
+test('2027 PDF pp25–32: seventh graphic, opaque character bytes and interaction command bits', () => {
     checkPayloadLayout(0x301, 111, view => view.setUint32(103, 20 | (1919 << 10) | (1079 << 21), true),
         [['content.interaction_figure[6].config2.start_x', 1919, 104, 2, 10, 11],
             ['content.interaction_figure[6].config2.start_y', 1079, 105, 2, 21, 11]], 0x104);
@@ -442,20 +473,20 @@ test('V2 PDF pp26–32: seventh graphic, opaque character bytes and new interact
     checkPayloadLayout(0x301, 10, view => view.setUint32(6, (6 << 21) | (1 << 24), true),
         [['content.sentry_cmd.stance', 6, 8, 1, 21, 3],
             ['content.sentry_cmd.confirm_rune_activation', true, 9, 1, 24, 1]], 0x120);
-    checkPayloadLayout(0x301, 14, (view, bytes) => {
+    checkPayloadLayout(0x301, 19, (view, bytes) => {
         view.setUint8(6, 254); view.setUint8(7, 2); bytes.set(Buffer.from('Z9a0Q7', 'ascii'), 8);
     }, [['content.radar_cmd', 254, 6, 1], ['content.password_cmd', 2, 7, 1],
         ['content.password', 'Z9a0Q7', 8, 6]], 0x121);
 });
 
-test('V2 PDF pp32–38: map targets, array ends, UTF16 and packed controller keys', () => {
+test('2027 PDF pp34–38: map targets, array ends and UTF16', () => {
     checkPayloadLayout(0x303, 12, view => {
         view.setFloat32(0, -3.5, true); view.setUint8(8, 0xff); view.setUint8(9, 107); view.setUint16(10, 0x8001, true);
     }, [['target_position_x', -3.5, 0, 4], ['cmd_keyboard', 255, 8, 1],
         ['target_robot_id', 107, 9, 1], ['cmd_source', 0x8001, 10, 2]]);
     checkPayloadLayout(0x305, 48, view => {
-        view.setUint16(16, 0xfedc, true); view.setUint16(22, 0x8001, true);view.setUint16(46,0x1234,true);
-    }, [['opponent_aerial_position_x', 0xfedc, 16, 2], ['opponent_sentry_position_y', 0x8001, 22, 2],['ally_sentry_position_y',0x1234,46,2]]);
+        view.setUint16(0, 0xfedc, true); view.setUint16(22, 0x8001, true);view.setUint16(46,0x1234,true);
+    }, [['opponent_heavyengineer_position_x', 0xfedc, 0, 2], ['opponent_sentry_position_y', 0x8001, 22, 2],['ally_sentry_position_y',0x1234,46,2]]);
     checkPayloadLayout(0x307, 105, view => {
         view.setInt8(53, -128); view.setInt8(102, 127); view.setUint16(103, 0x8069, true);
     }, [['delta_x[48]', -128, 53, 1], ['delta_y[48]', 127, 102, 1], ['sender_id', 0x8069, 103, 2]]);
@@ -463,14 +494,9 @@ test('V2 PDF pp32–38: map targets, array ends, UTF16 and packed controller key
         bytes.fill(0); view.setUint16(0, 0x8001, true); view.setUint16(2, 0x8101, true);
         view.setUint16(4, 0x4e2d, true); view.setUint16(6, 0x03a9, true);
     }, [['sender_id', 0x8001, 0, 2], ['receiver_id', 0x8101, 2, 2], ['user_data', '中Ω', 4, 30]]);
-    checkPayloadLayout(0x306, 8, view => {
-        view.setUint16(0, 0xfe81, true); view.setUint16(2, (1 << 12) | 1919, true); view.setUint16(4, 1079, true);
-    }, [['key_value.key_1', 0x81, 0, 1, 0, 8], ['key_value.key_2', 0xfe, 1, 1, 8, 8],
-        ['mouse_x.x_position', 1919, 2, 2, 0, 12], ['mouse_x.mouse_left', 1, 3, 1, 12, 4],
-        ['mouse_y.y_position', 1079, 4, 2, 0, 12]]);
 });
 
-test('V2 PDF pp75–78 CRC tables and independently computed vectors match the preset', () => {
+test('2027 PDF pp75–78 CRC tables and independently computed vectors match the preset', () => {
     const checksums = RoboMasterProtocol.compiled.rules.filter(rule => rule.type === 'checksum').map(rule => rule.config);
     // SHA256 of the freshly extracted 256-entry appendix tables (CRC16 entries
     // serialized little endian). Retain fingerprints, not the copyrighted tables.

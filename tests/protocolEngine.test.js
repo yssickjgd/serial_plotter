@@ -46,17 +46,17 @@ test('legacy symbol migration resolves field scopes and preserves original ident
         ] }, { name: 'tail', type: 'uint8', condition: 'payloadLength == 8' }
     ] }] };
     const result = Protocol.migrateSymbols(input), migrated = result.schema;
-    assert.equal(migrated.symbolVersion, 2); assert.equal(input.symbolVersion, undefined);
+    assert.equal(migrated.symbolVersion, 3); assert.equal(input.symbolVersion, undefined);
     assert.equal(migrated.messages[0].fields[0].name, 'frameLength');
-    assert.equal(migrated.messages[0].fields[1].name, 'rm_seq');
+    assert.equal(migrated.messages[0].fields[1].name, 'seq');
     assert.equal(migrated.messages[0].fields[1].id, 'real.seq');
     const nested = migrated.messages[0].fields[2].fields;
     assert.equal(nested[2].length, 'MIN(PARENT.frameLength, CURRENT.length, REMAINING)');
-    assert.equal(nested[2].condition, 'PARENT.rm_seq == 5 && rm_sequence == 6 && TRUE');
-    assert.ok(result.renames.some(item => item.fieldId === 'real.seq' && item.pathBefore === 'seq' && item.pathAfter === 'rm_seq'));
+    assert.equal(nested[2].condition, 'PARENT.seq == 5 && sequence == 6 && TRUE');
+    assert.ok(!result.renames.some(item => item.fieldId === 'real.seq'));
     const golden = Uint8Array.of(3, 5, 6, 3, 11, 12, 13, 19), compiled = Protocol.compile(input);
-    assert.deepEqual(Protocol.encode(compiled, 'm', { frameLength: 3, rm_seq: 5, nested: { rm_sequence: 6, length: 3, data: [11, 12, 13] }, tail: 19 }), golden);
-    assert.equal(Protocol.decode(golden, compiled).fields.nested.rm_sequence, 6);
+    assert.deepEqual(Protocol.encode(compiled, 'm', { frameLength: 3, seq: 5, nested: { sequence: 6, length: 3, data: [11, 12, 13] }, tail: 19 }), golden);
+    assert.equal(Protocol.decode(golden, compiled).fields.nested.sequence, 6);
     assert.deepEqual(Protocol.migrateSymbols(migrated), { schema: migrated, renames: [] });
 });
 
@@ -68,11 +68,11 @@ test('legacy reserved field migration avoids collisions and tracks nested array 
     ] }] };
     const { schema, renames } = Protocol.migrateSymbols(old), fields = schema.messages[0].fields;
     assert.equal(fields[1].name, 'field_SEQ_2');
-    assert.equal(fields[4].condition, 'field_SEQ_2 == 4 && rm_seq == 6');
+    assert.equal(fields[4].condition, 'field_SEQ_2 == 4 && seq == 6');
     assert.equal(fields[2].fields[0].bits[0].name, 'field_X');
     assert.ok(renames.some(item => item.fieldId === 'seq.upper' && item.pathAfter === 'field_SEQ_2'));
     const compiled = Protocol.compile(schema), golden = Uint8Array.of(1, 4, 1, 6, 9);
-    assert.deepEqual(Protocol.encode(compiled, 'm', { field_SEQ: 1, field_SEQ_2: 4, group: [{ flags: { field_X: 1 } }], rm_seq: 6, last: 9 }), golden);
+    assert.deepEqual(Protocol.encode(compiled, 'm', { field_SEQ: 1, field_SEQ_2: 4, group: [{ flags: { field_X: 1 } }], seq: 6, last: 9 }), golden);
     const record = Protocol.decode(golden, compiled);
     assert.equal(record.fields.last, 9); assert.equal(record.values['group[0].flags.field_X'], 1);
 });
@@ -84,8 +84,8 @@ test('legacy TLV selectors resolve renamed item header fields in their item scop
         ], branches: [{ equals: 1, fields: [{ name: 'value', type: 'uint8' }] }] }
     ] }] };
     const compiled = Protocol.compile(schema), golden = Uint8Array.of(1, 1, 42);
-    assert.equal(compiled.schema.messages[0].fields[0].selector, 'rm_seq');
-    assert.deepEqual(Protocol.encode(compiled, 'm', { items: [{ rm_seq: 1, value: 42 }] }), golden);
+    assert.equal(compiled.schema.messages[0].fields[0].selector, 'seq');
+    assert.deepEqual(Protocol.encode(compiled, 'm', { items: [{ seq: 1, value: 42 }] }), golden);
     assert.equal(Protocol.decode(golden, compiled).fields.items[0].value, 42);
 });
 
@@ -97,31 +97,34 @@ test('legacy choice member references follow consistent branch field renames', (
         ] }, { name: 'tail', type: 'uint8', condition: 'payload.seq == 7' }
     ] }] };
     const compiled = Protocol.compile(schema);
-    assert.equal(compiled.schema.messages[0].fields[2].condition, 'payload.rm_seq == 7');
+    assert.equal(compiled.schema.messages[0].fields[2].condition, 'payload.seq == 7');
     for (const tag of [1, 2]) {
         const golden = Uint8Array.of(tag, 7, 9);
-        assert.deepEqual(Protocol.encode(compiled, 'm', { tag, payload: { rm_seq: 7 }, tail: 9 }), golden);
+        assert.deepEqual(Protocol.encode(compiled, 'm', { tag, payload: { seq: 7 }, tail: 9 }), golden);
         const record = Protocol.decode(golden, compiled);
         assert.equal(record.valid, true); assert.equal(record.fields.tail, 9);
     }
     const ambiguous = structuredClone(schema);
-    ambiguous.messages[0].fields[1].branches[1].fields.unshift({ name: 'rm_seq', type: 'uint8' });
+    for(const branch of ambiguous.messages[0].fields[1].branches)branch.fields[0].name='SEQ';
+    ambiguous.messages[0].fields[2].condition='payload.SEQ == 7';
+    ambiguous.messages[0].fields[1].branches[1].fields.unshift({ name: 'field_SEQ', type: 'uint8' });
     assert.throws(() => Protocol.migrateSymbols(ambiguous), /ambiguous.*branch|branch.*ambiguous/i);
 });
 
 test('legacy dispatch scope names migrate with their child paths and stable identities', () => {
-    for (const [before, after] of [['SEQ', 'field_SEQ'], ['seq', 'rm_seq']]) {
+    for (const [before, after] of [['SEQ', 'field_SEQ'], ['seq', 'seq']]) {
         const schema = { id: 'dispatch.symbols', framing: { fixedLength: 3 }, payloadOffset: 1,
             command: { offset: 0, type: 'uint8' }, messages: [{ id: 'parent', command: 1,
                 fields: [{ name: 'kind', type: 'uint8' }], dispatch: { name: before, field: 'kind', offset: 1,
                     messages: [{ id: 'child', command: 2, fields: [{ id: 'wire.seq', name: 'seq', type: 'uint8' }] }] } }] };
         const { schema: migrated, renames } = Protocol.migrateSymbols(schema);
         assert.equal(migrated.messages[0].dispatch.name, after);
-        assert.ok(renames.some(item => item.fieldId === 'wire.seq' && item.pathBefore === before + '.seq' && item.pathAfter === after + '.rm_seq'));
+        if(before!==after)assert.ok(renames.some(item => item.fieldId === 'wire.seq' && item.pathBefore === before + '.seq' && item.pathAfter === after + '.seq'));
+        else assert.ok(!renames.some(item=>item.fieldId==='wire.seq'));
         const golden = Uint8Array.of(1, 2, 7), compiled = Protocol.compile(migrated);
-        assert.deepEqual(Protocol.encode(compiled, 'child', { [after]: { rm_seq: 7 } }), golden);
+        assert.deepEqual(Protocol.encode(compiled, 'child', { [after]: { seq: 7 } }), golden);
         const record = Protocol.decode(golden, compiled);
-        assert.equal(record.fields[after].rm_seq, 7); assert.equal(record.flatFields.find(field => field.fieldId === 'wire.seq').path, after + '.rm_seq');
+        assert.equal(record.fields[after].seq, 7); assert.equal(record.flatFields.find(field => field.fieldId === 'wire.seq').path, after + '.seq');
     }
 });
 

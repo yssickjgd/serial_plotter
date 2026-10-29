@@ -38,7 +38,8 @@
             if (depth > 16 || result.size >= 8192) return result;
             for (const field of fields) {
                 if (!field.name || result.size >= 8192) continue;
-                const path = prefix + field.name + (constraint && (field.count !== undefined || ['repeat', 'tlv'].includes(field.type)) ? '[0]' : ''), type = field.type === 'enum' ? field.baseType ?? 'uint8' : field.type;
+                const repeated=field.count !== undefined || field.until === 'end' || ['repeat','tlv'].includes(field.type);
+                const path = prefix + field.name + (constraint && repeated ? '[0]' : ''), type = field.type === 'enum' ? field.baseType ?? 'uint8' : field.type;
                 result.set(path, { label: path, name: type ?? '字段', description: `${path} · ${type ?? '字段'}（区分大小写）`,
                     numeric: /^(?:u?int\d+|float\d+|bool)$/.test(type), value: path });
                 for (const bit of field.bits ?? []) if (bit.type !== 'reserved') {
@@ -46,10 +47,10 @@
                     result.set(name, { label: name, name: '位段', numeric: true, value: name });
                 }
                 // Repeated values require an index, and mutually exclusive children are not always present.
-                if (field.type === 'struct' && field.count === undefined && (!field.ref || !refs.includes(field.ref))) {
+                if (field.type === 'struct' && !repeated && (!field.ref || !refs.includes(field.ref))) {
                     collect(children(field), field.inline ? prefix : path + '.', result, field.ref ? [...refs, field.ref] : refs, depth + 1);
                 }
-                if (constraint && (field.type !== 'struct' || field.count !== undefined)) {
+                if (constraint && (field.type !== 'struct' || repeated)) {
                     if (!field.ref || !refs.includes(field.ref)) collect(children(field), field.inline ? prefix : path + '.', result, field.ref ? [...refs, field.ref] : refs, depth + 1);
                     collect(field.headerFields ?? [], path + '.', result, refs, depth + 1);
                 }
@@ -80,7 +81,7 @@
             value: name + '()', caretOffset: name.length + 1,
             description: reserved.definitions.find(item => item.names.includes(name))?.description }));
         const variables = reserved.protocolVariables.filter(name => !['PARENT','CURRENT','HEADER'].includes(name) &&
-            (!frame || (constraint ? ['TRUE','FALSE','FRAME_LENGTH','PAYLOAD_LENGTH','SEQ','SEQUENCE','REMAINING'] : ['TRUE','FALSE']).includes(name))).map(name => ({ label: name, name: '内置变量', value: name,
+            (!frame || (constraint ? ['TRUE','FALSE','FRAME_LENGTH','PAYLOAD_LENGTH','SEQ','REMAINING'] : ['TRUE','FALSE']).includes(name))).map(name => ({ label: name, name: '内置变量', value: name,
             description: reserved.definitions.find(item => item.names.includes(name))?.description }));
         return { values: [...values.values()], functions, variables };
     }

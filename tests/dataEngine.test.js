@@ -437,3 +437,17 @@ test('TLV items map explicit array indexes and rebuild identically without multi
     assert.equal(rebuilt.getValue(0, 0), 42); assert.equal(rebuilt.getValue(1, 0), 99);
     assert.equal(f.service.history.byteLength, bytes.length);
 });
+
+test('until-end structures map explicit item indexes and preserve values through history rebuild',async t=>{
+    const f=setup(t),config={id:'capture-to-end',schemaVersion:3,messages:[{id:'frame',byteLength:6,fields:[
+        {id:'items',name:'items',type:'struct',byteLength:2,until:'end',fields:[{id:'value',name:'value',type:'uint16',byteLength:2}]}
+    ]}]};
+    await f.engine.apply({...f.settings,protocols:[config],protocolId:config.id,mappings:[
+        {protocolId:config.id,messageId:'frame',path:'items[0].value',fieldId:'value',channel:0},
+        {protocolId:config.id,messageId:'frame',path:'items[2].value',fieldId:'value',channel:1}
+    ]},{rebuild:false});
+    f.service.receive(Uint8Array.of(1,0,2));f.service.receive(Uint8Array.of(0,3,0));f.service.endStream();
+    const frames=()=>f.engine.outputs.get('message:frame').frames;
+    assert.equal(frames().length,1);assert.equal(frames().getValue(0,0),1);assert.equal(frames().getValue(1,0),3);
+    await f.engine.rebuild();assert.equal(frames().length,1);assert.equal(frames().getValue(1,0),3);
+});

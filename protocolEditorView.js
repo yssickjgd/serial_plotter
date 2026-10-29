@@ -6,8 +6,8 @@
     const symbols = () => typeof module !== 'undefined' && module.exports ? require('./reservedNames') : root.SerialPlotter;
     const autocomplete = () => typeof module !== 'undefined' && module.exports ? require('./protocolAutocomplete') : root.SerialPlotter;
     const clone = value => JSON.parse(JSON.stringify(value));
-    const fieldTypes = ['uint8', 'int8', 'uint16', 'int16', 'uint32', 'int32', 'uint64', 'int64',
-        'float32', 'float64', 'bool', 'enum', 'bytes', 'reserved', 'string', 'struct', 'fixed', 'choice', 'repeat', 'tlv', 'bitfield', 'checksum'];
+    const fieldTypes = ['bitfield', 'uint8', 'int8', 'uint16', 'int16', 'uint32', 'int32', 'uint64', 'int64',
+        'float32', 'float64', 'bool', 'enum', 'bytes', 'reserved', 'string', 'struct', 'fixed', 'choice', 'repeat', 'tlv', 'checksum'];
     const tabs = [['messages', '整帧结构'], ['rules', '规则约束'], ['json', 'JSON']];
     const typeNames = { uint8: '无符号整数 · 1 字节', int8: '有符号整数 · 1 字节', uint16: '无符号整数 · 2 字节', int16: '有符号整数 · 2 字节', uint32: '无符号整数 · 4 字节', int32: '有符号整数 · 4 字节', uint64: '无符号整数 · 8 字节', int64: '有符号整数 · 8 字节', float32: '浮点数 · 4 字节', float64: '浮点数 · 8 字节', bool: '布尔值', enum: '枚举', bytes: '原始字节', reserved: '保留字节', string: '文本', struct: '结构体', fixed: '固定字节', choice: '互斥分支', repeat: '重复段', tlv: 'TLV 段' };
     const model = () => typeof module !== 'undefined' && module.exports ? require('./protocolModel').ProtocolModel : root.SerialPlotter.ProtocolModel;
@@ -80,8 +80,7 @@
             });
             label.append(input); parent.append(label);
             if (kind === 'text' && change && (['frame.lengthFrom', 'field.lengthFrom', 'field.offset', 'field.count', 'field.condition', 'field.selector',
-                'field.checksum.start', 'field.checksum.end'].includes(key) || /^branch\.\d+\.expression$/.test(key) ||
-                key === 'field.repeatCount' && typeof this.selectedField?.count === 'string')) {
+                'field.checksum.start', 'field.checksum.end'].includes(key) || /^branch\.\d+\.expression$/.test(key))) {
                 this.expressionCompletions.push(autocomplete().attachProtocolAutocomplete(input, {
                     container: this.dialog, schema: this.draft, fieldId: this.selectedField?.id, frame: key === 'frame.lengthFrom', property: key
                 }));
@@ -424,6 +423,9 @@
         }
         _render() {
             const focus = this.document.activeElement, key = focus?.getAttribute?.('data-control'), start = focus?.selectionStart, end = focus?.selectionEnd;
+            const action=focus?.getAttribute?.('data-action');
+            const inInspector=this.propertyHost.contains(focus), inspectorField=this.propertyHost.getAttribute('data-inspector-field'), inspectorProtocol=this.propertyHost.getAttribute('data-inspector-protocol');
+            const focusBranch=focus?.closest?.('[data-property-branch]')?.getAttribute('data-property-branch') || (inInspector?this.propertyHost.getAttribute('data-inspector-branch'):null);
             const scroll = [this.leftHost, this.propertyHost, this.body, ...this.panels.values()].map(node => [node, node.scrollTop, node.scrollLeft]);
             const editingTop=this.libraryHost.scrollTop;
             const expanded = [...this.dialog.querySelectorAll('details')].map(node => [node.getAttribute('data-detail'), node.open]);
@@ -433,7 +435,22 @@
             this.libraryHost.scrollTop=editingTop;
             for (const [node, top, left] of scroll) { node.scrollTop = top; node.scrollLeft = left; }
             for (const [id, open] of expanded) { const node = this.dialog.querySelector('[data-detail="' + id + '"]'); if (node) node.open = open; }
-            if (key) { const next = [...this.dialog.querySelectorAll('[data-control]')].find(node => node.getAttribute('data-control') === key); next?.focus(); if (typeof start === 'number' && next?.setSelectionRange) { try { next.setSelectionRange(start, end); } catch (_) { /* Selects have no text caret. */ } } }
+            if (key && (!inInspector || this.propertyHost.getAttribute('data-inspector-field')===inspectorField && this.propertyHost.getAttribute('data-inspector-protocol')===inspectorProtocol)) {
+                let restoredKey=key;
+                if(focusBranch&&/^branch\.\d+\./.test(key)){
+                    const index=model().findField(this.draft,inspectorField)?.branches?.findIndex(branch=>branch.id===focusBranch) ?? -1;
+                    restoredKey=index<0?null:key.replace(/^branch\.\d+\./,'branch.'+index+'.');
+                }
+                const next = [...this.dialog.querySelectorAll('[data-control]')].find(node => node.getAttribute('data-control') === restoredKey);
+                if(!next?.closest('[data-property-panel]')?.hidden){
+                    next?.focus({preventScroll:true});
+                    if (typeof start === 'number' && next?.setSelectionRange) { try { next.setSelectionRange(start, end); } catch (_) { /* Selects have no text caret. */ } }
+                }
+            }else if(action){
+                let next=[...this.dialog.querySelectorAll('[data-action]')].find(node=>node.getAttribute('data-action')===action);
+                if(next?.disabled&&['undo','redo'].includes(action))next=this.dialog.querySelector('[data-action="'+(action==='undo'?'redo':'undo')+'"]');
+                if(next&&!next.disabled)next.focus({preventScroll:true});
+            }
         }
         _openRule(id) {
             this.selectedRuleId = id; this.selectTab('rules');
@@ -744,9 +761,12 @@
             const changedProtocol=value.id!==this.draft?.id;
             if (value.id !== this.draft?.id) { this.history = []; this.future = []; }
             const selectedId = this.selectedField?.id, messageId = this.selectedMessage?.id;
+            const ancestors=[];
+            for(let row=this._fieldRows().find(item=>item.field.id===selectedId);row;row=row.parent)ancestors.push(row.field.id);
             try { this.draft = model().toUnified(value); } catch (_) { this.draft = clone(value); }
             this.selectedMessage = this.draft.messages?.find(item => item.id === messageId) ?? this.draft.messages?.[0];
-            this.selectedField = this._fieldRows().find(row => row.field.id === selectedId)?.field; this.jsonInvalid = false;
+            const rows=this._fieldRows();
+            this.selectedField = ancestors.map(id=>rows.find(row=>row.field.id===id)?.field).find(Boolean); this.jsonInvalid = false;
             this.leftTab=this._navigation().leftTab==='edit'?'edit':'outline';this.propertyTab=this._navigation().propertyTab ?? 'basic';
             if(changedProtocol||!this._outlineNodes().some(item=>item.key===this.outlineSelection))this.outlineSelection=null;
             const navigation=clone(this._navigation());
@@ -785,8 +805,8 @@
                 this._trackNew('protocol',this.draft.id);for(const row of this._fieldRows())this._trackNew('field',row.field.id);
             };
             this.libraryHost.append(this._node('div','section-title','协议操作'));
-            this.libraryHost.append(this._button('新建协议', 'new-protocol', () => create(false)), this._button('复制协议', 'copy-protocol', () => create(true)), this._button('删除协议', 'delete-protocol', () => this._requestDelete('protocol',this.draft.id)));
-            this.libraryHost.append(this._button('导入协议','library-import',() => this.dialog.querySelector('[data-action="import-json"]').click()),this._button('导出协议','library-export',() => this.dialog.querySelector('[data-action="export-json"]').click()));
+            this.libraryHost.append(this._button('新建协议', 'new-protocol', () => create(false)), this._button('删除协议', 'delete-protocol', () => this._requestDelete('protocol',this.draft.id)));
+            this.libraryHost.append(this._button('导入协议','library-import',() => this.dialog.querySelector('[data-action="import-json"]').click()),this._button('导出协议','library-export',() => this.dialog.querySelector('[data-action="export-json"]').click()),this._button('复制协议', 'copy-protocol', () => create(true)));
             const reorder = delta => { this._publish(); const index = this.library.findIndex(item => item.id === this.draft.id); this.library = model().reorderProtocol(this.library, this.draft.id, index + delta); this.onLibraryChange?.(clone(this.library), this.draft.id); this._render(); };
             const before=this._iconButton('up','协议在列表中上移','protocol-up',()=>reorder(-1)),after=this._iconButton('down','协议在列表中下移','protocol-down',()=>reorder(1));
             const index=this.library.findIndex(item=>item.id===this.draft.id);before.disabled=this.emptyLibrary||index<=0;after.disabled=this.emptyLibrary||index<0||index>=this.library.length-1;
@@ -944,6 +964,7 @@
             this.expressionCompletions.splice(0).forEach(item => item.destroy());
             const bodyTop = this.body.scrollTop ?? 0, propertyTop = this.propertyHost.scrollTop ?? 0;
             const focusedBranch = this.document.activeElement?.getAttribute?.('data-branch-drag');
+            const focusedHandle = this.document.activeElement?.getAttribute?.('data-drag-id');
             const branchInProperties = this.propertyHost.contains(this.document.activeElement);
             const canvasFocused = this.canvas?.contains(this.document.activeElement);
             const advancedOpen = this.propertyHost.querySelector('[data-detail="advanced"]')?.open;
@@ -1026,11 +1047,17 @@
                 name.addEventListener('keydown', event => { if (event.altKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); this.selectedField = row.field; this._moveSelected(event.key === 'ArrowUp' ? -1 : 1); } });
                 const span = layout.get(row.field.id), width = span?.width;
                 const meta = this._node('span', 'protocol-field-meta');
-                for (const text of [(typeNames[this._fieldDataType(row.field)] ?? row.field.type).split(' · ')[0],
-                    width == null ? '长度待定' : width + ' 字节',
+                const count=row.field.count, repeated=row.field.until==='end'?'重复至段末':Number(count ?? 1)===1?'':'重复 '+count+' 次';
+                const itemWidth=this._fieldWidth(row.field) ?? (typeof count==='number'&&count>0&&width!=null?width/count:count===undefined?width:null);
+                const sizeText=(itemWidth==null?'长度待定':itemWidth+' 字节')+(repeated?' · '+repeated:'');
+                for (const [index,text] of [(typeNames[this._fieldDataType(row.field)] ?? row.field.type).split(' · ')[0],
+                    sizeText,
                     span?.frameOffset == null ? '整帧偏移待定' : '整帧 ' + span.frameOffset,
-                    span?.localOffset == null ? '段内偏移待定' : '段内 ' + span.localOffset])
-                    meta.append(this._node('span', 'protocol-field-meta-line', text));
+                    span?.localOffset == null ? '段内偏移待定' : '段内 ' + span.localOffset].entries()){
+                    const line=this._node('span','protocol-field-meta-line'+(index===1?' protocol-field-size':''),text);
+                    if(index===1)line.title=sizeText+(['repeat','tlv'].includes(row.field.type)?'；字节数限定整个重复区域。':'；字节数为每项宽度。');
+                    meta.append(line);
+                }
                 card.setAttribute('data-byte-offset', span?.frameOffset ?? 'dynamic');
                 bar.append(handle, name, meta);
                 this._renderUsageHints(bar, row.field);
@@ -1095,6 +1122,8 @@
             if (focusedBranch) {
                 const host = branchInProperties ? this.propertyHost : list;
                 [...host.querySelectorAll('[data-branch-drag]')].find(node => node.getAttribute('data-branch-drag') === focusedBranch)?.focus({preventScroll:true});
+            } else if(focusedHandle){
+                [...list.querySelectorAll('[data-drag-id]')].find(node=>node.getAttribute('data-drag-id')===focusedHandle)?.focus({preventScroll:true});
             } else if (canvasFocused) {
                 // A branch lives inside its owner card: restore the selected item, not its ancestor.
                 // Focus must not override the scroll positions restored above.
@@ -1130,7 +1159,7 @@
         }
         _moveSelected(direction) {
             const row = this._fieldRows().find(item => item.field === this.selectedField); if (!row) return;
-            this._change(() => { const index = row.owner.indexOf(row.field), target = index + direction; if (target >= 0 && target < row.owner.length) { row.owner.splice(index, 1); row.owner.splice(target, 0, row.field); } });
+            this._change(() => { const index = row.owner.indexOf(row.field), target = index + direction; if (target >= 0 && target < row.owner.length) { row.owner.splice(index, 1); row.owner.splice(target, 0, row.field);this.outlineSelection=null; } });
         }
         _branchRule(branch, field) {
             const text = value => this._integerText(value, this._dataBase(field));
@@ -1183,7 +1212,7 @@
         _cancelDrag() { this.dragged = null; this.draggedBranch = null; this.dropTarget = null; this._clearDrop(); for (const node of this.dialog.querySelectorAll('.is-dragging')) node.classList.remove('is-dragging'); }
         _dropField() {
             const source = this.dragged, target = this.dropTarget; this._cancelDrag(); if (!source || !target || target.row.path.startsWith(source.path + '.') || source.field === target.row.field) return;
-            this._change(() => { source.owner.splice(source.owner.indexOf(source.field), 1); const owner = target.owner ?? (target.inside ? target.row.field.fields ??= [] : target.row.owner); const index = target.inside ? owner.length : owner.indexOf(target.row.field) + (target.after ? 1 : 0); owner.splice(index, 0, source.field); this.selectedField = source.field; });
+            this._change(() => { source.owner.splice(source.owner.indexOf(source.field), 1); const owner = target.owner ?? (target.inside ? target.row.field.fields ??= [] : target.row.owner); const index = target.inside ? owner.length : owner.indexOf(target.row.field) + (target.after ? 1 : 0); owner.splice(index, 0, source.field); this.selectedField = source.field;this.outlineSelection=null; });
         }
         _renderLeft(rows) {
             if (!this.draft) return;
@@ -1267,8 +1296,8 @@
             const container=field&&['struct','repeat','choice','tlv'].includes(field.type);
             const missingBranch=container&&['choice','tlv'].includes(field.type)&&!field.branches?.length;
             child.disabled=this.emptyLibrary||!container||missingBranch;
-            child.title=this.emptyLibrary?'请先新建或选择协议。':!container?'请先选中结构体、重复段、互斥分支或 TLV；普通字段不能包含子字段，顶层添加请用“新建字段”。'
-                :missingBranch?'请先添加一个分支，再在该分支内新建子字段。':'在当前结构体、重复段或所选分支内添加字段。';
+            child.title=this.emptyLibrary?'请先新建或选择协议。':!container?'请先选中结构体、互斥分支或 TLV；普通字段不能包含子字段，顶层添加请用“新建字段”。'
+                :missingBranch?'请先添加一个分支，再在该分支内新建子字段。':'在当前结构体或所选分支内添加字段。';
             add.disabled=this.emptyLibrary;
             const copy=this._button('复制字段','copy-field',()=>this._copyField()), remove=this._button(branch?'删除分支':'删除字段','delete-field-left',()=>{if(branch)this._requestDelete('branch',branch.id);else if(this.selectedField)this._requestDelete('field',this.selectedField.id);});
             copy.disabled=!row||Boolean(branch);remove.disabled=!row;
@@ -1278,7 +1307,7 @@
             const selected=this.selectedField, branch=this._outlineNodes().find(item=>item.key===this.outlineSelection&&item.kind==='branch');
             let parent=child?(branch?.node ?? selected):null;
             if(child&&parent&&!Array.isArray(parent.fields)&&['choice','tlv'].includes(parent.type))parent=parent.branches?.[0];
-            if(child&&!parent)throw new Error('请先选中可包含字段的结构体、重复段或具体分支');
+            if(child&&!parent)throw new Error('请先选中可包含字段的结构体或具体分支');
             this._addField('uint8',parent,child?null:selected);
             this.propertyTab='basic';this._revealOutline(this.selectedField.id);this._renderMessages();
             this.propertyHost.querySelector('[data-control="field.name"]')?.focus();
@@ -1299,7 +1328,9 @@
         }
         _arrangeProperties() {
             const field=this.framingSelected?null:this.selectedField, rootSelected=this.framingSelected,branch=this._selectedBranch();
-            const sections=[...this.propertyHost.children], previousTop=this.propertyScroll?.scrollTop ?? 0;
+            const sameInspector=this.propertyHost.getAttribute('data-inspector-field')===(field?.id ?? '') && this.propertyHost.getAttribute('data-inspector-branch')===(branch?.id ?? '') && this.propertyHost.getAttribute('data-inspector-protocol')===this.draft.id;
+            const sections=[...this.propertyHost.children], previousTop=sameInspector?this.propertyScroll?.scrollTop ?? 0:0;
+            this.propertyHost.setAttribute('data-inspector-field',field?.id ?? '');this.propertyHost.setAttribute('data-inspector-branch',branch?.id ?? '');this.propertyHost.setAttribute('data-inspector-protocol',this.draft.id);
             const heading=this._node('div','sidebar-section-header config-pane-heading',rootSelected?'整帧属性':branch?'分支属性':'字段属性');
             if(field)heading.append(this._node('span','scope-badge',branch?'条件分支':this._fieldDataType(field)));
             const titleTools=this._node('div','protocol-property-name');
@@ -1332,6 +1363,7 @@
             this.selectProperty(this.propertyPanels.has(this.propertyTab)?this.propertyTab:'basic');
         }
         _fieldDataType(field) {
+            if(field.type==='repeat')return 'struct';
             if (field.type === 'enum') return field.baseType ?? 'uint8';
             if (field.type === 'checksum') return 'uint' + field.byteLength * 8;
             return field.type === 'fixed' ? 'bytes' : field.type;
@@ -1494,7 +1526,7 @@
         }
         _supportedDataTypes() {
             // Enum labels and fixed/checksum constraints use the separate content controls.
-            return fieldTypes.filter(type => !['enum','fixed','checksum'].includes(type));
+            return fieldTypes.filter(type => !['enum','fixed','checksum','repeat'].includes(type));
         }
         _scalarByteWidth(type) {
             const match=/^(?:u?int|float)(8|16|32|64)$/.exec(type);
@@ -1503,10 +1535,11 @@
         _compatibleRoles(type, width) {
             const roles = [['data', '无约束']];
             if (width > 0 && (type === 'bytes' || /^(?:u?int|float)/.test(type) || ['bool', 'bitfield'].includes(type))) roles.push(['fixed', '固定内容']);
-            if (/^uint(?:8|16|32)$/.test(type) && this.selectedField?.count === undefined) roles.push(['length','长度关联'], ['checksum','校验值']);
+            if (/^uint(?:8|16|32)$/.test(type) && this.selectedField?.count === undefined && this.selectedField?.until === undefined) roles.push(['length','长度关联'], ['checksum','校验值']);
             return roles;
         }
         _editFieldKind(field, type, role) {
+            if(field.type==='repeat'&&type==='struct')return;
             const constraint = this._fieldRole(field);
             const fixedWidth=this._scalarByteWidth(type), nextWidth=fixedWidth ?? field.byteLength;
             if(constraint==='legacy') {
@@ -1522,7 +1555,7 @@
             const checksum = field.type === 'checksum';
             if (checksum && (role !== 'data' || !/^uint(?:8|16|32)$/.test(type))) throw new Error('请先关闭校验规则，再更改为不兼容的数据类型或内容约束');
             if (role === 'fixed' && field.framingRole && type !== 'bytes' && field.type === 'fixed')
-                throw new Error('起始同步和结束分隔使用原始字节，请先取消断帧角色再更改数据类型');
+                throw new Error('帧头和帧尾使用原始字节，请先取消断帧角色再更改数据类型');
             if(role==='fixed'&&!this._compatibleRoles(type,nextWidth).some(item=>item[0]==='fixed'))
                 throw new Error('当前类型不支持固定内容，请先明确修改内容约束；固定字节已保留');
             const fixedBytes = field.bytes ?? field.expectedBytes;
@@ -1539,7 +1572,6 @@
             if(field.branches?.length&&!['choice','tlv'].includes(type))
                 throw new Error('当前字段包含分支及子字段；请先处理这些内容，不能静默删除');
             if(field.headerFields?.length&&type!=='tlv')throw new Error('当前字段包含 TLV 头字段，请先处理，原字段引用已保留');
-            if(field.until&&!['repeat','tlv'].includes(type))throw new Error('当前字段已有重复至段末的配置，请先明确调整重复方式');
             this._change(() => {
                 const before = field.type, numericFixed = role === 'fixed' && type !== 'bytes';
                 if(fixedWidth!==null){field.byteLength=fixedWidth;delete field.length;if(field.lengthFrom==='')delete field.lengthFrom;}
@@ -1560,8 +1592,7 @@
                 else { field.branches ??= []; field.selector ??= 'tag'; }
                 if (type !== 'tlv') delete field.headerFields;
                 else Object.assign(field, { ...model().createTLVTemplate().messages[0].fields[0], ...field });
-                if (!['repeat','tlv'].includes(type)) delete field.until;
-                else if (field.count === undefined && !field.until) field.count = 1;
+                if (['struct','repeat','tlv'].includes(type) && field.count === undefined && !field.until) field.count = 1;
                 if (type === 'bitfield') field.bits ??= [];
             });
         }
@@ -1677,7 +1708,7 @@
                 hint.setAttribute('data-control','field.width-conflict');section.append(hint,
                     this._button('按类型修正字节数','fix-field-width',()=>this._editFieldKind(field,dataType,role)));
             }
-            if (framingMarker) section.append(this._node('p', 'hint-text', '同步／结束固定字段使用原始字节；取消断帧角色后可改为其它数据类型。'));
+            if (framingMarker) section.append(this._node('p', 'hint-text', '帧头／帧尾固定字段使用原始字节；取消断帧角色后可改为其它数据类型。'));
             const roles = this._compatibleRoles(dataType, widthValue), roleMatches = roles.some(item => item[0] === role);
             const content = this._section(parent, '内容约束', 'protocol-content-constraints'); content.setAttribute('data-rule-group', 'content');
             this._control(content, 'field.role', '内容约束', role === 'legacy' ? 'legacy' : roleMatches ? role : '', 'select', value => {
@@ -1710,22 +1741,20 @@
             section.append(symbols().createReservedNamesHelp(this.document, 'field'));
             const width = this._node('p', 'hint-text', '存储宽度：' + (this._fieldWidth(field) ?? '由内容决定') + (this._fieldWidth(field) === null ? '' : ' 字节')); width.setAttribute('data-control', 'field.width'); section.append(width);
             this._control(section, 'field.endian', '字节序', field.endian ?? '', 'select', value => set('endian', value), [['', '继承协议'], ['little', '小端'], ['big', '大端']]);
-            this._control(section, 'field.count', '数组数量 / 表达式', field.count, 'text', value => set('count', this._expression(value)));
+            this._renderRepetition(section,field);
             if (role === 'fixed') {
                 this._control(content, 'field.bytes', '固定内容（按字节分隔）', records().protocolBytesText(field.bytes ?? field.expectedBytes, this._dataBase(field)), 'text', value => {
                     const bytes = records().parseProtocolBytes(value, this._dataBase(field), '固定内容');
                     if (bytes.length !== widthValue) throw new Error(`固定内容必须为 ${widthValue} 字节`);
                     set(field.type === 'fixed' ? 'bytes' : 'expectedBytes', bytes);
                 });
-                if (field.type === 'fixed') this._control(content, 'field.framingRole', '断帧角色', field.framingRole ?? '', 'select', value => set('framingRole', value), [['', '仅验证固定字节'], ['sync', '起始同步'], ['end', '结束分隔']]);
+                if (field.type === 'fixed') {
+                    const framing = this._control(content, 'field.framingRole', '断帧角色', field.framingRole ?? '', 'select', value => set('framingRole', value), [['', '仅验证固定字节'], ['sync', '帧头'], ['end', '帧尾']]);
+                    this._controlHelp(framing,'帧头用于寻找并同步一帧的起点；帧尾作为结束分隔特征。仅验证固定字节不参与划分帧边界。');
+                }
             }
             if (field.type === 'string') this._control(section, 'field.encoding', '文本编码', field.encoding ?? 'utf-8', 'text', value => set('encoding', value));
             if (/^u?int/.test(dataType) || ['bool', 'bitfield'].includes(dataType)) this._renderEnum(content, field, 'field.enum');
-            if (['repeat', 'tlv'].includes(field.type)) {
-                const mode = field.until === 'end' ? 'end' : typeof field.count === 'string' ? 'field' : 'fixed';
-                this._control(section, 'field.repeatMode', '重复方式', mode, 'select', value => this._change(() => { delete field.until; delete field.count; if (value === 'end') field.until = 'end'; else field.count = value === 'fixed' ? 1 : 'count'; }), [['fixed', '固定次数'], ['field', '根据字段值'], ['end', '重复至当前段末']]);
-                if (mode !== 'end') this._control(section, 'field.repeatCount', mode === 'fixed' ? '重复次数' : '计数字段 / 表达式', field.count, 'text', value => set('count', this._expression(value)));
-            }
             if (field.type === 'tlv') {
                 field.headerFields ??= [{ name: 'tag', type: 'uint8' }, { name: 'size', type: 'uint8' }];
                 for (const [index, title] of [[0, '类型 T'], [1, '长度 L']]) {
@@ -1800,6 +1829,47 @@
             this._control(parent, 'field.selector', '分支选择变量 / 表达式', field.selector ?? '', 'text', value => set('selector', value));
             for (let index = 0; index < (field.branches ?? []).length; index++) this._renderBranchEditor(parent,field,index);
             parent.append(this._button('添加分支', 'add-branch', () => this._change(() => { (field.branches ??= []).push({ id: 'branch-' + Date.now().toString(36) + '-' + (++nextInstance), equals: (field.branches?.length ?? 0) + 1, fields: [] }); })));
+        }
+        _renderRepetition(parent,field) {
+            const reason=this._repeatToEndIssue(field),feedback=this._node('p','hint-text',reason?'不能使用 -1：'+reason:'');
+            feedback.setAttribute('data-control','field.repeatReason');feedback.setAttribute('role','status');feedback.hidden=!reason;
+            feedback.id=this.prefix+'-repetition-status';feedback.setAttribute('id',feedback.id);
+            const input=this._control(parent,'field.count','重复次数',field.until==='end'?-1:field.count,'text',value=>{
+                try{
+                    feedback.textContent=reason?'不能使用 -1：'+reason:'';feedback.hidden=!reason;feedback.className='hint-text';feedback.setAttribute('role','status');
+                    const text=value.trim(),toEnd=text==='-1';
+                    if(toEnd){
+                        if(field.until==='end'){this._validate();return;}
+                        const issue=this._repeatToEndIssue(field);if(issue)throw new Error(issue);
+                    }else{
+                        const count=this._expression(value) ?? (['repeat','tlv'].includes(field.type)?1:undefined);
+                        if(count!==undefined&&!protocol().expressionVariables(count).length){
+                            const result=protocol().evaluateExpression(count);
+                            if(!Number.isSafeInteger(result)||result<0||result>protocol().LIMITS.array)
+                                throw new Error('重复次数必须是 0～'+protocol().LIMITS.array+' 的非负整数；表达式结果不能为负数，只有直接输入 -1 才表示重复至段末。');
+                        }
+                        if(field.until===undefined&&String(field.count ?? '')===text){this._validate();return;}
+                        this._change(()=>{delete field.until;this._assign(field,'count',count);});return;
+                    }
+                    this._change(()=>{delete field.count;field.until='end';});
+                }catch(error){
+                    feedback.textContent=messageZh(error);feedback.hidden=false;feedback.className='protocol-field-error';feedback.setAttribute('role','alert');throw error;
+                }
+            });
+            input.setAttribute('aria-invalid','false');input.placeholder='次数／表达式，-1 表示重复至段末';
+            this._controlHelp(input,'直接输入 -1：重复至所属有界段末；0：不读取；正整数或表达式：重复指定次数。表达式结果须为非负整数，结果为 -1 也会报错。普通字段留空保留默认单值。');
+            input.setAttribute('aria-describedby',input.getAttribute('aria-describedby')+' '+feedback.id);parent.append(feedback);
+            if(field.type==='repeat')parent.append(this._node('p','hint-text','旧重复段按结构体呈现，原配置及引用保持；字节数限定整个重复区域，不是单项宽度。'));
+        }
+        _repeatToEndIssue(field) {
+            const candidate=clone(this.draft),target=model().findField(candidate,field.id);
+            if(!target)return '未找到字段，请重新选择。';
+            delete target.count;target.until='end';
+            try{protocol().compile(candidate);return '';}
+            catch(error){
+                const other=error.nodeId&&error.nodeId!==field.id?model().findField(candidate,error.nodeId):null;
+                return (other?'字段 '+other.name+'：':'')+messageZh(error);
+            }
         }
         _renderBranchDetails(parent,field,branch) {
             this._renderBranchEditor(parent,field,field.branches.indexOf(branch),true);
@@ -1881,12 +1951,14 @@
                     if (prefix.startsWith('rule.')) this.expressionCompletions.push(autocomplete().attachProtocolAutocomplete(input,{container:this.dialog,schema:this.draft,frame:true,constraint:true,property:'rule.checksum.' + key}));
                 }
             }
-            if (String(config.type).startsWith('crc')) {
-                const base = this._dataBase(field ?? {});
-                for (const [key,title] of [['polynomial','生成多项式'],['init','初始值'],['xorOut','输出异或值']])
+            const base = this._dataBase(field ?? {}),crc=String(config.type).startsWith('crc');
+            for (const [key,title] of [...(crc?[['polynomial','生成多项式']]:[]),['init','初始值'],['xorOut','输出异或值']])
                     this._control(parent,prefix + '.' + key,title,this._integerText(config[key] ?? 0,base),'text',value => edit(key,this._integer(value,title,base)));
+            const invert=this._control(parent,prefix+'.invertResult','结果按位取反',Boolean(config.invertResult),'checkbox',value=>edit('invertResult',value));
+            this._controlHelp(invert,'按校验位宽翻转每一位，例如 8 位 0x12 → 0xED，再与输出异或值异或；不改变位的排列顺序。');
+            if (crc) {
                 for (const [key,title] of [['reflectIn','输入按位反射'],['reflectOut','输出按位反射']])
-                    this._control(parent,prefix + '.' + key,title,Boolean(config[key]),'checkbox',value => edit(key,value));
+                    this._control(parent,prefix + '.' + key,title,Boolean(config[key] ?? (key==='reflectOut'?config.reflectIn:undefined) ?? config.reflected),'checkbox',value => edit(key,value));
             }
             parent.append(this._node('p','hint-text','包含起点从该字段开头计算；不包含从字段结束计算。包含终点计算到该字段结束；不包含在字段开头停止。校验范围不可包含校验值自身。'));
         }

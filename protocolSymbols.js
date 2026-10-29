@@ -4,13 +4,14 @@
     function createProtocolSymbols(reserved) {
         const aliases = { frameLength: 'FRAME_LENGTH', payloadLength: 'PAYLOAD_LENGTH', remaining: 'REMAINING',
             parentRemaining: 'PARENT_REMAINING', parent: 'PARENT', current: 'CURRENT', header: 'HEADER',
-            index: 'INDEX', seq: 'SEQ', sequence: 'SEQUENCE', true: 'TRUE', false: 'FALSE' };
+            index: 'INDEX', seq: 'SEQ', sequence: 'SEQ', SEQUENCE: 'SEQ', true: 'TRUE', false: 'FALSE' };
         const functions = { min: 'MIN', max: 'MAX', abs: 'ABS' };
         const expressionKeys = ['offset','count','length','condition','selector','lengthFrom'];
         const pathToken = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*/g;
         function migrate(schema) {
-            if (schema.symbolVersion === 2) return { schema, renames: [] };
-            if (schema.symbolVersion !== undefined) throw new Error('Unsupported protocol symbolVersion');
+            if (schema.symbolVersion === 3) return { schema, renames: [] };
+            if (schema.symbolVersion !== undefined && schema.symbolVersion !== 2) throw new Error('Unsupported protocol symbolVersion');
+            const legacy=schema.symbolVersion===undefined;
             const renames = [], original = new WeakMap(), children = new WeakMap(), dispatchNames = new WeakMap(), visited = new WeakSet(), rewrites = new WeakMap();
             const allScopes = [], definitions = schema.structures || {};
             function register(fields, identityScope, path = '', metadata = false, depth = 0) {
@@ -20,8 +21,7 @@
                     if (!field || typeof field !== 'object') continue;
                     const before = field.name; field.id ||= `${identityScope}.${before}`;
                     let after = before;
-                    if (before === 'seq' || before === 'sequence') after = 'rm_' + before;
-                    else if (!metadata && reserved.error(before, 'field')) after = 'field_' + before;
+                    if (legacy && !metadata && reserved.error(before, 'field')) after = 'field_' + before;
                     if (after !== before) {
                         const stem = after; let suffix = 2;
                         while (names.has(after)) after = stem + '_' + suffix++;
@@ -48,7 +48,7 @@
                     children.set(message, register(message.fields || [], message.id, path));
                     if (message.dispatch) {
                         const dispatch = message.dispatch, before = dispatch.name || 'content';
-                        let after = ['seq','sequence'].includes(before) ? 'rm_' + before : reserved.error(before, 'field') ? 'field_' + before : before;
+                        let after = legacy && reserved.error(before, 'field') ? 'field_' + before : before;
                         if (after !== before) {
                             const occupied = new Set((message.fields || []).map(field => field.name)), stem = after; let suffix = 2;
                             while (occupied.has(after)) after = stem + '_' + suffix++;
@@ -100,12 +100,12 @@
                     if (descriptor) {
                         if (descriptor.ambiguous) throw new Error(`Legacy branch field path has ambiguous renames: ${token}`);
                         out.push(prefix + descriptor.after); map = descriptor.children; context = empty();
-                    } else if (!map && ['parent','current','header'].includes(part)) {
-                        out.push(prefix + aliases[part]);
-                        if (part === 'parent') context = context?.parent || empty();
-                        else if (part === 'current') context = { ...context, parent: null };
+                    } else if (!map && (legacy?['parent','current','header','PARENT','CURRENT','HEADER']:['PARENT','CURRENT','HEADER']).includes(part)) {
+                        out.push(prefix + part.toUpperCase());
+                        if (part.toUpperCase() === 'PARENT') context = context?.parent || empty();
+                        else if (part.toUpperCase() === 'CURRENT') context = { ...context, parent: null };
                         else { context = { own: header, parent: null, header }; }
-                    } else { out.push(prefix + (!map && aliases[part] || part)); map ||= new Map(); }
+                    } else { out.push(prefix + (!map && (legacy?aliases[part]:part==='SEQUENCE'?'SEQ':null) || part)); map ||= new Map(); }
                 }
                 return out.join('');
             }
@@ -113,7 +113,7 @@
                 if (typeof source !== 'string') return source;
                 return source.replace(pathToken, (token, offset) => {
                     if (offset > 0 && /[\w.]/.test(source[offset - 1])) return token;
-                    if (functions[token] && /^\s*\(/.test(source.slice(offset + token.length))) return functions[token];
+                    if (legacy && functions[token] && /^\s*\(/.test(source.slice(offset + token.length))) return functions[token];
                     return rewritePath(token, scope);
                 });
             }
@@ -160,10 +160,10 @@
             }
             const headerScope = walk(schema.headerFields, empty(), 'header');
             // Historical common header seq/sequence fields were auto-filled by name.
-            for (const field of schema.headerFields || []) if (['seq','sequence'].includes(original.get(field)?.before)) field.valueSource ||= 'SEQ';
+            for (const field of schema.headerFields || []) if (legacy && ['seq','sequence'].includes(original.get(field)?.before)) field.valueSource ||= 'SEQ';
             function legacyHeaderSources(fields) {
                 for (const field of fields || []) {
-                    if (field.legacyHeader) for (const item of field.fields || []) if (['seq','sequence'].includes(original.get(item)?.before)) item.valueSource ||= 'SEQ';
+                    if (legacy && field.legacyHeader) for (const item of field.fields || []) if (['seq','sequence'].includes(original.get(item)?.before)) item.valueSource ||= 'SEQ';
                     legacyHeaderSources(field.fields);
                     for (const branch of field.branches || []) legacyHeaderSources(branch.fields);
                 }
@@ -182,9 +182,14 @@
                 }
             }
             walkMessages(schema.messages, headerScope);
+            const ruleScope={own:mergeMaps((schema.messages || []).map(message=>children.get(message))),parent:headerScope,header};
+            for(const rule of schema.rules || []){
+                for(const key of ['expression','condition','value'])update(rule,key,ruleScope);
+                if(rule.checksum)for(const key of ['start','end'])update(rule.checksum,key,ruleScope);
+            }
             for (const fields of Object.values(definitions)) if (fields.some(field => !visited.has(field))) walk(fields, empty());
             for (const checksum of schema.checksums || []) for (const key of ['start','end','offset']) update(checksum, key, headerScope);
-            schema.symbolVersion = 2; return { schema, renames };
+            schema.symbolVersion = 3; return { schema, renames };
         }
         return { migrate, createFactorySource: () => createProtocolSymbols.toString() };
     }

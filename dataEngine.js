@@ -26,7 +26,7 @@
         const candidates = [], escape = text => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const visit = (fields, start, indexDepth = 0) => {
             for (const field of fields) {
-                const repeated = field.count !== undefined || ['repeat', 'tlv'].includes(field.type);
+                const repeated = field.count !== undefined || field.until==='end' || ['repeat', 'tlv'].includes(field.type);
                 const path = field.inline ? start.replace(/\\\.$/, '') : start + escape(field.name) + (repeated ? '\\[\\d+\\]' : '');
                 const depth = indexDepth + Number(repeated);
                 const childPath = field.inline ? start : path + '\\.';

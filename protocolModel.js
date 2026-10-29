@@ -146,7 +146,7 @@
     }
     function isLengthSource(field) {
         return Boolean(field && /^uint(?:8|16|32)$/.test(field.type === 'enum' ? field.baseType ?? 'uint8' : field.type) &&
-            field.count === undefined && !field.expectedBytes);
+            field.count === undefined && field.until === undefined && !field.expectedBytes);
     }
     function lengthTargetError(protocol, source, target) {
         if (!isLengthSource(source?.node)) return '长度源必须是独立的无符号 8、16 或 32 位整数字段';
@@ -159,7 +159,7 @@
             const layout = layoutSummary(protocol, target.node.id).find(row => row.id === source.node.id);
             if (layout?.frameOffset == null) return '整帧长度源必须具有固定字节位置';
             for (let parent = findEntry(protocol, source.parentId); parent && parent.kind !== 'message'; parent = findEntry(protocol, parent.parentId)) {
-                if (parent.kind !== 'field' || parent.node.type !== 'struct' || parent.node.count !== undefined || parent.node.condition !== undefined)
+                if (parent.kind !== 'field' || parent.node.type !== 'struct' || parent.node.count !== undefined || parent.node.until !== undefined || parent.node.condition !== undefined)
                     return '整帧长度源不能位于条件分支、重复或可选数据段中';
             }
             if (source.node.condition !== undefined) return '整帧长度源不能是可选字段';
@@ -174,7 +174,7 @@
             }
             const parent = findEntry(protocol, visibleSource.parentId);
             if (parent?.kind !== 'field' || parent.node.type !== 'struct' ||
-                parent.node.count !== undefined || parent.node.condition !== undefined) break;
+                parent.node.count !== undefined || parent.node.until !== undefined || parent.node.condition !== undefined) break;
             visibleSource = parent;
         }
         return '长度源必须在目标之前读取，不能跨分支或反向引用';
@@ -323,7 +323,7 @@
             if (!value || typeof value !== 'object') return;
             for (const [key, child] of Object.entries(value)) {
                 if (expressionKeys.has(key) && typeof child === 'string' && name !== before) {
-                    const next = replaceIdentifier(child, before, name, depth, shadowed, parentInCurrent, protocol.symbolVersion === 2);
+                    const next = replaceIdentifier(child, before, name, depth, shadowed, parentInCurrent, protocol.symbolVersion >= 2);
                     if (next !== child) {
                         value[key] = next;
                         const reference = references.find(item => item.nodeId === nodeId && item.property === key && item.kind === 'expression');
@@ -401,7 +401,7 @@
         ];
         function rewriteToken(token, available, current, parent, replacements, ambiguous) {
             const parts = token.split('.');
-            const qualifiers = protocol.symbolVersion === 2 ? ['CURRENT', 'PARENT'] : ['CURRENT', 'PARENT', 'current', 'parent'];
+            const qualifiers = protocol.symbolVersion >= 2 ? ['CURRENT', 'PARENT'] : ['CURRENT', 'PARENT', 'current', 'parent'];
             const qualifier = qualifiers.includes(parts[0]) ? parts.shift() : null;
             if (!parts.some(part => nameOf(part) === target.name)) return token;
             const scope = qualifier?.toUpperCase() === 'CURRENT' ? current : qualifier?.toUpperCase() === 'PARENT' ? parent : available;
@@ -486,10 +486,10 @@
             if (!value || typeof value !== 'object') return;
             for (const [key, child] of Object.entries(value)) {
                 if (expressionKeys.has(key) && typeof child === 'string') {
-                    if (replaceIdentifier(child, before, '', depth, shadowed, parentInCurrent, protocol.symbolVersion === 2) !== child)
+                    if (replaceIdentifier(child, before, '', depth, shadowed, parentInCurrent, protocol.symbolVersion >= 2) !== child)
                         result.push({ nodeId, property: key, kind: 'expression' });
-                    if (depth > 0 && (hasQualifiedIdentifier(child, before, 'CURRENT') || protocol.symbolVersion !== 2 && hasQualifiedIdentifier(child, before, 'current')) ||
-                        depth > 1 && (hasQualifiedIdentifier(child, before, 'PARENT') || protocol.symbolVersion !== 2 && hasQualifiedIdentifier(child, before, 'parent')))
+                    if (depth > 0 && (hasQualifiedIdentifier(child, before, 'CURRENT') || !(protocol.symbolVersion >= 2) && hasQualifiedIdentifier(child, before, 'current')) ||
+                        depth > 1 && (hasQualifiedIdentifier(child, before, 'PARENT') || !(protocol.symbolVersion >= 2) && hasQualifiedIdentifier(child, before, 'parent')))
                         result.push({ nodeId, property: key, kind: 'unresolved', value: child });
                 }
                 else if (key === 'fields' || key === 'headerFields') scanFields(child, depth + 1, shadowed, parentInCurrent);
@@ -746,6 +746,7 @@
         return protocol;
     }
     function staticWidth(field, protocol, stack = []) {
+        if(field.until==='end'&&!['repeat','tlv'].includes(field.type))return null;
         let width = wireWidths[field.type === 'enum' ? field.baseType || 'uint8' : field.type];
         if (field.type === 'bitfield') width = Number.isSafeInteger(field.byteLength) && field.byteLength > 0 ? field.byteLength : null;
         if (field.type === 'fixed') width = Array.isArray(field.bytes) ? field.bytes.length : null;
@@ -849,7 +850,7 @@
                 rows.push(row);
                 parents.at(-1)?.children.push(row);
                 let childrenEnd;
-                const nested = field.count !== undefined || ['repeat','tlv'].includes(field.type) ? [...repeated, field.id] : repeated;
+                const nested = field.count !== undefined || field.until==='end' || ['repeat','tlv'].includes(field.type) ? [...repeated, field.id] : repeated;
                 if (field.fields || field.ref && !refs.includes(field.ref)) childrenEnd = walk(field.ref ? protocol.structures?.[field.ref] : field.fields,
                     begin, [...parents, row], branches, nested, field.ref ? [...refs, field.ref] : refs);
                 if (field.headerFields) walk(field.headerFields, begin, [...parents, row], branches, nested, refs);
@@ -857,7 +858,7 @@
                     { ...branches, [field.id]: branch.id }, nested, refs);
                 const width = staticWidth(field, protocol);
                 row.end = Number.isSafeInteger(width) ? shift(begin, width)
-                    : field.type === 'struct' && field.count === undefined && field.lengthFrom === 'contents' && childrenEnd ? childrenEnd
+                    : field.type === 'struct' && field.count === undefined && field.until === undefined && field.lengthFrom === 'contents' && childrenEnd ? childrenEnd
                         : { base: path + ':end', offset: 0 };
                 before(begin, row.end);
                 for (const child of row.children) { before(begin, child.start); before(child.end, row.end); }

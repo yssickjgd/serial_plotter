@@ -243,6 +243,10 @@
     }
     function baseType(field) { return field.type === 'checksum' ? 'uint' + field.byteLength * 8 : field.type === 'enum' ? field.baseType || 'uint8' : field.type; }
     function scalarWidth(field) { return field.type === 'bitfield' ? field.byteLength : TYPES[baseType(field)]?.[0]; }
+    function elementRepeatToEnd(field) { return field.until === 'end' && !['repeat','tlv'].includes(field.type); }
+    function repeatedItemLength(field, context, index, start, end, maxLength, fallback) {
+        return field.expressions.length ? bounded(evaluate(field.expressions.length,{...context,INDEX:index,REMAINING:end-start}),maxLength,'Field length') : fallback;
+    }
     function numeric(value) {
         if (typeof value === 'boolean') return Number(value);
         if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -349,7 +353,7 @@
                 if (!TYPES[baseType(field)] && !['bytes', 'reserved', 'string', 'struct', 'choice', 'repeat', 'tlv', 'fixed', 'bitfield'].includes(field.type))
                     fail('schema', `Unsupported field type: ${field.type}`);
                 if (field.type === 'bitfield') bounded(field.byteLength, compiled.maxLength, 'Bit group byte length', 1);
-                if (field.valueSource !== undefined && (field.valueSource !== 'SEQ' || !/^uint(?:8|16|32)$/.test(baseType(field)) || field.count !== undefined))
+                if (field.valueSource !== undefined && (field.valueSource !== 'SEQ' || !/^uint(?:8|16|32)$/.test(baseType(field)) || field.count !== undefined || field.until !== undefined))
                     fail('schema', 'Sequence valueSource requires SEQ and an unsigned scalar', { nodeId: field.id });
                 if (field.endian && !['little', 'big', 'le', 'be'].includes(field.endian)) fail('schema', 'Invalid field endian');
                 for (const prop of ['offset', 'count', 'length', 'condition']) if (field[prop] !== undefined)
@@ -402,6 +406,13 @@
                     if (field.count === undefined && field.until !== 'end') fail('schema', 'Repeat requires a count or until:end', { nodeId: field.id });
                     if (minimumSize(field.type === 'tlv' ? field.headerFields : field.fields) === 0)
                         fail('progress', 'Repeated item must make positive byte progress', { nodeId: field.id });
+                }
+                if(field.until!==undefined&&!['repeat','tlv'].includes(field.type)){
+                    if(field.until!=='end'||field.count!==undefined)
+                        fail('schema','Repeat requires either count or until:end',{nodeId:field.id});
+                    if (field.framingRole) fail('boundary','帧头或帧尾字段必须是单个固定字段，不能重复至段末',{nodeId:field.id});
+                    if (field.type === 'checksum') fail('boundary','校验值字段需要单项覆盖范围；请放入结构体后重复该结构体',{nodeId:field.id});
+                    if (field.inline || field.legacyOverlay) fail('boundary','内联或覆盖字段不能重复至段末，请先改为独立数据段',{nodeId:field.id});
                 }
                 if (field.type === 'string' && textCodec) textCodec.normalizeTextEncoding(field.encoding || 'utf-8');
                 if (field.bits) {
@@ -462,6 +473,7 @@
             const config = { ...source, type: source.type || 'crc',
                 width: source.width ?? (Number(String(source.type).replace('crc', '')) || 8),
                 id: source.id || `checksum${index}` };
+            validateChecksumResult(config);
             if (!['crc', 'crc8', 'crc16', 'crc32', 'sum', 'xor'].includes(config.type)) fail('schema', 'Unsupported checksum');
             if (!['8', '16', '32'].includes(String(config.width))) fail('schema', 'Checksum width must be 8, 16 or 32');
             if (config.type.startsWith('crc') && config.polynomial === undefined) fail('schema', 'CRC requires a polynomial');
@@ -487,6 +499,7 @@
         if (!compiled.unified && !compiled.framing.fixedLength && !compiled.framing.length && !compiled.framing.footer?.length) fail('schema', 'Framing requires fixedLength, length, or footer');
         compileRules(compiled);
         compileLengthRelations(compiled);
+        validateElementRepetitions(compiled);
         if (compiled.unified) checkStructuralBoundaries(compiled);
         const prepareScan = fields => { for (const field of fields) {
             field.scanWidth = scalarWidth(field);
@@ -527,7 +540,7 @@
                 if (!node) return;
                 const name = node.variable;
                 if (name) {
-                if (['TRUE', 'FALSE', 'FRAME_LENGTH', 'PAYLOAD_LENGTH', 'SEQ', 'SEQUENCE', 'REMAINING'].includes(name)) return;
+                if (['TRUE', 'FALSE', 'FRAME_LENGTH', 'PAYLOAD_LENGTH', 'SEQ', 'REMAINING'].includes(name)) return;
                 const path = name.replace(/^CURRENT\./, '').replace(/\[\d+\]/g, '');
                 if (!paths.has(path)) fail('rule-reference', `规则引用不存在的字段：${name}`);
                 const field = paths.get(path);
@@ -553,7 +566,7 @@
             if (rule.type !== 'checksum') rule.tree = tree(rule.expression, '验证表达式');
             if (rule.targetFieldId) {
                 rule.target = entries.get(rule.targetFieldId)?.field;
-                if (!rule.target || !/^u?int(?:8|16|32|64)$/.test(baseType(rule.target)) || rule.target.count !== undefined)
+                if (!rule.target || !/^u?int(?:8|16|32|64)$/.test(baseType(rule.target)) || rule.target.count !== undefined || rule.target.until !== undefined)
                     fail('rule-reference', '回填／校验值字段必须是单个整数字段');
             }
             if (rule.boundaryFallback !== undefined) {
@@ -566,6 +579,7 @@
             if (rule.type === 'checksum') {
                 if (!rule.target || !/^uint(?:8|16|32)$/.test(baseType(rule.target))) fail('rules', '校验值字段必须为 1、2 或 4 字节无符号整数');
                 rule.config = { type: 'sum', ...rule.checksum, width: scalarWidth(rule.target) * 8 };
+                validateChecksumResult(rule.config,{nodeId:rule.id});
                 if (!['crc', 'crc8', 'crc16', 'crc32', 'sum', 'xor'].includes(rule.config.type)) fail('rules', '校验算法无效');
                 if (/^crc\d+$/.test(rule.config.type) && Number(rule.config.type.slice(3)) !== rule.config.width) fail('rules', 'CRC 位数必须与校验值字段宽度一致');
                 if (rule.config.type.startsWith('crc') && !Number.isSafeInteger(rule.config.polynomial)) fail('rules', 'CRC 需要多项式');
@@ -663,7 +677,7 @@
         for (let spanIndex = cache?.spanCount ?? 0; spanIndex < spans.length; spanIndex++) {
             const span = spans[spanIndex];
             lengths.set(span.path, span.endByte - span.byteOffset);
-            const width = scalarWidth(span.field), repeated = span.field.count !== undefined;
+            const width = scalarWidth(span.field), repeated = span.field.count !== undefined || elementRepeatToEnd(span.field);
             if (width) for (let index = 0; index < (repeated ? (span.endByte - span.byteOffset) / width : 1); index++) {
                 const path = span.path + (repeated ? `[${index}]` : '');
                 const value = scalarRead(bytes, span.field, span.byteOffset + index * width, compiled);
@@ -674,10 +688,10 @@
                     put(path + '.' + bit.name, bit.type === 'bool' ? sliced !== 0n : bit.length <= 53 ? Number(sliced) : sliced);
                     lengths.set(path + '.' + bit.name, Math.ceil((bit.offset % 8 + bit.length) / 8));
                 }
-                if (span.field.valueSource === 'SEQ') values.SEQ = values.SEQUENCE = value;
+                if (span.field.valueSource === 'SEQ') values.SEQ = value;
             }
         }
-        if (complete) { values.FRAME_LENGTH = values.PAYLOAD_LENGTH = bytes.length; values.REMAINING = 0; values.SEQ ??= 0; values.SEQUENCE ??= 0; }
+        if (complete) { values.FRAME_LENGTH = values.PAYLOAD_LENGTH = bytes.length; values.REMAINING = 0; values.SEQ ??= 0; }
         values[LEN_CONTEXT] = path => {
             const value = lengths.get(path.replace(/^CURRENT\./, ''));
             if (value === undefined) fail('rule-unavailable', `LEN(${path}) 对应字段尚未读取或未启用`);
@@ -815,7 +829,7 @@
         catch (error) { fail('symbol-migration', error.message); }
     }
     function validLengthSource(field) {
-        return /^uint(?:8|16|32)$/.test(baseType(field)) && field.count === undefined && !field.expectedBytes;
+        return /^uint(?:8|16|32)$/.test(baseType(field)) && field.count === undefined && field.until === undefined && !field.expectedBytes;
     }
     function validateLengthRoles(compiled) {
         const fields = [], referenced = new Set();
@@ -909,6 +923,7 @@
             else delete field.expressions.length;
             if (field.type === 'checksum') {
                 const config = { type: 'sum', ...field.checksum, width: field.byteLength * 8, id: field.id, endian: field.endian };
+                validateChecksumResult(config,{nodeId:field.id});
                 if (![8,16,32].includes(config.width) || !['crc','crc8','crc16','crc32','sum','xor'].includes(config.type) || /^crc\d+$/.test(config.type) && Number(config.type.slice(3)) !== config.width) fail('checksum', 'Invalid checksum type or byte width', { nodeId: field.id });
                 if (config.type.startsWith('crc') && !Number.isSafeInteger(config.polynomial)) fail('checksum', 'CRC requires a polynomial', { nodeId: field.id });
                 for (const key of ['polynomial','init','xorOut']) if (config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < 0 || config[key] >= 2 ** config.width)) fail('checksum', 'Invalid checksum ' + key, { nodeId: field.id });
@@ -963,7 +978,7 @@
                 framing.footer = field.bytes; compiled.fieldFooter = true;
             }
             const width = scalarWidth(field) ?? (field.type === 'fixed' ? field.bytes.length : typeof field.length === 'number' ? field.length : null);
-            cursor = cursor === null || width === null || field.condition !== undefined || field.count !== undefined && typeof field.count !== 'number' ? null : cursor + width * (typeof field.count === 'number' ? field.count : 1);
+            cursor = cursor === null || width === null || field.condition !== undefined || elementRepeatToEnd(field) || field.count !== undefined && typeof field.count !== 'number' ? null : cursor + width * (typeof field.count === 'number' ? field.count : 1);
         }
         if (root.lengthFrom === undefined && !framing.fixedLength && cursor !== null && cursor > 0) framing.fixedLength = cursor;
         const staticFields = new Map();
@@ -972,7 +987,7 @@
             for (const field of fields) {
                 const before = at;
                 if (field.offset !== undefined) at = typeof field.offset === 'number' && base !== null ? (field.offsetBase === 'frame' ? 0 : base) + field.offset : null;
-                const optional = restricted || field.condition !== undefined || field.count !== undefined;
+                const optional = restricted || field.condition !== undefined || field.count !== undefined || elementRepeatToEnd(field);
                 if (at !== null && !optional) staticFields.set(field.id, { field, offset: at });
                 if (field.fields) locate(field.fields, at, optional);
                 const pattern = field.type === 'fixed' ? field.bytes : field.expectedBytes;
@@ -981,7 +996,7 @@
                     compiled.sync = { offset: at, bytes: pattern }; if (!at) framing.header = pattern;
                 }
                 const width = scalarWidth(field) ?? (field.type === 'fixed' ? field.bytes.length : typeof field.length === 'number' ? field.length : null);
-                at = field.legacyOverlay ? before : at === null || width === null || field.condition !== undefined || field.count !== undefined && typeof field.count !== 'number' ? null : at + width * (typeof field.count === 'number' ? field.count : 1);
+                at = field.legacyOverlay ? before : at === null || width === null || field.condition !== undefined || elementRepeatToEnd(field) || field.count !== undefined && typeof field.count !== 'number' ? null : at + width * (typeof field.count === 'number' ? field.count : 1);
             }
         }
         locate(root.fields);
@@ -1007,7 +1022,7 @@
             for (const field of fields) {
                 const before = at;
                 if (field.offset !== undefined) at = typeof field.offset === 'number' && base !== null ? (field.offsetBase === 'frame' ? 0 : base) + field.offset : null;
-                const certain = at !== null && field.condition === undefined && field.count === undefined;
+                const certain = at !== null && field.condition === undefined && field.count === undefined && !(elementRepeatToEnd(field));
                 if (certain) scope.set(field.id, { field, offset: at });
                 if (field.fields) children.push({ fields: field.fields, base: certain ? at : null });
                 for (const branch of field.branches || []) children.push({ fields: branch.fields, base: certain ? at : null });
@@ -1039,12 +1054,35 @@
     function checkStructuralBoundaries(compiled) {
         const framing = compiled.framing, root = compiled.rootMessages[0];
         const needsEnd = (fields, boundedScope = false) => fields.some(field => {
-            const dependent = typeof (field.lengthFrom ?? field.length) === 'string' && /\b(?:REMAINING|FRAME_LENGTH|PAYLOAD_LENGTH)\b/.test(field.lengthFrom ?? field.length) || field.until === 'end' && !field.expressions.length;
+            const repeatToEnd=elementRepeatToEnd(field);
+            const dependent = typeof (field.lengthFrom ?? field.length) === 'string' && /\b(?:REMAINING|FRAME_LENGTH|PAYLOAD_LENGTH)\b/.test(field.lengthFrom ?? field.length) || field.until === 'end' && (repeatToEnd||!field.expressions.length);
             const boundedChild = boundedScope || Boolean(field.lengthRelation) || field.byteLength > 0 || Boolean(field.lengthSource || field.boundary) || Boolean(field.lengthFrom && field.lengthFrom !== 'contents' && !dependent);
-            return dependent && !boundedScope && !field.lengthRelation || field.fields && needsEnd(field.fields, boundedChild) || (field.branches || []).some(branch => needsEnd(branch.fields, boundedChild));
+            return dependent && !boundedScope && (repeatToEnd||!field.lengthRelation) || field.fields && needsEnd(field.fields, boundedChild) || (field.branches || []).some(branch => needsEnd(branch.fields, boundedChild));
         });
         compiled.needsEndBoundary = needsEnd(root.fields);
         if (compiled.needsEndBoundary && !framing.fixedLength && !framing.length && !compiled.frameLengthExpression && !framing.footer?.length) fail('boundary', 'Remaining length requires a bounded frame or end delimiter');
+        // An ancestor's end is not an item's end when it still contains siblings
+        // or further repetitions. Per-item lengths and TLV lengths restore it.
+        const frameEnd = Boolean(framing.fixedLength || framing.length || compiled.frameLengthExpression || framing.footer?.length);
+        const checkItemEnds = (fields, reliableEnd, parentReliableEnd = reliableEnd) => fields.forEach((field, index) => {
+            if (elementRepeatToEnd(field) && !reliableEnd)
+                fail('boundary', '重复至段末需要明确的所属段边界；请配置外层结构体每项长度，避免吞入后续字段或重复项', { nodeId: field.id });
+            const inheritedEnd = reliableEnd && index === fields.length - 1;
+            const endNames = variables(field.expressions.length);
+            const unknownEnd = endNames.some(name => name === 'REMAINING' ? !reliableEnd : name === 'PARENT_REMAINING' ? !parentReliableEnd : ['FRAME_LENGTH','PAYLOAD_LENGTH'].includes(name) && !frameEnd);
+            const explicitEnd = Boolean(field.lengthRelation || field.boundary || field.lengthSource || field.expressions.length && !unknownEnd);
+            let itemEnd = explicitEnd || inheritedEnd;
+            if (['struct', 'choice'].includes(field.type)) {
+                if (!explicitEnd && (field.until === 'end' || field.count !== undefined && field.count !== 1)) itemEnd = false;
+            } else if (field.type === 'repeat') {
+                // A legacy repeat length bounds all its items together.
+                itemEnd = itemEnd && field.count === 1;
+            }
+            if (field.fields) checkItemEnds(field.fields, itemEnd, reliableEnd);
+            if (field.headerFields) checkItemEnds(field.headerFields, false, reliableEnd);
+            for (const branch of field.branches || []) checkItemEnds(branch.fields, field.type === 'tlv' || itemEnd, reliableEnd);
+        });
+        checkItemEnds(root.fields, true);
     }
     function bindFrameLengthExpression(compiled, root, staticFields) {
         const tree = expandFrameLengths(compiled, expression(root.lengthFrom)), inputs = [];
@@ -1119,12 +1157,12 @@
             if (!unknown.size) continue; // All terms are structural: verification/backfill is sufficient.
             const target = [...unknown.values()][0];
             for (let entry = source; entry; entry = entry.owner && compiled.fieldEntries.get(entry.owner.id))
-                if (entry.field.condition !== undefined || entry.field.count !== undefined || ['choice','repeat','tlv'].includes(entry.field.type))
+                if (entry.field.condition !== undefined || entry.field.count !== undefined || entry.field.until !== undefined || ['choice','repeat','tlv'].includes(entry.field.type))
                     fail('length-relation', '解析长度源必须是先前必定读取的唯一数值字段', { nodeId: rule.id });
             for (let entry = target; entry?.owner; entry = compiled.fieldEntries.get(entry.owner.id))
-                if (entry.owner.count !== undefined || ['choice','repeat','tlv'].includes(entry.owner.type))
+                if (entry.owner.count !== undefined || entry.owner.until !== undefined || ['choice','repeat','tlv'].includes(entry.owner.type))
                     fail('length-relation', '无法唯一定位重复或分支内部的长度目标，请引用其所属数据段', { nodeId: rule.id });
-            if (target.field.count !== undefined || target.field.condition !== undefined || entries.indexOf(source) >= entries.indexOf(target))
+            if (target.field.count !== undefined || elementRepeatToEnd(target.field) || target.field.condition !== undefined || entries.indexOf(source) >= entries.indexOf(target))
                 fail('length-relation', '长度字段必须先于唯一的数据段读取', { nodeId: rule.id });
             for (const name of variables(tree).filter(name => name !== '__unknownLength')) {
                 if (['TRUE','FALSE'].includes(name)) continue;
@@ -1177,7 +1215,7 @@
             const fixedWidth = field => {
                 let width = scalarWidth(field) ?? (field.type === 'fixed' ? field.bytes.length : typeof field.length === 'number' ? field.length : null);
                 if (width === null && field.type === 'struct') width = field.fields.reduce((sum, child) => sum + fixedWidth(child),0);
-                if (width === null || field.condition !== undefined || field.offset !== undefined || field.count !== undefined && typeof field.count !== 'number')
+                if (width === null || field.condition !== undefined || field.offset !== undefined || elementRepeatToEnd(field) || field.count !== undefined && typeof field.count !== 'number')
                     fail('length-relation', '未知段后的字段长度尚不确定，请为后续段提供独立长度', { nodeId: field.id });
                 return width * (field.count ?? 1);
             };
@@ -1187,7 +1225,7 @@
                 for (const [index,field] of fields.entries()) {
                 field.expressionBoundaryScope = inherited;
                 if (inherited && unresolved(field)) field.lengthBoundaryTail = fields.slice(index+1).reduce((sum, item) => sum + fixedWidth(item),0);
-                field.expressionBoundaryRepeat = inherited && field.until === 'end' && !field.expressions.length;
+                field.expressionBoundaryRepeat = inherited && ['repeat','tlv'].includes(field.type) && field.until === 'end' && !field.expressions.length;
                 const bounded = field.byteLength > 0 || field.lengthSource || field.boundary || field.lengthFrom && !['contents','REMAINING'].includes(field.lengthFrom);
                 if (field.fields) mark(field.fields, inherited && !bounded);
                 if (field.headerFields) mark(field.headerFields, false);
@@ -1267,12 +1305,13 @@
             const field = entry.field;
             if (active.has(field.id)) fail('length-reference', `LEN(${entry.path}) 存在循环长度依赖`);
             for (let owner = entry.owner; owner; owner = compiled.fieldEntries.get(owner.id)?.owner)
-                if (!active.has(owner.id) && (owner.condition !== undefined || owner.count !== undefined || ['choice', 'repeat', 'tlv'].includes(owner.type)))
+                if (!active.has(owner.id) && (owner.condition !== undefined || owner.count !== undefined || owner.until==='end' || ['choice', 'repeat', 'tlv'].includes(owner.type)))
                     fail('length-reference', `LEN(${entry.path}) 的字段不属于唯一确定的段`);
             if (field.condition !== undefined) fail('length-reference', `LEN(${entry.path}) 的段可能未启用，无法独立确定长度`);
+            if (elementRepeatToEnd(field)) fail('length-reference', `LEN(${entry.path}) 依赖所属段末，无法用单项宽度确定整个重复区域长度`);
             active.add(field.id);
             const scope = entry.path.slice(0, -field.name.length).replace(/\.$/, '');
-            let length = scalarWidth(field) !== undefined ? literal(scalarWidth(field))
+            let length = elementRepeatToEnd(field)?null:scalarWidth(field) !== undefined ? literal(scalarWidth(field))
                 : field.type === 'fixed' ? literal(field.bytes.length)
                 : field.expressions.length ? expand(field.expressions.length, scope)
                 : ['struct', 'repeat'].includes(field.type) && field.until !== 'end' ? contents(field.fields)
@@ -1340,7 +1379,7 @@
     // resuming never repeats completed fields, expressions, branch selection or delimiter prefixes.
     function createUnifiedFrameScan(compiled, knownEnd = null, work = null, earlyRules = false) {
         let bytes = new Uint8Array(), minimum = 0, result = null;
-        const spans = [], context = { FRAME_LENGTH: knownEnd ?? 0, PAYLOAD_LENGTH: knownEnd ?? 0, SEQ: 0, SEQUENCE: 0 };
+        const spans = [], context = { FRAME_LENGTH: knownEnd ?? 0, PAYLOAD_LENGTH: knownEnd ?? 0, SEQ: 0 };
         const layout = { spans, scalarValues: new Map(), boundaries: new Map(), scalarCount: 0, contextBytes: 0 };
         const lengths = compiled.usesLengthFunction ? new Map() : null;
         if (lengths) spans[RULE_LENGTHS] = lengths;
@@ -1378,31 +1417,38 @@
                 if (--budget < 0) fail('bounds', 'Frame layout field budget exceeded');
                 if (work) work.layoutFieldVisits++;
                 const local = { ...parent, ...target, PARENT: parent, CURRENT: target, REMAINING: end - cursor, PARENT_REMAINING: parent.REMAINING ?? end - base,
-                    SEQ: context.SEQ, SEQUENCE: context.SEQUENCE, [LEN_CONTEXT]: len };
+                    SEQ: context.SEQ, [LEN_CONTEXT]: len };
+                if(elementRepeatToEnd(field))local.INDEX=0;
                 local[LENGTH_CURSOR] = cursor;
                 if (field.expressions.condition && !evaluate(field.expressions.condition, boundaryEvaluationContext(field, local))) continue;
                 if (field.expressions.offset) cursor = (field.offsetBase === 'frame' ? 0 : base) + bounded(evaluate(field.expressions.offset, boundaryEvaluationContext(field, local)), compiled.maxLength, 'Field offset');
                 const path = prefix ? `${prefix}.${field.name}` : field.name, start = cursor;
                 lengthBoundaryContext(field, local, cursor, end, compiled);
                 const evaluation = boundaryEvaluationContext(field, local);
-                const count = field.expressions.count ? bounded(evaluate(field.expressions.count, evaluation), LIMITS.array, 'Field count') : 1;
+                const repeatToEnd=elementRepeatToEnd(field);
+                const count = repeatToEnd?LIMITS.array:field.expressions.count ? bounded(evaluate(field.expressions.count, evaluation), LIMITS.array, 'Field count') : 1;
                 const length = field.endBytes ? yield* boundary(field, cursor, end) : field.expressions.length ? bounded(evaluate(field.expressions.length, evaluation), compiled.maxLength, 'Field length')
                     : field.expressionBoundaryRepeat ? bounded(evaluation.REMAINING, compiled.maxLength, 'Repeat length') : null;
-                if (length !== null) yield* waitFor(cursor + length);
+                if (length !== null && (!repeatToEnd||cursor<end)) yield* waitFor(cursor + length);
                 const limit = length === null ? end : cursor + length;
                 if (['struct','choice'].includes(field.type)) {
                     const values = [];
-                    for (let index = 0; index < count; index++) {
-                        const itemEnd = length === null ? end : cursor + length;
+                    for (let index = 0; index < count && (!repeatToEnd||cursor<end); index++) {
+                        const itemStart=cursor;
+                        const itemLength=repeatToEnd?repeatedItemLength(field,evaluation,index,cursor,end,compiled.maxLength,length):length;
+                        const itemEnd = itemLength === null ? end : cursor + itemLength;
                         if (itemEnd > end) fail('boundary', 'Array segment exceeds its container');
-                        const branch = field.type === 'choice' ? chooseBranch(field, { ...local, REMAINING: field.expressionBoundaryScope ? local.REMAINING : itemEnd - cursor }) : null;
+                        if(itemLength!==null)yield* waitFor(itemEnd);
+                        const branch = field.type === 'choice' ? chooseBranch(field, { ...local, INDEX:index, REMAINING: field.expressionBoundaryScope ? local.REMAINING : itemEnd - cursor }) : null;
                         if (field.type === 'choice' && !branch) fail('condition', 'No frame branch matches');
-                        const value = field.inline ? target : {}, itemPath = field.count !== undefined ? `${path}[${index}]` : path;
+                        const value = field.inline ? target : {}, itemPath = field.count !== undefined||repeatToEnd ? `${path}[${index}]` : path;
                         const next = yield* walk(branch ? branch.fields : field.fields, value, cursor, itemEnd, field.inline ? prefix : itemPath, { ...local, INDEX: index });
-                        lengths?.set(itemPath, (length === null ? next : itemEnd) - cursor);
-                        cursor = length === null ? next : itemEnd; values.push(value);
+                        lengths?.set(itemPath, (itemLength === null ? next : itemEnd) - cursor);
+                        cursor = itemLength === null ? next : itemEnd; values.push(value);
+                        if(repeatToEnd&&cursor<=itemStart)fail('progress','Repeated item made no byte progress',{nodeId:field.id});
                     }
-                    if (!field.inline) target[field.name] = field.count !== undefined ? values : values[0];
+                    if(repeatToEnd&&cursor<end)fail('bounds','Repeat count limit exceeded',{nodeId:field.id});
+                    if (!field.inline) target[field.name] = field.count !== undefined||repeatToEnd ? values : values[0];
                 } else if (['repeat','tlv'].includes(field.type)) {
                     const items = [], repeatCount = field.until === 'end' ? LIMITS.array : count;
                     for (let index = 0; index < repeatCount && (field.until !== 'end' || cursor < limit); index++) {
@@ -1423,11 +1469,25 @@
                 } else {
                     const size = field.scanWidth ?? (field.type === 'fixed' ? field.bytes.length : length);
                     if (size === null) fail('boundary', 'Field has no stream boundary', { nodeId: field.id });
-                    yield* waitFor(cursor + size * count);
-                    if (field.scanWidth) target[field.name] = field.count !== undefined
-                        ? Array.from({ length: count }, (_, index) => cachedScalar(bytes, field, cursor + index * size, compiled, layout, work)) : cachedScalar(bytes, field, cursor, compiled, layout, work);
-                    if (lengths && field.count !== undefined) for (let index = 0; index < count; index++) lengths.set(`${path}[${index}]`, size);
-                    cursor += size * count;
+                    if(repeatToEnd){
+                        const values=[];
+                        for(let index=0;index<LIMITS.array&&cursor<end;index++){
+                            const width=field.scanWidth ?? (field.type==='fixed'?field.bytes.length:repeatedItemLength(field,evaluation,index,cursor,end,compiled.maxLength,size));
+                            if(!Number.isSafeInteger(width)||width<=0)fail('progress','重复至段末的每项必须消耗正整数字节',{nodeId:field.id});
+                            if(cursor+width>end)fail('truncated','所属段剩余字节不足以组成完整重复项',{nodeId:field.id});
+                            yield* waitFor(cursor+width);
+                            if(field.scanWidth)values.push(cachedScalar(bytes,field,cursor,compiled,layout,work));
+                            lengths?.set(`${path}[${index}]`,width);cursor+=width;
+                        }
+                        if(cursor<end)fail('bounds','Repeat count limit exceeded',{nodeId:field.id});
+                        if(field.scanWidth)target[field.name]=values;
+                    }else{
+                        yield* waitFor(cursor + size * count);
+                        if (field.scanWidth) target[field.name] = field.count !== undefined
+                            ? Array.from({ length: count }, (_, index) => cachedScalar(bytes, field, cursor + index * size, compiled, layout, work)) : cachedScalar(bytes, field, cursor, compiled, layout, work);
+                        if (lengths && field.count !== undefined) for (let index = 0; index < count; index++) lengths.set(`${path}[${index}]`, size);
+                        cursor += size * count;
+                    }
                 }
                 if (cursor > end || cursor > compiled.maxLength) fail('boundary', 'Field exceeds its containing segment');
                 const span = { fieldId: field.id, field, path, byteOffset: start, endByte: cursor };
@@ -1450,7 +1510,7 @@
                 }
                 spans.push(span);
                 lengths?.set(path, cursor - start);
-                if (field.valueSource === 'SEQ') { context.SEQ = context.SEQUENCE = target[field.name]; parent.SEQ = parent.SEQUENCE = target[field.name]; }
+                if (field.valueSource === 'SEQ') { context.SEQ = target[field.name]; parent.SEQ = target[field.name]; }
                 if (field.legacyHeader && target[field.name]) Object.assign(parent, target[field.name], { HEADER: target[field.name] });
                 if (field.legacyOverlay) cursor = priorCursor;
             }
@@ -1546,13 +1606,34 @@
     function minimumSize(fields) {
         let total = 0;
         for (const field of fields) {
-            if (field.condition !== undefined) continue;
+            if (field.condition !== undefined || elementRepeatToEnd(field)) continue;
             let width = scalarWidth(field) || (field.type === 'fixed' ? field.bytes.length :
-                typeof field.length === 'number' ? field.length : field.type === 'struct' ? minimumSize(field.fields) : 0);
+                typeof field.length === 'number' ? field.length : field.type === 'struct' ? minimumSize(field.fields) :
+                field.type === 'choice' && field.branches.length ? Math.min(...field.branches.map(branch => minimumSize(branch.fields))) : 0);
             if (field.count !== undefined) width *= typeof field.count === 'number' ? field.count : 0;
             total = Math.max(total, (typeof field.offset === 'number' ? field.offset : total) + width);
         }
         return total;
+    }
+    function validateElementRepetitions(compiled) {
+        const walk = fields => { for (const field of fields) {
+            if (elementRepeatToEnd(field)) {
+                const length = field.expressions.length;
+                if (length && !variables(length).length && evaluate(length,{}) <= 0)
+                    fail('progress','重复至段末的单项长度必须大于 0，不能重复空内容',{nodeId:field.id});
+                if (!length && !field.endBytes && !scalarWidth(field) && !(field.type === 'fixed' && field.bytes.length)) {
+                    const lists = field.type === 'choice' ? field.branches.map(branch => branch.fields) : field.type === 'struct' ? [field.fields] : null;
+                    if (!lists) fail('boundary','重复至段末需要明确每项字节数、长度表达式或单项边界',{nodeId:field.id});
+                    if (!lists.length || lists.some(items => minimumSize(items) === 0))
+                        fail('progress','重复至段末的每个结构或分支必须消耗字节，不能包含空条目',{nodeId:field.id});
+                }
+            }
+            if (field.fields) walk(field.fields);
+            if (field.headerFields) walk(field.headerFields);
+            for (const branch of field.branches || []) walk(branch.fields);
+        } };
+        walk(compiled.headerFields);
+        for (const message of compiled.messages) walk(message.fields);
     }
     function variables(tree, out = []) {
         if (!tree) return out;
@@ -1570,7 +1651,7 @@
         let cursor = base;
         for (const field of fields) {
             const before = cursor;
-            if (field.until === 'end' && field.length === undefined && !field.lengthRelationCandidate && fields.indexOf(field) !== fields.length - 1)
+            if (field.until === 'end' && (elementRepeatToEnd(field)||field.length === undefined && !field.lengthRelationCandidate) && fields.indexOf(field) !== fields.length - 1)
                 fail('boundary', 'Repeat-until-end must be the last field or have an explicit segment length', { nodeId: field.id });
             const check = tree => { for (const variable of variables(tree)) {
                 const parts = variable.split(/[.[]/), scope = parts[0] === 'PARENT' ? inherited : available, key = ['PARENT','CURRENT'].includes(parts[0]) ? parts[1] : parts[0];
@@ -1624,7 +1705,7 @@
                         framing.footer = field.bytes.slice(); compiled.fieldFooter = true;
                     } else fail('schema', 'Unknown framing role', { nodeId: field.id });
                 }
-                const childRestricted = restricted || field.condition !== undefined || field.count !== undefined || ['choice','repeat','tlv'].includes(field.type);
+                const childRestricted = restricted || field.condition !== undefined || field.count !== undefined || field.until==='end' || ['choice','repeat','tlv'].includes(field.type);
                 if (field.fields) walk(field.fields, cursor, childRestricted);
                 if (field.headerFields) walk(field.headerFields, cursor, true);
                 for (const branch of field.branches || []) walk(branch.fields, cursor, true);
@@ -1689,8 +1770,12 @@
         for (let bit = 0; bit < width; bit++) { output = output << 1n | input & 1n; input >>= 1n; }
         return output;
     }
+    function validateChecksumResult(config, details={}) {
+        if(config.invertResult!==undefined&&typeof config.invertResult!=='boolean')fail('checksum','结果取反必须为布尔值',{...details});
+    }
     function checksum(bytes, config) {
         bytes = bytesOf(bytes);
+        validateChecksumResult(config);
         const width = config.width || Number(String(config.type).replace('crc', '')) || 8;
         if (![8, 16, 32].includes(width)) fail('checksum', 'Unsupported checksum width');
         const mask = (1n << BigInt(width)) - 1n;
@@ -1711,7 +1796,7 @@
             const reflectOut = config.reflectOut ?? reflected;
             if (reflectOut !== reflected) value = reflect(value, width);
         }
-        return Number((value ^ BigInt(config.xorOut ?? 0)) & mask);
+        return Number((value ^ (config.invertResult?mask:0n) ^ BigInt(config.xorOut ?? 0)) & mask);
     }
     function position(tree, context, length) {
         let value = evaluate(tree, context);
@@ -1859,7 +1944,7 @@
         const warnings = [];
         let budget = LIMITS.fields * 4;
         function width(field) {
-            if (field.condition !== undefined || field.count !== undefined && typeof field.count !== 'number') return null;
+            if (field.condition !== undefined || elementRepeatToEnd(field) || field.count !== undefined && typeof field.count !== 'number') return null;
             const size = scalarWidth(field) ?? (field.type === 'fixed' ? field.bytes.length :
                 typeof field.length === 'number' ? field.length : null);
             return size === null ? null : size * (field.count ?? 1);
@@ -1871,7 +1956,7 @@
                 if (field.offset !== undefined) cursor = typeof field.offset === 'number' && (field.offsetBase === 'frame' || base !== null)
                     ? (field.offsetBase === 'frame' ? 0 : base) + field.offset : null;
                 const path = prefix ? `${prefix}.${field.name}` : field.name, size = width(field);
-                if (cursor !== null && field.condition === undefined && (field.count === undefined || typeof field.count === 'number')) {
+                if (cursor !== null && field.condition === undefined && field.until !== 'end' && (field.count === undefined || typeof field.count === 'number')) {
                     if (field.type === 'fixed') for (let index = 0; index < (field.count ?? 1) && --budget >= 0; index++) {
                         const offset = cursor + index * field.bytes.length;
                         if (offset < base || offset + field.bytes.length > end || !field.bytes.every((byte, i) => bytes[offset + i] === byte))
@@ -1910,7 +1995,7 @@
             fields: {}, header: {}, values: {}, flatFields: [], spans: [], warnings: [], valid: true,
             rawPayload: bytes.slice(payloadStart, payloadEnd), payloadOffset: payloadStart,
             payloadLength: payloadEnd - payloadStart, frameLength: bytes.length };
-        const context = { FRAME_LENGTH: bytes.length, PAYLOAD_LENGTH: record.payloadLength, SEQ: 0, SEQUENCE: 0 };
+        const context = { FRAME_LENGTH: bytes.length, PAYLOAD_LENGTH: record.payloadLength, SEQ: 0 };
         function warn(code, message, details = {}) {
             if (!['text-decode','unknown-command','unknown-subcommand','document-conflict','extra-bytes'].includes(code)) record.valid = false;
             record.warnings.push({ severity: record.valid ? 'warning' : 'error', code, message, ...details }); }
@@ -1944,7 +2029,8 @@
                 const priorCursor = cursor;
                 if (++decodedCount > LIMITS.fields * 4) fail('bounds', 'Decoded field count limit exceeded');
                 const local = { ...rootContext, ...target, PARENT: rootContext, CURRENT: target, PARENT_REMAINING: rootContext.REMAINING ?? end - base, REMAINING: Math.max(0, end - cursor),
-                    SEQ: context.SEQ, SEQUENCE: context.SEQUENCE, [LEN_CONTEXT]: len };
+                    SEQ: context.SEQ, [LEN_CONTEXT]: len };
+                if(elementRepeatToEnd(field))local.INDEX=0;
                 const path = prefix ? `${prefix}.${field.name}` : field.name;
                 try {
                     if (field.expressions.condition && !evaluate(field.expressions.condition, local)) continue;
@@ -1995,19 +2081,21 @@
                         }
                         lengths?.set(path, cursor - fieldStart); continue;
                     }
-                    const count = field.expressions.count ? bounded(evaluate(field.expressions.count, local), LIMITS.array, 'Array count') : 1;
-                    const array = field.count !== undefined, values = [];
-                    for (let index = 0; index < count; index++) {
+                    const repeatToEnd=elementRepeatToEnd(field);
+                    const count = repeatToEnd?LIMITS.array:field.expressions.count ? bounded(evaluate(field.expressions.count, local), LIMITS.array, 'Array count') : 1;
+                    const array = field.count !== undefined||repeatToEnd, values = [];
+                    for (let index = 0; index < count && (!repeatToEnd||cursor<end); index++) {
                         if (++decodedCount > LIMITS.fields * 4) fail('bounds', 'Decoded field count limit exceeded');
                         const itemPath = array ? `${path}[${index}]` : path;
                         const start = cursor; let value;
+                        const itemLength=repeatToEnd?repeatedItemLength(field,evaluation,index,cursor,end,compiled.maxLength,fieldLength):fieldLength;
                         if (field.type === 'struct' || field.type === 'choice') {
-                            const segmentEnd = fieldLength !== undefined ? cursor + fieldLength : end;
+                            const segmentEnd = itemLength !== undefined ? cursor + itemLength : end;
                             if (segmentEnd > end) fail('truncated', `Truncated ${itemPath}`);
                             value = field.inline ? target : {};
-                            const branch = field.type === 'choice' ? chooseBranch(field, { ...local, REMAINING: field.expressionBoundaryScope ? local.REMAINING : segmentEnd - cursor }) : null;
+                            const branch = field.type === 'choice' ? chooseBranch(field, { ...local, INDEX:index, REMAINING: field.expressionBoundaryScope ? local.REMAINING : segmentEnd - cursor }) : null;
                             if (field.type === 'choice' && !branch) fail('condition', `No branch matches ${itemPath}`);
-                            if (field.type === 'choice' && field.selectorExpression) record.command ??= evaluate(field.selectorExpression, local);
+                            if (field.type === 'choice' && field.selectorExpression) record.command ??= evaluate(field.selectorExpression, { ...local, INDEX:index });
                             if (branch?.legacyMessage) {
                                 const selected = branch.legacyMessage;
                                 if (record.messageId && record.messageId !== compiled.rootMessages[0].id) { record.parentMessageId ??= record.messageId; record.subcommand = evaluate(field.selectorExpression, local); }
@@ -2018,7 +2106,7 @@
                                 record.known = false; warn('unknown-command', record.messageName);
                             } else if (branch?.legacyUnknown === 'subcommand') warn('unknown-subcommand', 'Unknown nested command');
                             cursor = readFields(branch ? branch.fields : field.fields, value, cursor, segmentEnd, field.inline ? prefix : itemPath, { ...local, INDEX: index }, strict);
-                            if (fieldLength !== undefined) { retainTail(field, value, cursor, segmentEnd, itemPath); cursor = segmentEnd; }
+                            if (itemLength !== undefined) { retainTail(field, value, cursor, segmentEnd, itemPath); cursor = segmentEnd; }
                             // Unbounded containers end after their selected fields, not at
                             // the enclosing frame end (which can still contain a CRC).
                             const actualLength = cursor - start;
@@ -2036,7 +2124,7 @@
                             if (!field.bytes.every((byte, index) => value[index] === byte)) fail('fixed', `Invalid fixed bytes: ${itemPath}`);
                             cursor += field.bytes.length; add(field, itemPath, value, start, cursor - start);
                         } else if (field.type === 'bytes' || field.type === 'reserved' || field.type === 'string') {
-                            const length = fieldLength ?? end - cursor;
+                            const length = itemLength ?? end - cursor;
                             if (cursor + length > end) fail('truncated', `Truncated ${path}`);
                             const part = bytes.slice(cursor, cursor + length); cursor += length;
                             if (field.type === 'bytes' || field.type === 'reserved') value = part;
@@ -2068,13 +2156,15 @@
                                 }
                             }
                         }
+                        if (field.expectedBytes && !field.expectedBytes.every((byte, offset) => bytes[start + offset] === byte)) fail('fixed', 'Fixed field content does not match', { nodeId: field.id });
                         lengths?.set(itemPath, cursor - start); values.push(value);
+                        if(repeatToEnd&&cursor<=start)fail('progress','Repeated item made no byte progress',{nodeId:field.id});
                     }
+                    if(repeatToEnd&&cursor<end)fail('bounds','Repeat count limit exceeded',{nodeId:field.id});
                     lengths?.set(path, cursor - fieldStart);
                     if (!field.inline) target[field.name] = array ? values : values[0];
-                    if (field.valueSource === 'SEQ') { context.SEQ = context.SEQUENCE = values[0]; rootContext.SEQ = rootContext.SEQUENCE = values[0]; }
+                    if (field.valueSource === 'SEQ') { context.SEQ = values[0]; rootContext.SEQ = values[0]; }
                     if (field.legacyHeader && values[0]) Object.assign(rootContext, values[0], { HEADER: values[0] });
-                    if (field.expectedBytes && !field.expectedBytes.every((byte, index) => bytes[fieldStart + index] === byte)) fail('fixed', 'Fixed field content does not match', { nodeId: field.id });
                     if (field.legacyOverlay) cursor = priorCursor;
                 } catch (error) {
                     if (!(error instanceof ProtocolError)) throw error;
@@ -2220,7 +2310,7 @@
         const selectedChildren = new Map();
         while (rootMessage?.parent) { selectedChildren.set(rootMessage.parent, rootMessage); rootMessage = rootMessage.parent; }
         const data = new Uint8Array(compiled.maxLength), payloadStart = schema.payloadOffset || 0;
-        const context = { ...fields, ...options.header, SEQUENCE: options.sequence ?? 0,
+        const context = { ...fields, ...options.header,
             SEQ: options.sequence ?? 0, PAYLOAD_LENGTH: compiled.unified ? compiled.framing.fixedLength ?? 0 : 0,
             FRAME_LENGTH: compiled.framing.fixedLength ?? 0, HEADER: headerValues };
         if (!compiled.unified && compiled.framing.fixedLength) context.PAYLOAD_LENGTH = compiled.framing.fixedLength - payloadStart +
@@ -2261,7 +2351,8 @@
                 const priorCursor = cursor;
                 if (++encodedFields > LIMITS.fields * 4) fail('bounds', 'Encoded field count limit exceeded');
                 const local = { ...parentContext, ...target, PARENT: parentContext, CURRENT: target, PARENT_REMAINING: parentContext.REMAINING ?? end - base, REMAINING: end - cursor,
-                    SEQ: context.SEQ, SEQUENCE: context.SEQUENCE, FRAME_LENGTH: context.FRAME_LENGTH, PAYLOAD_LENGTH: context.PAYLOAD_LENGTH, HEADER: context.HEADER, [LEN_CONTEXT]: len };
+                    SEQ: context.SEQ, FRAME_LENGTH: context.FRAME_LENGTH, PAYLOAD_LENGTH: context.PAYLOAD_LENGTH, HEADER: context.HEADER, [LEN_CONTEXT]: len };
+                if(elementRepeatToEnd(field))local.INDEX=0;
                 const path = prefix ? `${prefix}.${field.name}` : field.name;
                 if (field.expressions.condition && !evaluate(field.expressions.condition, local)) continue;
                 if (field.expressions.offset) cursor = (field.offsetBase === 'frame' ? 0 : base) + bounded(evaluate(field.expressions.offset, local), compiled.maxLength, 'Field offset');
@@ -2287,7 +2378,7 @@
                             const valueStart = writeFields(field.headerFields, headerTarget, start, itemPath, segmentEnd, itemContext);
                             const branch = chooseBranch(field, { ...itemContext, ...item });
                             if (branch && !(branch.default && !branch.fields.length)) {
-                                cursor = writeFields(branch.fields, item, valueStart, itemPath, segmentEnd, { ...itemContext, ...item });
+                                cursor = writeFields(branch.fields, item, valueStart, itemPath, segmentEnd, { ...itemContext, ...item, _inferLength:true });
                                 if (item._unknownTail) { const raw = encodeBytes(item._unknownTail, itemPath); if (cursor + raw.length > segmentEnd) fail('boundary', 'TLV tail exceeds container'); claim(cursor,cursor+raw.length,field); data.set(raw,cursor); cursor += raw.length; }
                             } else {
                                 const raw = encodeBytes(item.rawPayload || [], itemPath);
@@ -2315,23 +2406,26 @@
                     }
                     storage.endByte = cursor; lengths?.set(path, cursor - storage.offset); continue;
                 }
-                const count = field.expressions.count ? bounded(evaluate(field.expressions.count, local), LIMITS.array, 'Array count') : 1;
-                const array = field.count !== undefined;
+                const repeatToEnd=elementRepeatToEnd(field);
+                const count = repeatToEnd?bounded(rawValue?.length ?? 0,LIMITS.array,'Array count'):field.expressions.count ? bounded(evaluate(field.expressions.count, local), LIMITS.array, 'Array count') : 1;
+                const array = field.count !== undefined||repeatToEnd;
+                if(array)storage.itemLengths=[];
                 if (array && rawValue !== undefined && (!Array.isArray(rawValue) && !(rawValue instanceof Uint8Array) || rawValue.length !== count))
                     fail('value', `Array ${path} requires exactly ${count} entries`);
                 for (let index = 0; index < count; index++) {
                     if (++encodedFields > LIMITS.fields * 4) fail('bounds', 'Encoded field count limit exceeded');
                     const itemPath = array ? `${path}[${index}]` : path;
                     const itemStart = cursor;
+                    const itemLength=repeatToEnd&&!inferredLength?repeatedItemLength(field,local,index,cursor,end,compiled.maxLength,boundedLength):boundedLength;
                     let value = field.inline ? target : array ? rawValue?.[index] : rawValue;
                     value ??= ['struct','choice'].includes(field.type) ? {} : field.type === 'string' ? '' : ['bytes', 'reserved'].includes(field.type) ? [] : 0;
                     if (field.type === 'struct' || field.type === 'choice') {
-                        const segmentEnd = boundedLength !== undefined ? cursor + boundedLength : end;
+                        const segmentEnd = itemLength !== undefined ? cursor + itemLength : end;
                         if (segmentEnd > end) fail('boundary', 'Nested segment exceeds its container');
-                        const branch = field.type === 'choice' ? chosenBranches.has(field.id) ? field.branches.find(item => item.id === chosenBranches.get(field.id)) : chooseBranch(field, local) : null;
+                        const branch = field.type === 'choice' ? chosenBranches.has(field.id) ? field.branches.find(item => item.id === chosenBranches.get(field.id)) : chooseBranch(field, { ...local, INDEX:index }) : null;
                         if (field.type === 'choice' && !branch) fail('condition', `No branch matches ${itemPath}`);
                         cursor = writeFields(branch ? branch.fields : field.fields, value, cursor, field.inline ? prefix : itemPath, segmentEnd, { ...local, INDEX: index, _inferLength: inferredLength });
-                        if (boundedLength !== undefined) {
+                        if (itemLength !== undefined) {
                             if (field.leftover === 'exact' && cursor !== segmentEnd) fail('boundary', 'Segment was not consumed exactly');
                             if (field.leftover === 'padding' && value?._unknownTail && encodeBytes(value._unknownTail,itemPath).some(byte => byte !== (field.paddingByte ?? 0))) fail('padding', 'Invalid supplied segment padding');
                             if (value?._unknownTail) { const tail = encodeBytes(value._unknownTail,itemPath); if (cursor+tail.length>segmentEnd) fail('boundary','Nested tail exceeds segment'); claim(cursor,cursor+tail.length,field); data.set(tail,cursor); }
@@ -2341,18 +2435,18 @@
                         }
                     } else if (field.type === 'fixed') {
                         if (cursor + field.bytes.length > end) fail('boundary', 'Fixed bytes exceed container');
-                        if (rawValue !== undefined && String(Array.from(encodeBytes(rawValue, path))) !== String(field.bytes)) fail('fixed', 'Supplied fixed bytes do not match the schema');
+                        if ((array ? rawValue?.[index] : rawValue) !== undefined && String(Array.from(encodeBytes(value, itemPath))) !== String(field.bytes)) fail('fixed', 'Supplied fixed bytes do not match the schema');
                         claim(cursor,cursor+field.bytes.length,field);
                         if (compiled.unified && field.legacyOverlay) fixedOverlays.push({ offset: cursor, bytes: field.bytes });
                         else data.set(field.bytes,cursor);
                         cursor += field.bytes.length;
                     } else if (field.type === 'bytes' || field.type === 'reserved' || field.type === 'string') {
                         const part = field.type === 'string' ? encodeText(value, field.encoding) : encodeBytes(value, path);
-                        const length = boundedLength ?? part.length;
+                        const length = itemLength ?? part.length;
                         if (part.length > length || cursor + length > end) fail('value', `Field ${path} exceeds its byte length`);
                         claim(cursor,cursor+length,field); data.set(part, cursor); cursor += length;
                     } else {
-                        if (field.expectedBytes && rawValue === undefined) value = scalarRead(Uint8Array.from(field.expectedBytes), field, 0, compiled);
+                        if (field.expectedBytes && (array ? rawValue?.[index] : rawValue) === undefined) value = scalarRead(Uint8Array.from(field.expectedBytes), field, 0, compiled);
                         if (field.bits) {
                             let packed = typeof value === 'object' ? exactInteger(value._raw ?? 0, field.name) : exactInteger(value, field.name);
                             for (const bit of field.bits) {
@@ -2375,7 +2469,11 @@
                             fail('fixed', 'Supplied synchronization value does not match the fixed bytes', { nodeId: field.id });
                     }
                     lengths?.set(itemPath, cursor - itemStart);
+                    storage.itemLengths?.push(cursor-itemStart);
+                    if(repeatToEnd&&cursor<=itemStart)fail('progress','Repeated item made no byte progress',{nodeId:field.id});
                 }
+                if(repeatToEnd&&!parentContext._inferLength&&!(end===compiled.maxLength&&!context.FRAME_LENGTH)&&cursor!==end)
+                    fail('length','Repeat items do not fill the bounded segment',{nodeId:field.id});
                 storage.endByte = cursor; lengths?.set(path, cursor - storage.offset);
                 if (field.legacyOverlay) cursor = priorCursor;
             }
@@ -2444,13 +2542,20 @@
         const result = data.slice(0, total);
         if (compiled.unified) {
             const storage = [...encodedOffsets.values()];
+            const lengthWrites=new Map();
             for (const target of storage.filter(item => item.field.autoLengthSource)) {
                 const sourceId = target.field.autoLengthSource.id;
                 const scope = target.path.slice(0, -target.field.name.length);
                 const candidates = storage.filter(item => item.field.id === sourceId);
                 const source = candidates.find(item => item.path.startsWith(scope)) ?? (candidates.length === 1 ? candidates[0] : null);
                 if (!source) fail('reference', 'Length source is absent or ambiguous', { nodeId: target.field.id });
-                const wireLength = (target.endByte - target.offset - target.field.autoLengthAdjustment) / target.field.autoLengthUnit;
+                if(target.itemLengths?.some(width=>width!==target.itemLengths[0]))
+                    fail('length','引用同一长度源的重复项必须具有相同字节数',{nodeId:target.field.id});
+                const width=target.itemLengths ? target.itemLengths[0] ?? 0 : target.endByte-target.offset;
+                const wireLength = (width - target.field.autoLengthAdjustment) / target.field.autoLengthUnit;
+                if(lengthWrites.has(source.offset)&&lengthWrites.get(source.offset)!==wireLength)
+                    fail('length','同一长度字段的多个目标需要不同值，无法唯一回填',{nodeId:source.field.id});
+                lengthWrites.set(source.offset,wireLength);
                 scalarWrite(result, source.field, source.offset, wireLength, compiled);
             }
             if (compiled.frameLengthExpression && framingLength(result, compiled) !== result.length)

@@ -61,6 +61,36 @@ function fixture(extra = {}) {
             input.dispatchEvent({ type: input.tagName === 'INPUT' || input.tagName === 'TEXTAREA' ? 'input' : 'change' }); } };
 }
 
+test('until-end structures use an editable array rather than a single nested object in structured send',()=>{
+    const config={id:'send-to-end',schemaVersion:3,messages:[{id:'frame',byteLength:4,fields:[
+        {id:'items',name:'items',type:'struct',byteLength:2,until:'end',fields:[{id:'value',name:'value',type:'uint16',byteLength:2}]}
+    ]}]};
+    const session=new ProtocolSendSession({getProtocol:()=>config,getProtocols:()=>[config]}),f=fixture({session});
+    f.view.setValue({protocolId:config.id,messageId:'frame',fields:{}});
+    assert.ok(f.control('field:items'));assert.equal(f.control('field:items').tagName,'TEXTAREA');
+    assert.equal(f.control('field:items').value,'[]');
+    f.change('field:items','[{"value":1},{"value":2}]');assert.deepEqual([...f.view.preview()],[1,0,2,0]);
+    f.view.dispose();
+});
+
+test('segment-end boolean enum bit and choice values remain editable arrays in structured sending',()=>{
+    const cases=[
+        [{type:'bool',byteLength:1},[true,false],[1,0]],
+        [{type:'uint8',byteLength:1,enum:{0:'待机',1:'工作'}},[0,1],[0,1]],
+        [{type:'bitfield',byteLength:1,bits:[{id:'flag',name:'flag',offset:0,length:1,type:'bool'}]},[1,0],[1,0]],
+        [{type:'choice',byteLength:0,lengthFrom:'contents',selector:'1',branches:[{id:'branch',equals:1,fields:[{id:'v',name:'v',type:'uint8',byteLength:1}]}]},[{v:1},{v:2}],[1,2]]
+    ];
+    for(const [definition,values,wire] of cases){
+        const config={id:'send-array',schemaVersion:3,messages:[{id:'frame',byteLength:2,fields:[{id:'values',name:'values',...definition,until:'end'}]}]};
+        const session=new ProtocolSendSession({getProtocol:()=>config,getProtocols:()=>[config]}),f=fixture({session});
+        f.view.setValue({protocolId:config.id,messageId:'frame',fields:{}});
+        const input=f.control('field:values');assert.ok(input,definition.type);assert.equal(input.tagName,'TEXTAREA',definition.type);
+        f.change('field:values',JSON.stringify(values));
+        assert.deepEqual(f.view.preview()&&[...f.view.preview()],wire,definition.type);
+        f.view.dispose();
+    }
+});
+
 test('migrated send forms keep legacy command IDs and hide automatic length and checksum inputs', () => {
     const { ProtocolModel } = require('../protocolModel'), original = schema(), unified = ProtocolModel.toUnified(original);
     const session = new ProtocolSendSession({ getProtocol: () => unified, getProtocols: () => [unified] });

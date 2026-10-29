@@ -76,7 +76,7 @@ test('whole-frame fields and migrated command aliases agree in real workers and 
     for (const workerFactory of [undefined, nodeWorkerFactory()]) {
         const pool = new HistoryWorkerPool({ hardwareConcurrency: workerFactory ? 4 : 2, workerFactory }); t.after(() => pool.dispose());
         const [record] = await pool.runTask({ kind: 'protocol-decode', schema, records: [bytes] });
-        assert.equal(record.messageId, 'rm2026.0002'); assert.equal(record.header.rm_seq, 18); assert.equal(record.valid, true);
+        assert.equal(record.messageId, 'rm2026.0002'); assert.equal(record.header.seq, 18); assert.equal(record.valid, true);
         assert.equal(record.fields.winner, 2);
         const result = await pool.runTask({ kind: 'protocol-stream-check', schema, bytes: Uint8Array.from([...bytes, ...bytes]), chunkSize: 1 });
         assert.equal(result.frames, 2); assert.equal(result.invalidFrames, 0); assert.equal(result.errors, 0);
