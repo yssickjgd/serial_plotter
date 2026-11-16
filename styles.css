@@ -494,7 +494,9 @@ body {
     border-left: 3px solid var(--primary);
     padding-left: 5px;
 }
-.scope-badge { color: #315b7a; background: #e8f1f8; padding: 2px 5px; border-radius: 2px; font-size: var(--ui-note-size); font-weight: 600; letter-spacing: 0; text-transform: none; }
+.scope-badge { color: #315b7a; background: #e8f1f8; padding: 2px 5px; border-radius: 2px; font-size: var(--ui-note-size); font-weight: 600; letter-spacing: 0; text-transform: none; white-space: nowrap; }
+.section-title { flex-wrap: wrap; }
+.channel-scope-note { display: flex; flex-direction: column; gap: 3px; }
 
 .row {
     display: flex;

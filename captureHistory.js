@@ -1,6 +1,6 @@
 /** Original receive chunks, kept independently of their current frame interpretation. */
 const historyDependencies = typeof module !== 'undefined'
-    ? { ...require('./dataParser'), ...require('./rawFrameParser'), ...require('./frameBuffer') }
+    ? { ...require('./dataParser'), ...require('./rawFrameParser'), ...require('./frameBuffer'), ...require('./frameIdleTimeout') }
     : globalThis.SerialPlotter;
 const captureHistoryStates = new WeakMap();
 const captureHistoryErrorCallbacks = new WeakSet();
@@ -162,15 +162,20 @@ async function replayCaptureHistory(history, format, capacity, {
     };
     const frames = previousResult?.frames || new FrameBuffer(numeric ? catalogChannels : wireChannels, capacity);
     const parser = previousResult?.parser || (numeric ? new DataParser() : new RawFrameParser());
-    if (!previousResult && numeric) parser.setFormat(format);
+    if (!previousResult && numeric) {
+        parser.setFormat(format);
+        historyDependencies.configureFrameIdleTimeout(parser, { timeoutMs: format.idleTimeoutMs ?? 0 });
+    }
     else if (!previousResult) {
         frames.setRawMode(true);
         parser.setFormat({ boundary: format.captureMode === 'hex' ? 'idle' : (format.textBoundary || 'idle'),
-            idleGapSeconds: Number(format.idleGapSeconds || 0.001), encoding: format.textEncoding || 'utf-8',
+            idleGapSeconds: Number(format.idleGapSeconds ?? 0.001), encoding: format.textEncoding || 'utf-8',
             maxFrameBytes: format.maxRawFrameBytes ?? format.maxFrameBytes ?? 1048576 });
         parser.suspendTimers = true;
     }
-    if (!numeric) { parser.suspendTimers = true; parser._cancelTimer(); }
+    parser.suspendTimers = true;
+    if (numeric) parser.idleTimeout.cancel();
+    else parser._cancelTimer();
     const errors = previousResult?.errors || [];
     let errorHead = 0;
     let errorBytes = errors.reduce((total, error) => total + (error?.bytes?.length ?? 0), 0);
@@ -283,7 +288,8 @@ async function replayCaptureHistory(history, format, capacity, {
         }
         return state.boundaries[low];
     };
-    const flushStream = byteOffset => {
+    const flushStream = (byteOffset, stamp = {}) => {
+        parser.idleTimeout?.expireAt(stamp.arrival);
         parser.flushPending();
         const pendingFrame = batchedRaw && (decodeRecords.at(-1) || pendingDecodes.at(-1)?.records.at(-1));
         if (pendingFrame && pendingFrame.metadata.endByte <= byteOffset) {
@@ -309,7 +315,7 @@ async function replayCaptureHistory(history, format, capacity, {
         }
         let checkpoint = nextBoundary();
         while (checkpoint && checkpoint.byteOffset <= cursor) {
-            flushStream(checkpoint.byteOffset);
+            flushStream(checkpoint.byteOffset, checkpoint);
             onBoundary({ ...checkpoint });
             lastBoundaryByte = checkpoint.byteOffset;
             checkpoint = nextBoundary();
@@ -373,13 +379,13 @@ async function replayCaptureHistory(history, format, capacity, {
     if (!cancelled) {
         let checkpoint = nextBoundary();
         while (checkpoint && checkpoint.byteOffset <= cursor) {
-            flushStream(checkpoint.byteOffset);
+            flushStream(checkpoint.byteOffset, checkpoint);
             onBoundary({ ...checkpoint });
             lastBoundaryByte = checkpoint.byteOffset;
             checkpoint = nextBoundary();
         }
     }
-    if (!numeric && !cancelled && resumeTimers) parser.resumeTimers();
+    if (!cancelled && resumeTimers) parser.resumeTimers();
     const revision = state.revision;
     progress();
     return { frames, parser, errors: errors.slice(errorHead), frameCount: parser.frameCount,

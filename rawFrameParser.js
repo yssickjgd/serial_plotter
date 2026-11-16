@@ -35,7 +35,7 @@ class RawFrameParser {
         if (!['idle', 'cr', 'lf', 'crlf', 'lfcr'].includes(boundary))
             throw new Error('不支持的断帧方式');
         const gap = Number(idleGapSeconds);
-        if (!Number.isFinite(gap) || gap <= 0) throw new RangeError('断帧间隔必须为正数');
+        if (!Number.isFinite(gap) || gap < 0) throw new RangeError('断帧间隔必须为非负数');
         if (!RawFrameParser.ENCODINGS.includes(encoding)) throw new Error('不支持的字符集');
         if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 1)
             throw new RangeError('Raw frame byte limit must be a positive integer');
@@ -97,8 +97,8 @@ class RawFrameParser {
             sourceEndByte: metadata.sourceEndByte ?? byteOffset + data.length };
         this.nextByte = source.endByte;
         const time = RawFrameParser.formatTime(timestamp);
-        if (this.boundary === 'idle' && !this.length && arrival >= this.deadline) this.segmented = false;
-        if (this.boundary === 'idle' && this.length && arrival >= this.deadline)
+        if (this.boundary === 'idle' && this.idleGapSeconds > 0 && !this.length && arrival >= this.deadline) this.segmented = false;
+        if (this.boundary === 'idle' && this.idleGapSeconds > 0 && this.length && arrival >= this.deadline)
             this._emit(false);
         if (this.onRawData) this._notify(this.onRawData, data, time, source);
         if (this.boundary === 'idle') {
@@ -181,7 +181,7 @@ class RawFrameParser {
 
     _scheduleTimer() {
         this._cancelTimer();
-        if (this.suspendTimers) return;
+        if (this.suspendTimers || !this.idleGapSeconds) return;
         const version = this.timerVersion;
         const delay = Math.min(2147483647, Math.max(0, this.deadline - this.now()));
         this.timer = this.schedule(() => {

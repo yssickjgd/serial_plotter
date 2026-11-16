@@ -68,12 +68,12 @@ class DataParser {
     }
 
     /** Finish a stopped stream without losing bytes that could not form a complete frame. */
-    flushPending() {
+    flushPending(reason = 'incomplete') {
         const pending = this.buffer.slice(this.readOffset, this.writeOffset);
         const metadata = this._sourceMetadata(this.readOffset, pending.length);
         this.reset();
         if (pending.length && this.onFrameError)
-            this._notify(this.onFrameError, 'incomplete', _fmtTime(new Date(metadata.timestamp)), pending, metadata);
+            this._notify(this.onFrameError, reason, _fmtTime(new Date(metadata.timestamp)), pending, metadata);
     }
 
     appendData(data, metadata = {}) {

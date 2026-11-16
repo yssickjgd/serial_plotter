@@ -2,7 +2,7 @@
 (function(root) {
     const api = () => typeof module !== 'undefined' ? { ...require('./frameBuffer'), ...require('./computedFrames'),
         ...require('./channelOperations'), ...require('./engineFrames'), ...require('./configValidation'),
-        Protocol: require('./protocolEngine').Protocol } : root.SerialPlotter;
+        ...require('./frameIdleTimeout'), Protocol: require('./protocolEngine').Protocol } : root.SerialPlotter;
     const ARRAY_FIELDS = ['dataType', 'endianness', 'channelsCount', 'enableHeader', 'headerHex', 'enableFooter', 'footerHex', 'enableChecksum'];
     const clone = value => JSON.parse(JSON.stringify(value));
     function protocolWireSignature(schema) {
@@ -54,6 +54,16 @@
         input = (typeof module !== 'undefined' ? require('./configSymbols') : root.SerialPlotter).migrateEngineSymbols(input).settings;
         const s = { mode: 'Data_Array', array: Object.fromEntries(ARRAY_FIELDS.map(key => [key, globals[key] ?? defaults[key]])),
             protocols: [], protocolId: null, mappings: [], synchronization: { sampleRate: 1000, expiry: {} }, editorState: {}, draft: null, ...clone(input ?? {}) };
+        const idle = s.idleTimeouts;
+        if (idle !== undefined && (!idle || typeof idle !== 'object' || Array.isArray(idle))) throw new Error('空闲超时配置无效');
+        s.idleTimeouts = {};
+        for (const mode of ['Raw_Data','Data_Array','Self_Defined_Frame']) {
+            const value = idle && Object.hasOwn(idle, mode) ? idle[mode] : 50;
+            if (!['number','string'].includes(typeof value) || String(value).trim() === '' ||
+                !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 2147483647)
+                throw new RangeError('空闲断帧时间必须为 0–2147483647 毫秒');
+            s.idleTimeouts[mode] = Number(value);
+        }
         if (!s.editorState || typeof s.editorState !== 'object' || Array.isArray(s.editorState) || JSON.stringify(s.editorState).length > 8388608)
             throw new Error('协议编辑器状态或样例超出限制');
         if (s.draft !== null) {
@@ -184,9 +194,10 @@
                     symbolVersion: this.globals.symbolVersion, yieldControl: this.service.yieldControl });
             return frames;
         }
-        _configure() {
+        _configure({ rebuild = this.service.rebuildHistory } = {}) {
             const a = api();
-            for (const source of this.managed) { source.generation++; source.frames.dispose?.(); this.service.sources.delete(source); }
+            for (const source of this.managed) { source.generation++; source.parser.reset(); source.frames.dispose?.(); this.service.sources.delete(source); }
+            this.rawReady = this.service.setRawIdleGapSeconds(this.config.idleTimeouts[this.mode] / 1000, { rebuild });
             this.outputs.clear(); this.managed.clear(); this.cache.clear(); this.anchor = null; this.running = false;
             this.preserveRecordsThroughByte = null; this.replayQueue = null; this.replayBatches = null;
             this.service.catalogCount = this.channelCount; this.arraySource.catalogCount = this.channelCount;
@@ -194,7 +205,7 @@
             if (this.mode === 'Data_Array') {
                 this.service.numericSource = this.arraySource;
                 Object.assign(this.arraySource.format, this.config.array, { captureMode: 'number', catalogCount: this.channelCount,
-                    isLittleEndian: this.config.array.endianness !== 'big' });
+                    isLittleEndian: this.config.array.endianness !== 'big', idleTimeoutMs: this.config.idleTimeouts.Data_Array });
                 this.service._restart(this.arraySource, false); return;
             }
             // An inactive interpretation must not pin an invisible old receive prefix.
@@ -206,6 +217,7 @@
             if (this.mode === 'Raw_Data') { this.service.numericSource = this.emptySource; return; }
             this.compiled = a.Protocol.compile(this.config.protocols.find(p => p.id === this.config.protocolId));
             const parser = new a.Protocol.StreamParser(); parser.setFormat({ protocol: this.compiled });
+            a.configureFrameIdleTimeout(parser, { ...this.service.parserOptions, timeoutMs: this.config.idleTimeouts.Self_Defined_Frame });
             parser.maxDecodedFields = Math.max(1, Math.min(32768, Math.floor(this.service.memory.limitBytes / 2048)));
             const records = new a.FrameBuffer(1, this.service.capacity); records.setRawMode(true);
             this.recordsSource = this._source('records', records, 'protocol', parser);
@@ -343,6 +355,7 @@
         }
         endStream(stamp = {}) {
             if (this.mode !== 'Self_Defined_Frame' || this.rebuilding && !stamp.replay) return;
+            this.recordsSource.parser.idleTimeout.expireAt(stamp.arrival ?? this.service.now());
             this.recordsSource.parser.flushPending();
             this._finishSampling(stamp);
         }
@@ -355,11 +368,12 @@
                 { memoryLimitBytes: this.service.memory.limitBytes }).normalized; next.draft = null;
             if (Number(next.array.channelsCount) > this.channelCount) throw new Error('请先扩展全局原始通道目录');
             const previous = this.config;
-            const unchangedArray = previous.mode === 'Data_Array' && next.mode === 'Data_Array' && JSON.stringify(previous.array) === JSON.stringify(next.array);
+            const sameIdle = previous.mode === next.mode && previous.idleTimeouts[previous.mode] === next.idleTimeouts[next.mode];
+            const unchangedArray = sameIdle && previous.mode === 'Data_Array' && next.mode === 'Data_Array' && JSON.stringify(previous.array) === JSON.stringify(next.array);
             const selected = config => protocolWireSignature(config.protocols.find(schema => schema.id === config.protocolId));
-            const unchangedProtocol = previous.mode === 'Self_Defined_Frame' && next.mode === previous.mode &&
+            const unchangedProtocol = sameIdle && previous.mode === 'Self_Defined_Frame' && next.mode === previous.mode &&
                 selected(previous) === selected(next);
-            if (!force && (unchangedArray || previous.mode === 'Raw_Data' && next.mode === 'Raw_Data')) {
+            if (!force && (unchangedArray || sameIdle && previous.mode === 'Raw_Data' && next.mode === 'Raw_Data')) {
                 this.config = next; this.onChange(this.config); return this.config;
             }
             if (!force && unchangedProtocol) {
@@ -384,11 +398,12 @@
             this.service.channelDefinitions = this.globals.channelDefinitions ?? [];
             this.service.channelNames = this.globals.channelNames ?? [];
             this.arraySource.frames.channelNames = this.service.channelNames;
-            this._configure();
+            this._configure({ rebuild });
             if (next.mode === 'Data_Array') {
                 for (const key of ARRAY_FIELDS) if (key !== 'channelsCount') this.globals[key] = next.array[key];
-                await this.service.updateNumericFormat(next.array, { rebuild });
+                await this.service.updateNumericFormat({ ...next.array, idleTimeoutMs: next.idleTimeouts.Data_Array }, { rebuild });
             } else if (next.mode === 'Self_Defined_Frame' && rebuild) await this.rebuild();
+            await this.rawReady;
             this.service._safeNotify(this.service.onChange, null); this.onChange(this.config); return this.config;
         }
         updateChannelDefinitions(definitions, options = {}) {
@@ -413,6 +428,7 @@
             let cursor = history.startByte, lastBoundaryByte = -Infinity;
             const records = this.recordsSource.frames;
             const parser = this.recordsSource.parser, queue = [], pending = [];
+            parser.suspendTimers = true; parser.idleTimeout.cancel();
             this.replayQueue = queue; this.replayBatches = pending; parser.deferDecode = true;
             parser.onFrameParsed = (_deferred, time, bytes, timestamp, metadata) => queue.push({ time, bytes, timestamp, metadata });
             this.preserveRecordsThroughByte = preserveRecords && records.length
@@ -498,6 +514,7 @@
                                 if (chunk.bytes.length) parser.appendData(chunk.bytes, chunk);
                                 cursor = chunk.endByte;
                                 if (chunk.streamEnded && cursor !== lastBoundaryByte) {
+                                    parser.idleTimeout.expireAt(chunk.boundaryArrival ?? chunk.arrival);
                                     parser.flushPending(); queue.push({ boundary: { arrival: chunk.boundaryArrival ?? chunk.arrival,
                                         timestamp: chunk.boundaryTimestamp ?? chunk.timestamp } });
                                     lastBoundaryByte = cursor;
@@ -532,6 +549,7 @@
                         parser.onFrameParsed = (record, time, bytes, timestamp, metadata) => this._record(record, time, bytes, timestamp, metadata);
                         this.preserveRecordsThroughByte = null;
                         for (const source of this.managed) { source.rebuilding = false; source.pin = null; source.progress = null; this.onProgress(source, null); }
+                        if (!this.service.paused) parser.resumeTimers();
                         this.service.memory.enforce(); this.service._prune();
                     }
                 }
@@ -546,12 +564,16 @@
                 source.errors.length = 0; source.errorBytes = 0; source.rebuilding = false; source.pin = null;
                 if (source.kind === 'protocol') {
                     source.parser.deferDecode = false;
+                    source.parser.suspendTimers = false;
                     source.parser.onFrameParsed = (record, time, bytes, timestamp, metadata) => this._record(record, time, bytes, timestamp, metadata);
                 }
             }
         }
         serialize() { return clone(this.config); }
-        dispose() { this.disposed = true; this.generation++; clearInterval(this.timer); this.cache.clear(); }
+        dispose() {
+            this.disposed = true; this.generation++; clearInterval(this.timer); this.cache.clear();
+            for (const source of this.managed) source.parser.reset();
+        }
     }
     const result = { DataEngine, normalizeDataEngine, preflightDataEngine, resolveProtocolMappingField: mappingField, ENGINE_ARRAY_FIELDS: ARRAY_FIELDS };
     root.SerialPlotter ??= {}; Object.assign(root.SerialPlotter, result);

@@ -14,7 +14,8 @@ const monitorProtocolUtils = typeof module !== 'undefined'
 
 function monitorPrefix(row, options, frames) {
     const direction = row.kind === 'rx' || row.kind === 'error' ? 'RX' : 'TX';
-    const reason = row.reason || (row.endReason === 'limit' ? '超限' : row.incomplete ? '帧未完整' : '');
+    const reason = row.reason === 'timeout' || row.type === 'timeout' ? '超时残帧'
+        : row.reason || (row.endReason === 'limit' ? '超限' : row.incomplete ? '帧未完整' : '');
     let time = row.time;
     if (options.timestamp === 'none') time = '';
     else if (options.timestamp === 'relative' && Number.isFinite(row.timestamp) && Number.isFinite(frames?.originTimestamp))

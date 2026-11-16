@@ -96,6 +96,8 @@
         _build() {
             const header = this._node('header', 'protocol-editor-header');
             const heading = this._node('h2', '', '协议编辑器'); heading.id = this.prefix + '-heading';
+            heading.append(this._node('span', 'scope-badge', '全局共用'));
+            heading.title = '应用后，当前协议解析规则由所有使用该协议的数据源和控件共用；未应用的草稿不改变采集。';
             this.dialog.setAttribute('aria-labelledby', heading.id);
             this.libraryHost = this._node('div', 'protocol-edit-actions');
             this.libraryPanel = this._node('div','protocol-edit-panel');

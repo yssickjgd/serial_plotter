@@ -2678,7 +2678,7 @@
                 this._notify(this.onFrameError, reason, formatTime(metadata.timestamp), bytes, metadata);
             }
         }
-        flushPending() { if (this.pending.length) this._consume(this.pending.length, 'incomplete'); this.reset(); }
+        flushPending(reason = 'incomplete') { if (this.pending.length) this._consume(this.pending.length, reason); this.reset(); }
         appendData(data, metadata = {}) {
             if (!this.protocol) fail('schema', 'Set protocol before appending stream bytes');
             data = bytesOf(data); if (!data.length) return;

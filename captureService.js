@@ -2,7 +2,7 @@
 const captureServiceDependencies = typeof module !== 'undefined'
     ? { ...require('./captureHistory'), ...require('./rawFrameParser'), ...require('./dataParser'),
         ...require('./frameBuffer'), ...require('./historyWorkers'), ...require('./textHistory'),
-        ...require('./computedFrames'), ...require('./channelOperations'), ...require('./sampleRate'),
+        ...require('./computedFrames'), ...require('./channelOperations'), ...require('./sampleRate'), ...require('./frameIdleTimeout'),
         ...require('./captureMemory'), TextCodec: require('./textCodec') } : globalThis.SerialPlotter;
 
 class CaptureService {
@@ -59,7 +59,7 @@ class CaptureService {
         const boundary = format.captureMode === 'hex' ? 'idle' : format.textBoundary ?? format.boundary ?? 'idle';
         const encoding = format.textEncoding ?? format.encoding ?? 'utf-8';
         return { captureMode: boundary === 'idle' ? 'hex' : 'text', textBoundary: boundary,
-            idleGapSeconds: Number(format.idleGapSeconds ?? 0.001),
+            idleGapSeconds: this.rawIdleGapSeconds ?? Number(format.idleGapSeconds ?? 0.001),
             textEncoding: boundary === 'idle' || !encoding.startsWith('utf-16') ? 'utf-8' : encoding,
             maxRawFrameBytes: this.maxRawFrameBytes };
     }
@@ -78,6 +78,8 @@ class CaptureService {
         parser.setFormat(numeric ? format : { boundary: format.textBoundary,
             idleGapSeconds: format.idleGapSeconds, encoding: format.textEncoding,
             maxFrameBytes: this.maxRawFrameBytes });
+        if (numeric) captureServiceDependencies.configureFrameIdleTimeout(parser,
+            { ...this.parserOptions, timeoutMs: format.idleTimeoutMs ?? 0 });
         return parser;
     }
 
@@ -326,6 +328,7 @@ class CaptureService {
                 if (source.kind === 'numeric') source.frames.definitions = this.channelDefinitions;
                 const computedReady = source.frames.replaceFrom(result.frames);
                 source.parser = result.parser;
+                source.parser.idleTimeout?.setClock(this.parserOptions);
                 if (source.kind === 'raw') {
                     // Replay uses inert timers; adopt the caller's clock/scheduler before live handoff.
                     Object.assign(source.parser, { now: this.now, wallNow: this.wallNow });
@@ -337,7 +340,7 @@ class CaptureService {
                 source.errorBytes = source.errors.reduce((sum, error) => sum + (error.bytes?.length ?? 0), 0);
                 source.pin = null; source.rebuilding = false;
                 this._attach(source);
-                if (source.kind === 'raw' && !this.paused) source.parser.resumeTimers();
+                if (!this.paused) source.parser.resumeTimers();
                 if (computedReady) await computedReady;
                 if (cancelled()) return source;
                 this._safeNotify(this.onChange, source);
@@ -383,6 +386,25 @@ class CaptureService {
     memoryUsage() { return this.memory.measure(); }
     setMemoryLimit(bytes) { this.memory.setLimit(bytes); }
 
+    setRawIdleGapSeconds(seconds, { rebuild = this.rebuildHistory } = {}) {
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 > 2147483647)
+            throw new RangeError('空闲断帧时间无效');
+        const previous = this.rawIdleGapSeconds ?? .001;
+        this.rawIdleGapSeconds = seconds;
+        if (previous === seconds) return Promise.resolve();
+        const pending = [];
+        this.sourceKeys.clear();
+        for (const source of this.sources) {
+            if (source.kind === 'raw' && source.format.textBoundary === 'idle') {
+                source.format = { ...source.format, idleGapSeconds: seconds };
+                source.key = this._sourceKey(source.format, rebuild);
+                pending.push(this._restart(source, rebuild));
+            }
+            this.sourceKeys.set(source.key, source);
+        }
+        return Promise.all(pending);
+    }
+
     setMaxRawFrameBytes(bytes) {
         this._validateLimit(bytes);
         if (bytes === this.maxRawFrameBytes) return Promise.resolve();
@@ -405,6 +427,8 @@ class CaptureService {
         if (!paused) this.memory.blockedReason = '';
         this.endStream();
         this.paused = Boolean(paused);
+        if (!this.paused) for (const source of this.sources)
+            if (!source.rebuilding) source.parser.resumeTimers?.();
     }
 
     endStream() {
@@ -417,6 +441,7 @@ class CaptureService {
             for (const source of this.sources) {
                 if (source.rebuilding || source.engineManaged) continue;
                 try {
+                    source.parser.idleTimeout?.expireAt(boundary.arrival);
                     source.parser.flushPending();
                     source.sampleRate?.reset({ keepRate: true });
                     if (source.kind === 'raw' && source.frames.length) source.frames.markStreamEnded(source.frames.length - 1);

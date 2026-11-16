@@ -32,7 +32,7 @@
                 <!-- ── Tab: 通讯 ── -->
                 <div class="tab-content active" id="tab-connection">
                     <div class="control-group">
-                        <div class="section-title">通讯通道</div>
+                        <div class="section-title">通讯通道 <span class="scope-badge">全局共用</span></div>
                         <button id="btn-connect" class="btn btn-primary">请求建立连接</button>
                         <div class="input-group">
                             <label>模式</label>
@@ -94,7 +94,7 @@
                     </div>
 
                     <div class="control-group" id="board-toolbar" aria-label="缓冲区设置">
-                        <div class="section-title">缓冲区设置</div>
+                        <div class="section-title">缓冲区设置 <span class="scope-badge">全局共用</span></div>
                         <div class="input-group">
                             <label id="max-points-label" for="max-points">最大采样点数</label>
                             <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
@@ -258,7 +258,8 @@
                 <div class="sidebar-section-header config-pane-heading">数据引擎 <span id="engine-applied-mode" class="scope-badge">Data_Array</span></div>
                 <div class="tab-bar"><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
                 <div id="engine-parsing" class="tab-content active">
-                    <div class="control-group"><div class="section-title">解析方式</div><div class="input-group"><label for="engine-mode">全局数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。解析规则对所有控件生效。</span></div>
+                    <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">全局数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。解析规则对所有控件生效。</span></div>
+                    <div class="control-group"><div class="section-title">空闲断帧 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">空闲断帧时间（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">各模式独立保存，默认 50 ms，0 关闭。完整帧立即解析，超时仅清理残帧。</span></div>
                     <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
                         <div class="control-group" id="frame-numeric-settings">
                             <div class="section-title">数值解码 <span class="scope-badge">全局共用</span></div>
@@ -292,7 +293,7 @@
                             </div>
                         </div>
                         <div class="control-group" id="frame-header-settings">
-                            <div class="section-title">帧首</div>
+                            <div class="section-title">帧首 <span class="scope-badge">全局共用</span></div>
                             <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
                             <div class="input-group" id="header-config">
                                 <label>帧首字节序列 (Hex, 空格分隔)</label>
@@ -301,7 +302,7 @@
                             </div>
                         </div>
                         <div class="control-group" id="frame-footer-settings">
-                            <div class="section-title">帧尾</div>
+                            <div class="section-title">帧尾 <span class="scope-badge">全局共用</span></div>
                             <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
                             <div class="input-group" id="footer-config">
                                 <label>帧尾字节序列 (Hex, 空格分隔)</label>
@@ -309,26 +310,26 @@
                             </div>
                         </div>
                         <div class="control-group" id="frame-checksum-settings">
-                            <div class="section-title">校验位</div>
+                            <div class="section-title">校验位 <span class="scope-badge">全局共用</span></div>
                             <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
                             <span class="hint-text">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
                         </div>
                     </div></div>
                     <div id="engine-protocol-settings" class="control-group" hidden>
-                        <div class="section-title">当前协议</div>
+                        <div class="section-title">当前协议 <span class="scope-badge">全局共用</span></div>
                         <select id="engine-protocol" aria-label="当前协议"></select>
                         <button id="engine-protocol-edit" class="btn btn-secondary" type="button">打开协议配置面板</button>
                     </div>
                     <div id="engine-protocol-mappings" class="control-group" hidden><div id="engine-mappings"></div></div>
                     <div id="engine-synchronization" class="control-group" hidden>
-                        <div class="section-title">因果同步采样</div>
+                        <div class="section-title">因果同步采样 <span class="scope-badge">全局共用</span></div>
                         <div class="input-group"><label for="engine-sync-rate">采样率 (Hz)</label><input id="engine-sync-rate" type="number" min="0.001" max="1000000" step="any" value="1000"></div>
                         <p class="hint-text">首次有效消息后启动。保持各字段最近值；暂停和断开期间不补采。此频率不是设备实际更新率。</p>
                         <div id="engine-expiry"></div>
                         <p class="hint-text">有效期为 0 表示关闭；超过有效期后为空，不补零。</p>
                     </div>
                     <div class="control-group" id="frame-history-settings">
-                        <div class="section-title">重建历史数据</div>
+                        <div class="section-title">重建历史数据 <span class="scope-badge">全局共用</span></div>
                         <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
                         <span class="hint-text">未勾选时，仅受影响的数据源从当前接收位置开始记录。</span>
                     </div>
@@ -525,7 +526,7 @@
                         <div class="control-group">
                             <div class="section-title">采样与响应</div>
                             <div class="input-group" id="plot-window-control">
-                                <label id="plot-window-label" for="plot-window-points">采样点数（全局共用）</label>
+                                <label id="plot-window-label" for="plot-window-points">采样点数 <span class="scope-badge">全局共用</span></label>
                                 <input type="number" step="1" min="2" max="65536" id="plot-window-points" value="1000" />
                             </div>
                             <div id="wrap-response-options" class="sidebar-stack" hidden>
@@ -626,7 +627,7 @@
                         <p id="channel-edit-status-wave" class="hint-text channel-edit-error" role="alert" hidden></p>
                         <div id="channel-symbols-wave"></div>
                         <div class="channel-toolbar">
-                            <p class="hint-text">名称和颜色全局共用；可见性仅作用于当前控件。运算定义在左下数据引擎中管理。</p>
+                            <p class="hint-text channel-scope-note"><span>名称与颜色 <span class="scope-badge">全局共用</span></span><span>可见性仅作用于当前控件；运算定义在左下数据引擎中管理。</span></p>
                             <div class="channel-toolbar-actions">
                                 <button id="btn-channels-all-on" class="btn btn-secondary">全部打开</button>
                                 <button id="btn-channels-all-off" class="btn btn-secondary">全部关闭</button>
@@ -646,7 +647,7 @@
                         <div class="section-title">文本查看规则 <span class="scope-badge">全局共用</span></div>
                         <div id="frame-text-settings" class="sidebar-stack">
                             <div class="input-group"><label for="text-encoding">文本字符集</label><select id="text-encoding"><option value="utf-8">UTF-8</option><option value="ascii">ASCII</option><option value="gbk">GBK（兼容 GB2312）</option><option value="gb18030">GB18030</option><option value="big5">Big5</option><option value="utf-16le">UTF-16LE</option><option value="utf-16be">UTF-16BE</option><option value="shift_jis">Shift-JIS</option><option value="windows-1252">Windows-1252</option></select></div>
-                            <div class="input-group"><label for="text-boundary">文本查看断帧</label><select id="text-boundary"><option value="idle">空闲间隔 (0.001 s)</option><option value="cr">\r</option><option value="lf">\n</option><option value="crlf">\r\n</option><option value="lfcr">\n\r</option></select></div>
+                            <div class="input-group"><label for="text-boundary">文本查看断帧</label><select id="text-boundary"><option value="idle">空闲间隔（跟随数据引擎）</option><option value="cr">\r</option><option value="lf">\n</option><option value="crlf">\r\n</option><option value="lfcr">\n\r</option></select></div>
                         </div>
                     </div>
                     <div class="control-group monitor-settings-panel" id="monitor-display-panel">
@@ -789,7 +790,7 @@
                                 <button id="btn-monitor-channels-all-on" class="btn btn-secondary">全部打开</button>
                                 <button id="btn-monitor-channels-all-off" class="btn btn-secondary">全部关闭</button>
                             </div>
-                            <p class="hint-text">名称、颜色和运算定义全局共用；不重建时保留历史结果。</p>
+                            <p class="hint-text channel-scope-note"><span>名称与颜色 <span class="scope-badge">全局共用</span></span><span>可见性仅作用于当前控件；运算定义在左下数据引擎中管理。</span></p>
                             <div id="monitor-channel-list" class="channel-config-list"></div>
                         </div>
                     </div>
@@ -845,6 +846,7 @@
     <script src="numericCodec.js"></script>
     <script src="dataParser.js"></script>
     <script src="rawFrameParser.js"></script>
+    <script src="frameIdleTimeout.js"></script>
     <script src="captureHistory.js"></script>
     <script src="historyWorkers.js"></script>
     <script src="textHistory.js"></script>

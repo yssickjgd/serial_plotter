@@ -2146,4 +2146,5 @@ test('an incomplete text tail is visibly marked without losing RX indentation', 
     assert.equal(layout.prefix, '[t] RX[帧未完整] ');
     assert.equal(view._rowLayout({ ...row, incomplete: false }, 80).prefix, '[t] RX ');
     assert.equal(view._rowLayout({ ...row, endReason: 'limit' }, 80).prefix, '[t] RX[超限] ');
+    assert.equal(view._rowLayout({ ...row, kind: 'error', reason: 'timeout' }, 80).prefix, '[t] RX[超时残帧] ');
 });

@@ -606,7 +606,12 @@ class WidgetController {
         this.element('frame-text-settings').hidden = s.captureMode !== 'text';
         const independent = response && s.plotViewMode === 'time';
         this.element('plot-window-points').max = String(SerialPlotter.Limits.maxPlotWindowPoints);
-        this.element('plot-window-label').textContent = independent ? '时域采样点数（当前控件）' : '采样点数（全局共用）';
+        const pointsLabel = this.element('plot-window-label');
+        pointsLabel.textContent = independent ? '时域采样点数（当前控件）' : '采样点数 ';
+        if (!independent) {
+            const scope = this.document.createElement('span'); scope.className = 'scope-badge'; scope.textContent = '全局共用';
+            pointsLabel.append(scope);
+        }
     }
 
     _commitTitle() {

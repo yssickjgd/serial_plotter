@@ -42,6 +42,8 @@ class EngineChannelView {
 
     build() {
         this.root.replaceChildren(); this.root.classList.add('engine-channel-view');
+        const heading = this.element('div', 'section-title'); heading.textContent = '通道定义 ';
+        const scope = this.element('span', 'scope-badge'); scope.textContent = '全局共用'; heading.append(scope);
         const toolbar = this.element('div', 'engine-channel-toolbar');
         const categories = [['all', '全部通道'], ['raw', '原始数据'], ['constant', '常量数组'], ['system', '差分方程系统'], ['formula', '运算通道']];
         this.categoryInput = this.select(categories, 'engine-channel-category'); this.categoryInput.setAttribute('aria-label', '通道类型筛选');
@@ -56,7 +58,7 @@ class EngineChannelView {
         this.list.setAttribute('aria-label', '全局通道');
         const help = this.element('p', 'hint-text');
         help.textContent = '原始数据由引擎映射；运算通道支持名称、CH 编号、历史索引及 DIFF / INT / FILTER。常量数组与差分方程系统用于滤波和系统响应。';
-        this.root.append(toolbar, help, engineChannelHelpers.createReservedNamesHelp(this.document, 'channel'), this.status, this.list);
+        this.root.append(heading, toolbar, help, engineChannelHelpers.createReservedNamesHelp(this.document, 'channel'), this.status, this.list);
         this.listen(this.categoryInput, 'change', () => {
             this.category = this.categoryInput.value; this.list.scrollTop = 0; this.refresh();
         });

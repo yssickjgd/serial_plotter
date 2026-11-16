@@ -229,27 +229,28 @@ test('invalid byte widget settings cannot change shared text parsing rules', t =
     assert.equal(byte.source, source);
 });
 
-test('byte widgets fix idle framing to one millisecond including legacy settings and mode switches', async t => {
+test('byte widgets follow the engine idle timeout instead of legacy widget values through mode switches and reload', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'hex', idleGapSeconds: '0.01' } });
     await f.settle();
     assert.equal(byte.settings.idleGapSeconds, '0.001');
-    assert.equal(byte.source.format.idleGapSeconds, 0.001);
+    assert.equal(byte.source.format.idleGapSeconds, 0.05);
     assert.equal(byte.source, f.app.service.baseSource);
     assert.ok(!f.document.getElementById('idle-gap-seconds'));
     f.app.serialAdapter.onDataCallback(Uint8Array.of(65));
     await f.tick(2);
     f.app.serialAdapter.onDataCallback(Uint8Array.of(66));
     f.app.service.endStream();
-    assert.equal(byte.source.frames.length, 2, 'a two-millisecond gap must separate records');
+    assert.equal(byte.source.frames.length, 1, 'a two-millisecond gap remains within the default fifty-millisecond timeout');
+    assert.deepEqual([...byte.source.frames.rawBytesAt(0)], [65, 66]);
     f.change('capture-mode', 'text');
-    assert.equal(byte.source.format.idleGapSeconds, 0.001);
+    assert.equal(byte.source.format.idleGapSeconds, 0.05);
     f.change('text-boundary', 'crlf');
     assert.equal(byte.source.format.textBoundary, 'crlf');
     f.change('text-boundary', 'idle');
     assert.equal(byte.source, f.app.service.baseSource);
     const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
-    assert.equal(restored.app.widgets.widgets.get(byte.id).source.format.idleGapSeconds, 0.001);
+    assert.equal(restored.app.widgets.widgets.get(byte.id).source.format.idleGapSeconds, 0.05);
 });
 
 test('byte-only workspaces edit shared channel names in the persistent global engine', async t => {

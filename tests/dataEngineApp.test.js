@@ -10,6 +10,28 @@ function protocol() {
             { id: 'y', name: '温度', command: 2, fields: [{ name: 'value', type: 'int16' }] }] };
 }
 
+test('engine idle input remembers each draft mode and applies only the selected validated timeout', async t => {
+    const f=fixture(t);
+    assert.ok(f.get('engine-idle-timeout'));
+    assert.equal(f.get('engine-idle-timeout').value,'50');
+    f.change('engine-idle-timeout','5');
+    assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,50);
+    f.change('engine-mode','Raw_Data');assert.equal(f.get('engine-idle-timeout').value,'50');
+    f.change('engine-idle-timeout','0');
+    f.change('engine-mode','Self_Defined_Frame');assert.equal(f.get('engine-idle-timeout').value,'50');
+    f.change('engine-idle-timeout','20');
+    f.change('engine-mode','Data_Array');assert.equal(f.get('engine-idle-timeout').value,'5');
+    await f.app.engineView.apply();
+    assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,5);
+    assert.equal(f.app.service.baseSource.parser.idleGapSeconds,.005);
+    assert.equal(f.app.getConfig().dataEngine.idleTimeouts.Raw_Data,0);
+    const saved=f.app.getConfig(), restored=bootApplication(saved);t.after(()=>restored.app.dispose());
+    assert.equal(restored.get('engine-idle-timeout').value,'5');
+    restored.change('engine-mode','Raw_Data');assert.equal(restored.get('engine-idle-timeout').value,'0');
+    f.change('engine-idle-timeout','-1');await assert.rejects(f.app.engineView.apply(),/空闲/);
+    assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,5);
+});
+
 test('empty workspaces configure explicit parsing drafts and applying is the only live rule change', async t => {
     const f = fixture(t);
     assert.equal(f.app.widgets.widgets.size, 0);

@@ -52,7 +52,7 @@ function setup(t, options = {}) {
     const globals = { ...array, channelsCount: options.catalogCount ?? 2, channelNames: [], channelDefinitions: options.definitions ?? [] };
     const settings = { mode: options.mode ?? 'Self_Defined_Frame', array: { ...array, ...options.array }, protocols: [schema], protocolId: schema.id,
         mappings: [{ messageId: 'a', path: 'voltage', channel: 0 }, { messageId: 'b', path: 'temperature', channel: 1 }],
-        synchronization: { sampleRate: 1000, expiry: { 0: .002 } } };
+        synchronization: { sampleRate: 1000, expiry: { 0: .002 } }, idleTimeouts: options.idleTimeouts };
     const service = new CaptureService({ numericFormat: settings.array, channelDefinitions: globals.channelDefinitions,
         catalogCount: globals.channelsCount, capacity: options.capacity ?? 10000, now: () => now, wallNow: () => 1000 + now,
         setTimeout: () => 0, clearTimeout() {}, ...options.service });
@@ -228,7 +228,8 @@ test('mapping and synchronization edits rebuild only numeric outputs while keepi
 });
 
 test('protocol pending buffers, decoded caches and sparse synchronized events participate in the shared byte budget', t => {
-    const f = setup(t, { service: { memoryLimitBytes: 2 * 1048576 }, capacity: 100000 });
+    const f = setup(t, { service: { memoryLimitBytes: 2 * 1048576 }, capacity: 100000,
+        idleTimeouts: { Self_Defined_Frame: 1 } });
     for (let index = 0; index < 3500; index++) f.receive(index % 2 ? 'b' : 'a', index, index);
     assert.equal(f.service.paused, false); assert.ok(f.service.memoryUsage().usedBytes <= f.service.memory.limitBytes);
     assert.ok(f.service.history.startByte > 0); assert.ok(f.engine.estimatedMemoryBytes < f.service.memory.limitBytes / 16);
@@ -267,6 +268,7 @@ test('pause boundaries arriving during worker decoding flush pending tails befor
     release(); await pending;
     assert.equal(f.engine.recordsSource.frames.length, 2); assert.equal(f.engine.recordsSource.frames.rawByteOffsetAt(1), 6);
     assert.equal(f.engine.syncSource.frames.length, 5); assert.equal(f.engine.syncSource.frames.timestampAt(4), 2001);
+    // Pausing at 3 ms flushes the pending tail before the default 50 ms timeout.
     assert.ok(f.engine.recordsSource.errors.some(error => error.reason === 'incomplete'));
 });
 

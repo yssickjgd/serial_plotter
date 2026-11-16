@@ -126,7 +126,7 @@ test('flush retains pending data, reset cancels it, and formats validate before 
     const f = fixture();
     f.parser.appendData(Uint8Array.of(1));
     assert.throws(() => f.parser.setFormat({ boundary: 'other' }));
-    assert.throws(() => f.parser.setFormat({ boundary: 'idle', idleGapSeconds: 0 }));
+    assert.throws(() => f.parser.setFormat({ boundary: 'idle', idleGapSeconds: -1 }));
     assert.throws(() => f.parser.setFormat({ encoding: 'invalid' }));
     f.parser.flushPending();
     assert.deepEqual(f.frames[0].bytes, [1]);

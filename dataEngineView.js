@@ -7,6 +7,7 @@
             this.arrayIds = { dataType: 'data-type', endianness: 'endianness', channelsCount: 'channels-count',
                 enableHeader: 'chk-header', headerHex: 'frame-header', enableFooter: 'chk-footer', footerHex: 'frame-footer', enableChecksum: 'chk-checksum' };
             this.draft = JSON.parse(JSON.stringify(engine.config.draft ?? engine.serialize())); this.draft.draft = null;
+            this.draft.idleTimeouts = { ...engine.config.idleTimeouts, ...this.draft.idleTimeouts };
             const tabs = [...this.el('data-engine').querySelectorAll('.tab-btn')];
             tabs[0].parentNode.setAttribute('role', 'tablist');
             const selectTab = button => {
@@ -61,8 +62,13 @@
                     if (this.disposed || !this.draft.protocols.some(item => item.id === schema.id)) throw new Error('协议已删除或不存在，请重新选择协议');
                     this.replaceProtocol(schema); this.draft.protocolId = schema.id; await this.apply();
                 } });
-            for (const id of ['engine-mode', 'engine-protocol', 'engine-sync-rate', ...Object.values(this.arrayIds)])
+            for (const id of ['engine-mode', 'engine-idle-timeout', 'engine-protocol', 'engine-sync-rate', ...Object.values(this.arrayIds)])
                 this.listen(this.el(id), 'change', () => { if (!this.binding) {
+                    if (id === 'engine-mode') {
+                        this.draft.idleTimeouts[this.draft.mode] = this.el('engine-idle-timeout').value;
+                        this.draft.mode = this.el('engine-mode').value;
+                        this.el('engine-idle-timeout').value = this.draft.idleTimeouts[this.draft.mode];
+                    }
                     this.collect(); this.markDraft(); this.syncVisibility();
                     if (id === 'engine-protocol' || id === 'engine-mode') this.renderMappings();
                 } });
@@ -124,6 +130,7 @@
         }
         render() {
             this.binding = true; this.el('engine-mode').value = this.draft.mode;
+            this.el('engine-idle-timeout').value = this.draft.idleTimeouts[this.draft.mode];
             for (const [key, id] of Object.entries(this.arrayIds)) {
                 const input = this.el(id); if (input.type === 'checkbox') input.checked = this.draft.array[key]; else input.value = this.draft.array[key];
             }
@@ -135,6 +142,7 @@
         }
         collect() {
             this.draft.mode = this.el('engine-mode').value;
+            this.draft.idleTimeouts[this.draft.mode] = this.el('engine-idle-timeout').value;
             for (const [key, id] of Object.entries(this.arrayIds)) {
                 const input = this.el(id); this.draft.array[key] = input.type === 'checkbox' ? input.checked : input.value;
             }
@@ -143,6 +151,9 @@
             return this.draft;
         }
         syncVisibility() {
+            this.el('engine-idle-hint').textContent = this.draft.mode === 'Raw_Data'
+                ? '各模式独立保存，默认 50 ms，0 关闭。空闲时结束原始记录；时间戳保留首字节接收时间。'
+                : '各模式独立保存，默认 50 ms，0 关闭。完整帧仍立即解析；超时只保留并清理残帧，不停止同步采样。';
             this.el('engine-array-settings').hidden = this.draft.mode !== 'Data_Array';
             this.el('engine-protocol-settings').hidden = this.draft.mode !== 'Self_Defined_Frame';
             this.el('engine-protocol-mappings').hidden = this.draft.mode !== 'Self_Defined_Frame';
@@ -188,6 +199,7 @@
         renderMappings() {
             const host = this.el('engine-mappings'), list = this.node('div', undefined, 'engine-mapping-list');
             const title = this.node('div', '字段 → 数值通道', 'section-title');
+            title.append(this.node('span', '全局共用', 'scope-badge'));
             const message = this.node('select'), path = this.node('input'), channel = this.node('input');
             const add = this.node('button', '映射'), create = this.node('button', '新建通道并映射');
             path.placeholder = '字段路径，如 position.x / items[0]'; channel.placeholder = 'CH00001';

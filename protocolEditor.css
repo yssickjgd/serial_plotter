@@ -26,7 +26,7 @@
 }
 .protocol-editor [hidden] { display: none !important; }
 .protocol-editor-header { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--sidebar-bg); }
-.protocol-editor-header h2 { flex: 1; margin: 0; font-size: var(--ui-title-size); }
+.protocol-editor-header h2 { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; flex: 1; margin: 0; font-size: var(--ui-title-size); }
 .protocol-library-toolbar { flex: 1; min-width: 0; display: flex; gap: 3px; align-items: end; flex-wrap: wrap; }
 .protocol-library-toolbar .protocol-editor-field { width: 160px; margin-right: 8px; }
 .protocol-library-toolbar .protocol-editor-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
