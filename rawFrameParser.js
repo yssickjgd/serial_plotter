@@ -71,6 +71,13 @@ class RawFrameParser {
         this.streamStartByte = this.nextByte;
     }
 
+    /** Read the open idle record without committing it to history or copying its bytes. */
+    pendingIdleFrame() {
+        if (this.boundary !== 'idle' || !this.length || this.onFrameParts) return null;
+        return { ...this.frameMetadata, bytes: this.buffer.subarray(0, this.length),
+            time: this.time, timestamp: this.timestamp, kind: 'rx' };
+    }
+
     /** Historical idle replay can assemble immutable input views in background workers. */
     setFramePartsCallback(callback) {
         if (callback !== null && (typeof callback !== 'function' || this.boundary !== 'idle'))

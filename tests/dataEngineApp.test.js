@@ -90,6 +90,29 @@ test('custom engine exposes structured records, separate message sequences and s
     assert.equal(restored.widgets.find(w => w.id === x.id).settings.engineSource, 'message:x');
 });
 
+test('Hex shows continuous protocol traffic before the raw idle record closes', async t => {
+    const f = fixture(t);
+    const engine = f.app.dataEngine;
+    await engine.apply({ ...engine.serialize(), mode: 'Self_Defined_Frame', protocols: [protocol()], protocolId: 'position' }, { rebuild: false });
+    const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
+    f.change('capture-mode', 'hex');
+    await f.settle();
+    const first = Uint8Array.of(170, 1, 7, 0), second = Uint8Array.of(170, 2, 8, 0);
+    f.app.serialAdapter.onDataCallback(first);
+    await f.tick(1);
+    assert.equal(engine.recordsSource.frames.length, 1);
+    assert.equal(byte.source.frames.length, 0);
+    assert.match(byte.view.spacer.textContent, /AA 01 07 00/);
+    f.app.serialAdapter.onDataCallback(second);
+    await f.tick(1);
+    assert.equal(engine.recordsSource.frames.length, 2);
+    assert.match(byte.view.spacer.textContent, /AA 01 07 00 AA 02 08 00/);
+    await f.tick(50);
+    assert.equal(byte.source.frames.length, 1);
+    assert.deepEqual([...byte.source.frames.rawBytesAt(0)], [...first, ...second]);
+    assert.equal(byte.view.lastRows.length, 1, 'the committed record replaces the preview');
+});
+
 test('channel names and formulas are global while widget selectors only change visibility', async t => {
     const f = fixture(t), controller = f.app.widgets;
     controller.setChannelName(0, '温度');

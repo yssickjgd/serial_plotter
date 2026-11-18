@@ -11,6 +11,7 @@ const monitorChannelId = typeof module !== 'undefined'
     ? require('./plotMath').formatChannelId : globalThis.SerialPlotter.formatChannelId;
 const monitorProtocolUtils = typeof module !== 'undefined'
     ? require('./protocolRecords') : globalThis.SerialPlotter;
+const MONITOR_SCROLL_HEIGHT_LIMIT = 8_000_000;
 
 function monitorPrefix(row, options, frames) {
     const direction = row.kind === 'rx' || row.kind === 'error' ? 'RX' : 'TX';
@@ -370,6 +371,7 @@ class MonitorView {
         this.protocolVisibleSpans = [];
         this.txFrames = options.txFrames ?? null;
         this.getSourceErrors = options.getSourceErrors ?? (() => []);
+        this.getPendingFrame = options.getPendingFrame ?? (() => null);
         this.container = container;
         this.document = container.ownerDocument ?? document;
         this._selectingText = false;
@@ -660,7 +662,7 @@ class MonitorView {
         if (this.followTail) return start ?? null;
         const position = this.rowPositions.find(row => row.frameIndex === index);
         if (!position) return start ?? null;
-        const row = { ...this.frames.frameAt(index), frameIndex: index };
+        const row = { ...this.frames.frameAt(index, { copyBytes: false }), frameIndex: index };
         const layout = this._rowLayout(row, this._columns());
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(this.container) : null;
         const padding = (parseFloat(css?.paddingTop) || 0) + (parseFloat(css?.paddingBottom) || 0);
@@ -801,7 +803,7 @@ class MonitorView {
         // A pressed scrollbar must keep its original track and record mapping until release.
         if (this._scrollSession) return;
         const records = this._records(), container = this.container;
-        const large = this._largeRecords(records);
+        let large = this._largeRecords(records);
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
         const columns = this._layoutColumns(Math.max(2, Math.floor((container.clientWidth - padding) / this.charWidth)));
@@ -810,22 +812,25 @@ class MonitorView {
         const order = painted?.order ?? this.anchor?.order;
         const within = painted ? container.scrollTop - painted.top : this.anchor?.within ?? 0;
         const index = Number.isFinite(order) && records.length ? records.indexAtOrAfterOrder(order) : 0;
-        if (large) {
-            const sample = records.itemAt(0);
-            const rowHeight = this._foldLayout(sample, this._rowLayout(sample, columns, true)).lineCount * this.rowHeight;
-            height = Math.min(8_000_000, Math.max(container.clientHeight, records.length * rowHeight));
-            const row = records.itemAt(index);
-            const anchorHeight = this._foldLayout(row, this._rowLayout(row, columns, true)).lineCount * this.rowHeight;
-            const position = index + Math.max(0, Math.min(1, within / anchorHeight));
-            target = Math.max(0, height - container.clientHeight) * position / Math.max(1, records.length - 1);
-        } else {
+        if (!large) {
             rows = records.slice(0, records.length);
             const layouts = this._rowLayouts(rows, columns);
             offsets = [this.centerPadding];
             for (let i = 0; i < rows.length; i++)
                 offsets.push(offsets[i] + layouts[i].lineCount * this.rowHeight);
             height = offsets.at(-1) + this.centerPadding;
-            if (rows.length && Number.isFinite(order)) target = offsets[index] + within;
+            large = height > MONITOR_SCROLL_HEIGHT_LIMIT;
+            if (!large && rows.length && Number.isFinite(order)) target = offsets[index] + within;
+        }
+        if (large) {
+            const sample = records.itemAt(0);
+            const rowHeight = this._foldLayout(sample, this._rowLayout(sample, columns, true)).lineCount * this.rowHeight;
+            height = Math.min(MONITOR_SCROLL_HEIGHT_LIMIT, Math.max(height ?? 0, container.clientHeight, records.length * rowHeight));
+            rows = []; offsets = [];
+            const row = records.itemAt(index);
+            const anchorHeight = this._foldLayout(row, this._rowLayout(row, columns, true)).lineCount * this.rowHeight;
+            const position = index + Math.max(0, Math.min(1, within / anchorHeight));
+            target = Math.max(0, height - container.clientHeight) * position / Math.max(1, records.length - 1);
         }
         const oldTop = container.scrollTop;
         this.spacer.style.height = `${height}px`;
@@ -929,7 +934,7 @@ class MonitorView {
         for (const position of this.rowPositions) {
             if (position.frameIndex === undefined || position.top >= this.container.scrollTop + this.container.clientHeight ||
                 position.top + position.height <= this.container.scrollTop) continue;
-            const row = { ...this.frames.frameAt(position.frameIndex), frameIndex: position.frameIndex };
+            const row = { ...this.frames.frameAt(position.frameIndex, { copyBytes: false }), frameIndex: position.frameIndex };
             const layout = this._rowLayout(row, this._columns());
             if (!layout.hex) continue;
             const firstLine = Math.max(0, Math.floor((this.container.scrollTop - position.top) / this.rowHeight));
@@ -955,16 +960,18 @@ class MonitorView {
         const sources = [], options = this._displayOptions();
         const frames = this.frames;
         if (options.showRx) sources.push({ length: frames.length, orderAt: index => frames.orderAt(index),
-            itemAt: index => ({ ...frames.frameAt(index), frameIndex: index }) });
+            itemAt: index => ({ ...frames.frameAt(index, { copyBytes: false }), frameIndex: index }) });
         else if (this.revealOrder !== null && frames.length) {
             const index = frames.indexAtOrAfterOrder(this.revealOrder);
             if (frames.orderAt(index) === this.revealOrder) sources.push({ length: 1,
-                orderAt: () => this.revealOrder, itemAt: () => ({ ...frames.frameAt(index), frameIndex: index }) });
+                orderAt: () => this.revealOrder, itemAt: () => ({ ...frames.frameAt(index, { copyBytes: false }), frameIndex: index }) });
         }
+        const pending = options.showRx && this.mode === 'hex' ? this.getPendingFrame() : null;
+        if (pending) sources.push({ length: 1, orderAt: () => pending.order, itemAt: () => pending });
         if (options.showTx && this.txFrames) {
             const tx = this.txFrames;
             sources.push({ length: tx.length, orderAt: index => tx.orderAt(index),
-                itemAt: index => ({ ...tx.frameAt(index), kind: 'tx' }) });
+                itemAt: index => ({ ...tx.frameAt(index, { copyBytes: false }), kind: 'tx' }) });
         }
         if (options.showRx && options.showErrors) {
             const errors = this.getSourceErrors();
@@ -977,7 +984,10 @@ class MonitorView {
     }
 
     _largeRecords(records) { return records.length > this.largeThreshold || this.mode === 'protocol' && records.length > 0; }
-    _usesLargeLayout() { return this._largeRecords(this._records()); }
+    _usesLargeLayout() {
+        if (this._scrollSession) return this._scrollSession.geometry.large;
+        return this._largeRecords(this._records()) || this._scrollGeometry?.large === true;
+    }
 
     /** Wheel movement uses actual nearby line heights; the compressed scrollbar remains a coarse history navigator. */
     _scrollVirtualBy(delta) {
@@ -1688,6 +1698,11 @@ class MonitorView {
         for (let i = 0; i < rows.length; i++)
             offsets[i + 1] = offsets[i] + layouts[i].lineCount * this.rowHeight;
         const totalHeight = offsets[rows.length] + this.centerPadding;
+        if (!geometry && totalHeight > MONITOR_SCROLL_HEIGHT_LIMIT) {
+            this._renderLarge(records, MONITOR_SCROLL_HEIGHT_LIMIT);
+            this._captureScrollGeometry(records, true);
+            return;
+        }
         this.spacer.style.height = geometry?.height ?? `${totalHeight}px`;
         if (this.followTail) {
             this._setScrollTop(Math.max(0, this.container.scrollHeight - this.container.clientHeight));
@@ -2061,7 +2076,7 @@ class MonitorView {
         }
     }
 
-    _renderLarge(records = this._records()) {
+    _renderLarge(records = this._records(), minimumScrollHeight = 0) {
         const { frames, container } = this;
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
@@ -2071,8 +2086,8 @@ class MonitorView {
         const columns = this._layoutColumns(Math.max(2, Math.floor((container.clientWidth - padding) / this.charWidth)));
         const sample = records.itemAt(0);
         const rowHeight = this._foldLayout(sample, this._rowLayout(sample, columns)).lineCount * this.rowHeight;
-        this.spacer.style.height = this._scrollSession?.geometry.height ?? `${Math.min(8_000_000,
-            Math.max(container.clientHeight, records.length * rowHeight))}px`;
+        this.spacer.style.height = this._scrollSession?.geometry.height ?? `${Math.min(MONITOR_SCROLL_HEIGHT_LIMIT,
+            Math.max(minimumScrollHeight, container.clientHeight, records.length * rowHeight))}px`;
         const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
         let position;
         if (this.followTail) {

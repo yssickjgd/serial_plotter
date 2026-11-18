@@ -180,6 +180,8 @@ class CaptureService {
                 try {
                     source.parser.appendData(bytes, stamp);
                     source.sampleRate?.observe(source.parser.frameCount, stamp.arrival);
+                    if (source.refs && source.kind === 'raw' && source.parser.boundary === 'idle' && source.parser.length)
+                        this._safeNotify(this.onChange, source, { pendingRaw: true });
                 }
                 catch (error) { this._error(source, error); }
             }

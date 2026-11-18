@@ -2,7 +2,7 @@
 
 网页端实时数据可视化分析工具，支持串口、TCP 和 UDP 数据流的解析、监视与波形展示。
 
-近期更新：[空闲断帧与全局共用标记更新（2026-11-16）](docs/updates/2026-11-16-idle-timeout-shared-scope.md)；[协议编辑器与 RoboMaster 2027 模板更新（2026-10-29）](docs/updates/2026-10-29-protocol-editor-rm2027.md)。
+近期更新包括 [Hex 实时显示与长记录重绘修复（2026-11-18）](docs/updates/2026-11-18-hex-live-display.md)、[空闲断帧与全局共用标记更新（2026-11-16）](docs/updates/2026-11-16-idle-timeout-shared-scope.md)和[协议编辑器与 RoboMaster 2027 模板更新（2026-10-29）](docs/updates/2026-10-29-protocol-editor-rm2027.md)。
 
 ![License](https://img.shields.io/badge/License-CC%20BY%20NC%20SA%204.0-blue.svg)![JavaScript](https://img.shields.io/badge/JavaScript-vanilla-yellow.svg)![Platform](https://img.shields.io/badge/platform-Web-green.svg)
 

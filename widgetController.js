@@ -129,7 +129,8 @@ class WidgetController {
             }
         });
         else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
-            decodeCache: this.decodeCache, txFrames: this.service.txFrames, getSourceErrors: () => widget.source.errors
+            decodeCache: this.decodeCache, txFrames: this.service.txFrames, getSourceErrors: () => widget.source.errors,
+            getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.()
         });
         if (type === 'byte') {
             this._measureByteChrome(widget);
@@ -816,8 +817,9 @@ class WidgetController {
         });
     }
 
-    syncData(source) {
+    syncData(source, { pendingRaw = false } = {}) {
         for (const widget of this.widgets.values()) if (!source || widget.source === source) {
+            if (pendingRaw && (widget.type !== 'byte' || widget.view?.mode !== 'hex')) continue;
             if (widget.type === 'wave' && widget.settings.plotContent === 'response') continue;
             if (widget.view && widget.view.frames !== widget.source.frames) widget.view.setFrames(widget.source.frames);
             if (widget.view) this._restoreViewport(widget);

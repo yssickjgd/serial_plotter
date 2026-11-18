@@ -106,9 +106,10 @@ async function startSerialPlotterApplication() {
     const service = new S.CaptureService({ capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes,
         memoryLimitBytes: Number(globals.captureMemoryMiB) * 1048576,
         rebuildHistory: globals.rebuildHistory, numericFormat: { ...globals, ...initial.dataEngine.array }, channelNames: globals.channelNames, channelDefinitions: globals.channelDefinitions,
-        onChange(source) {
+        onChange(source, { pendingRaw = false } = {}) {
             if (disposed) return;
-            widgets?.syncData(source);
+            widgets?.syncData(source, { pendingRaw });
+            if (pendingRaw) return;
             if (source && !source.rebuilding && progressRows.has(source)) showProgress(source, null);
             scheduleSourceUi();
         },

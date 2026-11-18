@@ -86,6 +86,28 @@ test('virtual Hex and text histories expose the start of the oldest long record'
     } finally { global.document = oldDocument; }
 });
 
+test('long Hex histories avoid copying full records and use a bounded scroll height', t => {
+    const oldDocument = global.document;
+    global.document = monitorDocument();
+    t.after(() => { global.document = oldDocument; });
+    const frames = new FrameBuffer(1, 16);
+    for (let index = 0; index < 16; index++) {
+        const bytes = new Uint8Array(1048576).fill(index);
+        frames.appendRaw(bytes, 't', index + 1);
+    }
+    let copies = 0;
+    for (let index = 0; index < frames.length; index++) {
+        const bytes = frames.rawBytesAt(index);
+        bytes.slice = (...args) => { copies++; return Uint8Array.prototype.slice.call(bytes, ...args); };
+    }
+    const view = monitorFixture(frames, 300, 100);
+    t.after(() => view.dispose());
+    view.render();
+    assert.equal(copies, 0, 'row layout should only read the backing byte views');
+    assert.ok(view.container.scrollHeight <= 8000000);
+    assert.match(view.spacer.children.at(-1).children[1].textContent, /0F 0F/);
+});
+
 test('virtual raw histories scroll through long frame contents in pixel steps and survive fold changes', () => {
     const oldDocument = global.document; global.document = monitorDocument();
     try {

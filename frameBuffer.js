@@ -230,13 +230,15 @@ class FrameBuffer {
         return result;
     }
 
-    frameAt(index) {
+    /** Pass copyBytes: false for synchronous readers that treat the bytes as read-only. */
+    frameAt(index, { copyBytes = true } = {}) {
         if (index < 0 || index >= this.length) return null;
         const slot = (this.head + index) % this.storageCapacity;
         const chunk = this.frames[Math.floor(slot / this.chunkSize)];
         const offset = slot % this.chunkSize;
         if (this.rawMode) return {
-            bytes: chunk.rawRecords[offset].slice(), time: chunk.times[offset], order: chunk.orders[offset],
+            bytes: copyBytes ? chunk.rawRecords[offset].slice() : chunk.rawRecords[offset],
+            time: chunk.times[offset], order: chunk.orders[offset],
             timestamp: chunk.timestamps[offset], kind: chunk.kinds[offset], incomplete: chunk.incomplete[offset] === 1,
             segmented: chunk.segmented[offset] === 1, endReason: chunk.endReasons[offset],
             byteOffset: chunk.byteOffsets[offset], endByte: chunk.byteOffsets[offset] + chunk.rawRecords[offset].length,
@@ -244,7 +246,8 @@ class FrameBuffer {
         };
         const byteStart = offset * chunk.stride;
         return {
-            bytes: chunk.raw.slice(byteStart, byteStart + chunk.lengths[offset]),
+            bytes: copyBytes ? chunk.raw.slice(byteStart, byteStart + chunk.lengths[offset])
+                : chunk.raw.subarray(byteStart, byteStart + chunk.lengths[offset]),
             time: chunk.times[offset],
             order: chunk.orders[offset],
             timestamp: chunk.timestamps[offset],
