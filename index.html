@@ -99,7 +99,6 @@
                             <label id="max-points-label" for="max-points">最大采样点数</label>
                             <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
                         </div>
-                        <div class="input-group"><label for="max-raw-frame-bytes">原始帧分段上限（字节）</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /><span class="hint-text">未匹配的原始记录超限时分段，默认 1024 B。</span></div>
                         <div class="input-group"><label for="capture-memory-mib">采集内存预算（MiB）</label><input id="capture-memory-mib" type="number" min="64" max="4096" step="64" value="4096" /><span class="hint-text">所有来源、接收历史与 TX 共用；达到预算提前淘汰最旧帧，继续采集。浏览器总内存还包括画布及其它开销。</span></div>
                         <div class="hint-text" id="capture-memory-status" role="status" aria-live="polite"></div>
                         <div class="row buffer-actions">
@@ -256,10 +255,10 @@
             <div id="engine-splitter" class="engine-splitter" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整数据引擎高度" aria-valuemin="15" aria-valuemax="85" aria-valuenow="50"></div>
             <section id="data-engine" class="data-engine tab-group" aria-label="数据引擎">
                 <div class="sidebar-section-header config-pane-heading">数据引擎 <span id="engine-applied-mode" class="scope-badge">Data_Array</span></div>
-                <div class="tab-bar"><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
+                <div class="tab-bar"><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-raw-records">原始记录</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
                 <div id="engine-parsing" class="tab-content active">
                     <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">全局数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。解析规则对所有控件生效。</span></div>
-                    <div class="control-group"><div class="section-title">空闲断帧 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">空闲断帧时间（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">各模式独立保存，默认 50 ms，0 关闭。完整帧立即解析，超时仅清理残帧。</span></div>
+                    <div class="control-group" id="engine-residual-timeout-settings"><div class="section-title">解析残帧超时 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">解析残帧超时（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">完整帧立即解析，残帧超时后重新同步。0 关闭。两项计时都开启时，建议与「原始记录空闲间隔」设为相同值。</span></div>
                     <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
                         <div class="control-group" id="frame-numeric-settings">
                             <div class="section-title">数值解码 <span class="scope-badge">全局共用</span></div>
@@ -333,9 +332,24 @@
                         <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
                         <span class="hint-text">未勾选时，仅受影响的数据源从当前接收位置开始记录。</span>
                     </div>
-                    <div class="engine-apply-bar"><button id="engine-validate" class="btn btn-secondary" type="button">校验草稿</button><button id="engine-apply" class="btn btn-primary" type="button">应用解析配置</button></div><p id="engine-status" class="hint-text" role="status" aria-live="polite"></p>
+                </div>
+                <div id="engine-raw-records" class="tab-content" hidden>
+                    <div class="control-group">
+                        <div class="section-title">原始记录空闲间隔 <span class="scope-badge">全局共用</span></div>
+                        <div class="input-group"><label for="engine-raw-idle-timeout">空闲间隔（ms） · <span id="engine-raw-mode">数组</span></label><input id="engine-raw-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-raw-idle-hint" /></div>
+                        <span id="engine-raw-idle-hint" class="hint-text">各模式分别保存，0 关闭计时。点击“应用设置”生效。数组和自定义帧模式下，两项计时都开启时建议与「解析残帧超时」设为相同值。此间隔较短时，原始记录可能在残帧超时前收尾。</span>
+                    </div>
+                    <div class="control-group">
+                        <div class="section-title">原始帧分段上限 <span class="scope-badge">全局共用</span></div>
+                        <div class="input-group"><label for="max-raw-frame-bytes">每段最大字节数</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /></div>
+                        <span class="hint-text">默认 1024 B，修改后立即应用。已识别的完整帧保留整体。</span>
+                        <span id="engine-raw-limit-status" class="hint-text is-error" role="status" hidden></span>
+                    </div>
                 </div>
                 <div id="engine-channels" class="tab-content"><div id="engine-channel-panel"></div></div>
+                <div id="engine-edit-actions">
+                    <div class="engine-apply-bar"><button id="engine-validate" class="btn btn-secondary" type="button">校验草稿</button><button id="engine-apply" class="btn btn-primary" type="button">应用设置</button></div><p id="engine-status" class="hint-text" role="status" aria-live="polite"></p>
+                </div>
             </section>
         </aside>
 
@@ -640,14 +654,21 @@
                 <div class="tab-content active" id="tab-monitor-config">
                     <div class="control-group">
                         <div class="section-title">查看格式</div>
-                        <div class="input-group"><label for="capture-mode">显示内容</label><select id="capture-mode"><option value="hex">Hex</option><option value="text">文本</option><option value="engine">数据引擎</option></select></div>
-                        <span class="hint-text">只改变查看方式，不改变数据引擎的帧边界。</span>
+                        <div class="input-group"><label for="capture-mode">显示内容</label><select id="capture-mode"><option value="hex">Hex</option><option value="text">文本</option><option value="engine">解析结果</option></select></div>
+                        <p id="monitor-record-rule" class="hint-text"></p>
+                    </div>
+                    <div class="control-group" id="frame-hex-settings" hidden>
+                        <div class="section-title">记录边界 <span class="scope-badge">当前控件</span></div>
+                        <div class="input-group"><label for="hex-boundary">Hex 记录边界</label><select id="hex-boundary"><option value="idle">跟随数据引擎</option><option value="idle-basic">仅基本空闲断帧</option></select></div>
+                    </div>
+                    <div class="control-group" id="frame-text-boundary-settings" hidden>
+                        <div class="section-title">记录边界 <span class="scope-badge">全局共用</span></div>
+                        <div class="input-group"><label for="text-boundary">切分方式</label><select id="text-boundary"><option value="idle-basic">仅基本空闲断帧</option><option value="idle">跟随数据引擎</option><option value="cr">\r</option><option value="lf">\n</option><option value="crlf">\r\n</option><option value="lfcr">\n\r</option></select></div>
                     </div>
                     <div class="control-group" id="frame-raw-settings" hidden>
-                        <div class="section-title">文本查看规则 <span class="scope-badge">全局共用</span></div>
+                        <div class="section-title">字符解码 <span class="scope-badge">全局共用</span></div>
                         <div id="frame-text-settings" class="sidebar-stack">
                             <div class="input-group"><label for="text-encoding">文本字符集</label><select id="text-encoding"><option value="utf-8">UTF-8</option><option value="ascii">ASCII</option><option value="gbk">GBK（兼容 GB2312）</option><option value="gb18030">GB18030</option><option value="big5">Big5</option><option value="utf-16le">UTF-16LE</option><option value="utf-16be">UTF-16BE</option><option value="shift_jis">Shift-JIS</option><option value="windows-1252">Windows-1252</option></select></div>
-                            <div class="input-group"><label for="text-boundary">文本查看断帧</label><select id="text-boundary"><option value="idle">空闲间隔（跟随数据引擎）</option><option value="cr">\r</option><option value="lf">\n</option><option value="crlf">\r\n</option><option value="lfcr">\n\r</option></select></div>
                         </div>
                     </div>
                     <div class="control-group monitor-settings-panel" id="monitor-display-panel">

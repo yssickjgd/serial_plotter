@@ -38,7 +38,12 @@ test('monitor properties stay on the right while export is a peer left sidebar c
     assert.doesNotMatch(panel('monitor-settings-tabs'), /tab-(?:byte|waveform|pose)-frame/);
     assert.ok(panel('engine-parsing').includes('id="rebuild-history"'));
     assert.ok(panel('engine-parsing').includes('id="frame-numeric-settings"'));
-    assert.ok(panel('engine-parsing').includes('id="engine-apply"'));
+    assert.ok(panel('engine-edit-actions').includes('id="engine-apply"'));
+    assert.ok(panel('engine-parsing').includes('id="engine-idle-timeout"'));
+    assert.ok(panel('engine-raw-records').includes('id="engine-raw-idle-timeout"'));
+    assert.ok(panel('engine-raw-records').includes('id="max-raw-frame-bytes"'));
+    assert.ok(bytes.includes('id="hex-boundary"'));
+    assert.ok(panel('frame-text-boundary-settings').includes('id="text-boundary"'));
     assert.ok(!panel('sidebar-top').includes('id="data-type"'));
     assert.doesNotMatch(html, /id="tab-frame"|data-tab="tab-frame"/);
     assert.ok(!wave.includes('tab-bar'));

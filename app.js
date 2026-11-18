@@ -284,8 +284,9 @@ async function startSerialPlotterApplication() {
             const settings = exportProfiles[boundExportSourceId];
             settings.format = exportFormat; el('export-format').value = exportFormat;
             const active = widgets.active;
+            const textBoundary = active?.type === 'byte' ? active.settings.textBoundary : globals.textBoundary;
             exportView.setParsingDefaults(globals, { encoding: active?.type === 'byte' ? active.settings.textEncoding : globals.textEncoding,
-                boundary: active?.type === 'byte' ? active.settings.textBoundary : globals.textBoundary });
+                boundary: ['idle', 'idle-basic'].includes(textBoundary) ? 'records' : textBoundary });
             exportView.numericFormatEdited = Boolean(settings.formats[exportFormat].numericFormat);
             if (exportView.numericFormatEdited) el('export-channels-count').value = settings.formats[exportFormat].numericFormat.channelsCount;
             const channels = exportFormat === 'csv' ? exportSource().channels : [];
@@ -456,6 +457,7 @@ async function startSerialPlotterApplication() {
     function applyGlobalFields() {
         for (const [key, id] of Object.entries(connectionIds)) el(id).value = globals[key];
         el('max-points').value = globals.maxPoints; el('max-raw-frame-bytes').value = String(globals.maxRawFrameBytes);
+        status('engine-raw-limit-status', '');
         el('capture-memory-mib').value = String(globals.captureMemoryMiB);
         el('max-points-label').textContent = '每个来源最大帧数';
         updateMemoryStatus();
@@ -472,11 +474,18 @@ async function startSerialPlotterApplication() {
         try {
             const validated = S.WidgetConfig.validateWorkspaceConfig(candidate); Object.assign(globals, validated.global);
             if (key === 'maxPoints') { service.setCapacity(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints)); }
-            else if (key === 'maxRawFrameBytes') void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+            else if (key === 'maxRawFrameBytes') {
+                void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+                widgets.syncByteRecordRule();
+                status('engine-raw-limit-status', '');
+            }
             else service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
             updateMemoryStatus();
             tools.invalidate(); saveSoon(); status('cfg-save-status', '');
-        } catch (error) { report(error); }
+        } catch (error) {
+            if (key === 'maxRawFrameBytes') status('engine-raw-limit-status', error.message);
+            else report(error);
+        }
     });
     const protocolSession = new S.ProtocolSendSession({ getProtocols: () => dataEngine.config.protocols,
         getProtocol: id => dataEngine.config.protocols.find(schema => schema.id === id) });

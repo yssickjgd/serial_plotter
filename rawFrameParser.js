@@ -1,5 +1,6 @@
-/** Raw stream framing by array boundaries, reception silence, or encoded line endings. */
+/** Raw stream framing by recognized frames, reception silence, or encoded line endings. */
 const rawDataParser = typeof module !== 'undefined' ? require('./dataParser').DataParser : globalThis.SerialPlotter.DataParser;
+const rawProtocol = typeof module !== 'undefined' ? require('./protocolEngine').Protocol : globalThis.SerialPlotter.Protocol;
 const rawFrameLimits = typeof module !== 'undefined' ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 
 class RawFrameParser {
@@ -33,11 +34,12 @@ class RawFrameParser {
         this.delimiterTail = [];
         this.segmented = false;
         this.arrayFraming = null;
-        this._clearArrayScan();
+        this.protocolScanner = null;
+        this._clearFramedScan();
     }
 
     setFormat({ boundary = 'idle', idleGapSeconds = 0.001, encoding = 'utf-8',
-        maxFrameBytes = rawFrameLimits.defaultMaxRawFrameBytes, arrayFraming = null } = {}) {
+        maxFrameBytes = rawFrameLimits.defaultMaxRawFrameBytes, arrayFraming = null, protocolFraming = null } = {}) {
         if (!['idle', 'cr', 'lf', 'crlf', 'lfcr'].includes(boundary))
             throw new Error('不支持的断帧方式');
         const gap = Number(idleGapSeconds);
@@ -51,10 +53,19 @@ class RawFrameParser {
                 frameLength < 1 || !Number.isSafeInteger(footerOffset) || footerOffset < header.length ||
                 footerOffset + footer.length > frameLength) throw new RangeError('数组断帧规则无效');
         }
+        const scanner = boundary === 'idle' && protocolFraming
+            ? new rawProtocol.StreamParser(protocolFraming, { deferDecode: true }) : null;
         this.onFrameParts = null;
         this.reset();
         this.boundary = boundary;
         this.arrayFraming = boundary === 'idle' ? arrayFraming : null;
+        this.protocolScanner = scanner;
+        if (scanner) scanner.onFrameParsed = (_record, _time, bytes, _timestamp, stamp) => {
+            const start = stamp.byteOffset - this.framedBaseByte;
+            this._cutUnmatched(start, 'unmatched');
+            this._publishFramed(start, start + bytes.length, 'protocol', false, bytes);
+            this.framedStart = start + bytes.length;
+        };
         this.idleGapSeconds = gap;
         this.encoding = encoding;
         this.maxFrameBytes = maxFrameBytes;
@@ -74,12 +85,13 @@ class RawFrameParser {
         this.streamStartByte = this.nextByte;
         this.delimiterTail = [];
         this.segmented = false;
-        this._clearArrayScan();
+        this._clearFramedScan();
+        this.protocolScanner?.reset();
     }
 
     flushPending() {
         this._cancelTimer();
-        if (this.arrayFraming) this._flushUnmatched(true);
+        if (this.arrayFraming || this.protocolScanner) this._flushUnmatched(true);
         else this._emit(this.boundary !== 'idle', true);
         this.delimiterTail = [];
         this.segmented = false;
@@ -95,7 +107,7 @@ class RawFrameParser {
 
     /** Historical idle replay can assemble immutable input views in background workers. */
     setFramePartsCallback(callback) {
-        if (callback !== null && (typeof callback !== 'function' || this.boundary !== 'idle' || this.arrayFraming))
+        if (callback !== null && (typeof callback !== 'function' || this.boundary !== 'idle' || this.arrayFraming || this.protocolScanner))
             throw new TypeError('Deferred frame assembly requires idle framing and a callback');
         if (callback === null && this.onFrameParts && this.length) {
             this._reserve(0);
@@ -120,13 +132,13 @@ class RawFrameParser {
         this.nextByte = source.endByte;
         const time = RawFrameParser.formatTime(timestamp);
         if (this.boundary === 'idle' && this.idleGapSeconds > 0 && arrival >= this.deadline) {
-            if (this.arrayFraming) this._flushUnmatched();
+            if (this.arrayFraming || this.protocolScanner) this._flushUnmatched();
             else this._emit(false);
             this.segmented = false;
         }
         if (this.onRawData) this._notify(this.onRawData, data, time, source);
         if (this.boundary === 'idle') {
-            if (this.arrayFraming) this._appendArray(data, source);
+            if (this.arrayFraming || this.protocolScanner) this._appendFramed(data, source);
             else for (let offset = 0; offset < data.length;) {
                 this._startFrame(time, timestamp, source, byteOffset + offset);
                 const count = Math.min(data.length - offset, this.maxFrameBytes - this.length);
@@ -155,80 +167,100 @@ class RawFrameParser {
         }
     }
 
-    _clearArrayScan() {
+    _clearFramedScan() {
         this.arrayScan = 0;
-        this.arraySpans = [];
-        this.arraySpanHead = 0;
+        this.framedStart = 0;
+        this.framedSpans = [];
+        this.framedSpanHead = 0;
     }
 
-    get estimatedMemoryBytes() { return this.buffer.byteLength + this.arraySpans.length * 256; }
-
-    _arrayStamp(byteOffset) {
-        while (this.arraySpanHead + 1 < this.arraySpans.length &&
-            this.arraySpans[this.arraySpanHead].endByte <= byteOffset) this.arraySpanHead++;
-        return this._stampAt(this.arraySpans[this.arraySpanHead], byteOffset);
+    get estimatedMemoryBytes() {
+        return this.buffer.byteLength + this.framedSpans.length * 256 + (this.protocolScanner?.estimatedMemoryBytes ?? 0);
     }
 
-    _publishArray(start, end, endReason, streamEnded = false) {
+    _framedStamp(byteOffset) {
+        while (this.framedSpanHead + 1 < this.framedSpans.length &&
+            this.framedSpans[this.framedSpanHead].endByte <= byteOffset) this.framedSpanHead++;
+        return this._stampAt(this.framedSpans[this.framedSpanHead], byteOffset);
+    }
+
+    _publishFramed(start, end, endReason, streamEnded = false, bytes) {
         if (start === end) return;
-        const stamp = this._arrayStamp(this.arrayBaseByte + start);
-        this._publish(this.buffer.slice(start, end), RawFrameParser.formatTime(stamp.timestamp),
+        const stamp = this._framedStamp(this.framedBaseByte + start);
+        this._publish(bytes ?? this.buffer.slice(start, end), RawFrameParser.formatTime(stamp.timestamp),
             stamp.timestamp, stamp, end - start, false, streamEnded, endReason);
     }
 
-    _appendArray(data, source) {
-        const { header, footer, footerOffset, frameLength } = this.arrayFraming;
-        if (!this.length) this.arrayBaseByte = source.byteOffset;
-        this.arraySpans.push(source);
+    _cutUnmatched(end, tailReason, streamEnded = false) {
+        const fullSegmentEnd = tailReason === 'stream' || tailReason === 'idle' ? end - 1 : end;
+        while (this.framedStart + this.maxFrameBytes <= fullSegmentEnd) {
+            const next = this.framedStart + this.maxFrameBytes;
+            this._publishFramed(this.framedStart, next, 'limit');
+            this.framedStart = next;
+        }
+        if (tailReason && end > this.framedStart) {
+            this._publishFramed(this.framedStart, end, tailReason, streamEnded);
+            this.framedStart = end;
+        }
+    }
+
+    _appendFramed(data, source) {
+        if (this.length && this.framedBaseByte + this.length !== source.byteOffset) this._flushUnmatched(true);
+        if (!this.length) this.framedBaseByte = source.byteOffset;
+        this.framedSpans.push(source);
         this._reserve(data.length);
         this.buffer.set(data, this.length);
         this.length += data.length;
+        if (this.protocolScanner) {
+            this.protocolScanner.appendData(data, source);
+            // The scanner may still need its pending prefix for the next matching attempt.
+            this._cutUnmatched(this.protocolScanner.bufferBaseByte - this.framedBaseByte);
+        } else this._scanArray();
+        const start = this.framedStart;
+        this.length -= start;
+        this.framedStart = 0;
+        if (!this.length) {
+            this._clearFramedScan();
+            return;
+        }
+        if (start) this.buffer.copyWithin(0, start, start + this.length);
+        this.framedBaseByte += start;
+        const stamp = this._framedStamp(this.framedBaseByte);
+        this.frameMetadata = stamp;
+        this.timestamp = stamp.timestamp;
+        this.time = RawFrameParser.formatTime(stamp.timestamp);
+        if (this.framedSpanHead) {
+            this.framedSpans = this.framedSpans.slice(this.framedSpanHead);
+            this.framedSpanHead = 0;
+        }
+    }
+
+    _scanArray() {
+        const { header, footer, footerOffset, frameLength } = this.arrayFraming;
         // Only cut bytes before the scan cursor. The remaining candidate may span receive blocks.
-        let start = 0, scan = this.arrayScan;
+        let scan = this.arrayScan;
         while (scan + (header.length || frameLength) <= this.length) {
             if (rawDataParser.matchesBytes(this.buffer, scan, header)) {
                 const end = scan + frameLength;
                 if (end > this.length) break;
                 if (rawDataParser.matchesBytes(this.buffer, scan + footerOffset, footer)) {
-                    this._publishArray(start, scan, 'unmatched');
-                    this._publishArray(scan, end, 'array');
-                    start = scan = end;
+                    this._cutUnmatched(scan, 'unmatched');
+                    this._publishFramed(scan, end, 'array');
+                    this.framedStart = scan = end;
                     continue;
                 }
             }
             scan++;
-            if (scan - start === this.maxFrameBytes) {
-                this._publishArray(start, scan, 'limit');
-                start = scan;
-            }
         }
-        this.length -= start;
-        if (!this.length) {
-            this._clearArrayScan();
-            return;
-        }
-        if (start) this.buffer.copyWithin(0, start, start + this.length);
-        this.arrayBaseByte += start;
-        this.arrayScan = scan - start;
-        const stamp = this._arrayStamp(this.arrayBaseByte);
-        this.frameMetadata = stamp;
-        this.timestamp = stamp.timestamp;
-        this.time = RawFrameParser.formatTime(stamp.timestamp);
-        if (this.arraySpanHead) {
-            this.arraySpans = this.arraySpans.slice(this.arraySpanHead);
-            this.arraySpanHead = 0;
-        }
+        this._cutUnmatched(scan);
+        this.arrayScan = scan - this.framedStart;
     }
 
     _flushUnmatched(streamEnded = false) {
-        const finalReason = streamEnded ? 'stream' : 'idle';
-        for (let start = 0; start < this.length; start += this.maxFrameBytes) {
-            const end = Math.min(this.length, start + this.maxFrameBytes);
-            const last = end === this.length;
-            this._publishArray(start, end, last ? finalReason : 'limit', last && streamEnded);
-        }
+        this._cutUnmatched(this.length, streamEnded ? 'stream' : 'idle', streamEnded);
         this.length = 0;
-        this._clearArrayScan();
+        this._clearFramedScan();
+        this.protocolScanner?.reset();
     }
 
     _startFrame(time, timestamp, source, byteOffset) {
@@ -298,7 +330,7 @@ class RawFrameParser {
             this.timer = null;
             if (!this.length) return;
             if (this.now() < this.deadline) this._scheduleTimer();
-            else if (this.arrayFraming) this._flushUnmatched();
+            else if (this.arrayFraming || this.protocolScanner) this._flushUnmatched();
             else this._emit(false);
         }, delay);
     }

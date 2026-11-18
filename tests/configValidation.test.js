@@ -5,7 +5,9 @@ const { parseIntInRange, parsePort, validateConfig } = require('../configValidat
 test('capture configuration validates modes, encodings, boundaries and finite idle intervals', () => {
     assert.throws(() => validateConfig({ captureMode: 'custom' }), /采集/);
     assert.throws(() => validateConfig({ textEncoding: 'invalid' }), /字符集/);
-    assert.throws(() => validateConfig({ textBoundary: 'invalid' }), /断帧/);
+    assert.throws(() => validateConfig({ textBoundary: 'invalid' }), /记录边界/);
+    assert.throws(() => validateConfig({ hexBoundary: 'crlf' }), /Hex 记录边界/);
+    assert.equal(validateConfig({ hexBoundary: 'idle-basic' }).hexBoundary, 'idle-basic');
     for (const idleGapSeconds of ['', 'NaN', '0', '-1', '0.0001', 'Infinity'])
         assert.throws(() => validateConfig({ idleGapSeconds }), /间隔/);
     assert.equal(validateConfig({ captureMode: 'hex', idleGapSeconds: '0.01',

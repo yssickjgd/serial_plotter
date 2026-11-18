@@ -29,7 +29,7 @@ const WAVE_DEFAULTS = {
     plotYMinFreq: '0.001', plotYMaxFreq: '1', channels: [], viewport: null, exportSettings: null
 };
 const BYTE_DEFAULTS = {
-    engineSource: null, protocolFieldPaths: null, captureMode: 'hex', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
+    engineSource: null, protocolFieldPaths: null, captureMode: 'hex', hexBoundary: 'idle', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
 };
 const UI_LAYOUT_DEFAULTS = { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200, leftSplitRatio: .5 };
 const copy = value => JSON.parse(JSON.stringify(value));
@@ -139,7 +139,7 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     widgetConfigUtils.validateConfig({ ...globals, ...result });
     result.textEncoding = globals.textEncoding ?? result.textEncoding;
     result.textBoundary = globals.textBoundary ?? result.textBoundary;
-    // Retain the legacy field for configuration compatibility; widget idle framing is fixed.
+    // Retain the legacy field for configuration compatibility; idle timing comes from the data engine.
     result.idleGapSeconds = BYTE_DEFAULTS.idleGapSeconds;
     return result;
 }

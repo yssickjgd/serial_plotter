@@ -10,26 +10,40 @@ function protocol() {
             { id: 'y', name: '温度', command: 2, fields: [{ name: 'value', type: 'int16' }] }] };
 }
 
-test('engine idle input remembers each draft mode and applies only the selected validated timeout', async t => {
+test('raw idle interval and parser timeout are separate drafts with independent live effects', async t => {
     const f=fixture(t);
     assert.ok(f.get('engine-idle-timeout'));
     assert.equal(f.get('engine-idle-timeout').value,'50');
     f.change('engine-idle-timeout','5');
     assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,50);
-    f.change('engine-mode','Raw_Data');assert.equal(f.get('engine-idle-timeout').value,'50');
-    f.change('engine-idle-timeout','0');
+    f.change('engine-raw-idle-timeout','15');
+    f.change('engine-mode','Raw_Data');assert.equal(f.get('engine-residual-timeout-settings').hidden,true);
+    f.change('engine-raw-idle-timeout','0');
     f.change('engine-mode','Self_Defined_Frame');assert.equal(f.get('engine-idle-timeout').value,'50');
     f.change('engine-idle-timeout','20');
     f.change('engine-mode','Data_Array');assert.equal(f.get('engine-idle-timeout').value,'5');
+    assert.equal(f.get('engine-raw-idle-timeout').value,'15');
+    assert.ok(f.get('max-raw-frame-bytes').closest('#engine-raw-records'));
     await f.app.engineView.apply();
     assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,5);
-    assert.equal(f.app.service.baseSource.parser.idleGapSeconds,.005);
-    assert.equal(f.app.getConfig().dataEngine.idleTimeouts.Raw_Data,0);
+    assert.equal(f.app.service.baseSource.parser.idleGapSeconds,.015);
+    assert.equal(f.app.getConfig().dataEngine.rawIdleTimeouts.Raw_Data,0);
+    const numeric = f.app.service.numericSource, raw = f.app.service.baseSource;
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(171, 0, 0, 128, 63));
+    const numericGeneration = numeric.generation;
+    f.change('rebuild-history', false);
+    f.change('engine-raw-idle-timeout','25'); await f.app.engineView.apply();
+    assert.equal(numeric.generation, numericGeneration);
+    assert.equal(numeric.frames.length, 1);
+    const rawGeneration = raw.generation;
+    f.change('engine-idle-timeout','8'); await f.app.engineView.apply();
+    assert.equal(raw.generation, rawGeneration);
+    assert.equal(raw.parser.idleGapSeconds,.025);
     const saved=f.app.getConfig(), restored=bootApplication(saved);t.after(()=>restored.app.dispose());
-    assert.equal(restored.get('engine-idle-timeout').value,'5');
-    restored.change('engine-mode','Raw_Data');assert.equal(restored.get('engine-idle-timeout').value,'0');
-    f.change('engine-idle-timeout','-1');await assert.rejects(f.app.engineView.apply(),/空闲/);
-    assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,5);
+    assert.equal(restored.get('engine-idle-timeout').value,'8');
+    restored.change('engine-mode','Raw_Data');assert.equal(restored.get('engine-raw-idle-timeout').value,'0');
+    f.change('engine-idle-timeout','-1');await assert.rejects(f.app.engineView.apply(),/残帧/);
+    assert.equal(f.app.dataEngine.config.idleTimeouts.Data_Array,8);
 });
 
 test('empty workspaces configure explicit parsing drafts and applying is the only live rule change', async t => {
@@ -90,27 +104,45 @@ test('custom engine exposes structured records, separate message sequences and s
     assert.equal(restored.widgets.find(w => w.id === x.id).settings.engineSource, 'message:x');
 });
 
-test('Hex shows continuous protocol traffic before the raw idle record closes', async t => {
+test('protocol mode previews Hex and idle text, prioritizes complete frames and replays unmatched bytes', async t => {
     const f = fixture(t);
     const engine = f.app.dataEngine;
-    await engine.apply({ ...engine.serialize(), mode: 'Self_Defined_Frame', protocols: [protocol()], protocolId: 'position' }, { rebuild: false });
+    const schema = protocol();
+    schema.framing.header = [65];
+    schema.messages[0].command = 66;
+    schema.messages[1].command = 67;
+    const settings = { ...engine.serialize(), mode: 'Self_Defined_Frame', protocols: [schema], protocolId: schema.id };
+    await engine.apply(settings, { rebuild: false });
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
     f.change('capture-mode', 'hex');
+    const text = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'text', textBoundary: 'idle' } });
     await f.settle();
-    const first = Uint8Array.of(170, 1, 7, 0), second = Uint8Array.of(170, 2, 8, 0);
-    f.app.serialAdapter.onDataCallback(first);
+    assert.equal(byte.source, text.source);
+    const frames = byte.source.frames;
+    const rows = () => Array.from({ length: frames.length }, (_, index) => [...frames.rawBytesAt(index)]);
+    const first = [65, 66, 88, 89], second = [65, 67, 90, 87], noise = [33, 34], tail = [65, 66, 35];
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(...noise, ...first.slice(0, 2)));
     await f.tick(1);
-    assert.equal(engine.recordsSource.frames.length, 1);
-    assert.equal(byte.source.frames.length, 0);
-    assert.match(byte.view.spacer.textContent, /AA 01 07 00/);
-    f.app.serialAdapter.onDataCallback(second);
+    assert.equal(frames.length, 0);
+    assert.match(byte.view.spacer.textContent, /21 22 41 42/);
+    assert.match(text.view.spacer.textContent, /!"AB/);
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(...first.slice(2), ...second, ...tail));
     await f.tick(1);
     assert.equal(engine.recordsSource.frames.length, 2);
-    assert.match(byte.view.spacer.textContent, /AA 01 07 00 AA 02 08 00/);
+    assert.deepEqual(rows(), [noise, first, second]);
+    assert.match(byte.view.spacer.textContent, /41 42 23/);
+    assert.match(text.view.spacer.textContent, /AB#/);
     await f.tick(50);
-    assert.equal(byte.source.frames.length, 1);
-    assert.deepEqual([...byte.source.frames.rawBytesAt(0)], [...first, ...second]);
-    assert.equal(byte.view.lastRows.length, 1, 'the committed record replaces the preview');
+    assert.deepEqual(rows(), [noise, first, second, tail]);
+    assert.equal(byte.view.lastRows.length, 4, 'the committed record replaces the preview');
+    assert.equal(text.view.lastRows.length, 4);
+    f.app.service.endStream();
+    const rematch = engine.apply({ ...settings, protocols: [{ ...schema, framing: { ...schema.framing, header: [68] } }] });
+    await f.settle(); await rematch;
+    assert.deepEqual(rows(), [[...noise, ...first, ...second, ...tail]]);
+    const restored = engine.apply(settings);
+    await f.settle(); await restored;
+    assert.deepEqual(rows(), [noise, first, second, tail]);
 });
 
 test('array mode gives Hex the configured wire boundaries and replays unmatched bytes by idle', async t => {
@@ -141,6 +173,55 @@ test('array mode gives Hex the configured wire boundaries and replays unmatched 
     const restored = engine.apply(settings, { rebuild: true });
     await f.settle(); await restored;
     assert.deepEqual(rows(), [noise, first, second, tail]);
+});
+
+test('Hex has an independent boundary setting and text still shares its viewing rules', async t => {
+    const f = fixture(t), controller = f.app.widgets, service = f.app.service;
+    const hex = controller.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    const text = controller.create({ type: 'byte', settings: { captureMode: 'text', textBoundary: 'idle' } });
+    assert.equal(f.get('text-boundary').options[0].textContent, '仅基本空闲断帧');
+    assert.equal(f.get('text-boundary').options[1].textContent, '跟随数据引擎');
+    assert.equal(text.source, hex.source);
+    const hexSource = hex.source;
+    f.change('text-boundary', 'idle-basic');
+    await f.settle();
+    assert.notEqual(text.source, hexSource);
+    assert.equal(hex.source, hexSource);
+    const basicHex = controller.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    assert.equal(f.get('hex-boundary').value, 'idle');
+    assert.match(f.get('monitor-record-rule').textContent, /数组帧优先.*50 ms.*1024 B/);
+    f.change('hex-boundary', 'idle-basic');
+    assert.equal(basicHex.source, text.source);
+    assert.match(f.get('monitor-record-rule').textContent, /仅基本空闲断帧.*50 ms.*1024 B/);
+    f.change('max-raw-frame-bytes', '2048');
+    assert.match(f.get('monitor-record-rule').textContent, /2048 B/);
+    f.change('max-raw-frame-bytes', '63');
+    assert.equal(f.get('engine-raw-limit-status').hidden, false);
+    assert.match(f.get('monitor-record-rule').textContent, /2048 B/);
+    assert.equal(f.app.getConfig().global.textBoundary, 'idle-basic');
+    const payload = Uint8Array.of(0xab, 65, 66, 67, 68, 0xab, 69, 70, 71, 72);
+    f.app.serialAdapter.onDataCallback(payload);
+    await f.tick(1);
+    assert.equal(hexSource.frames.length, 2);
+    assert.equal(text.source.frames.length, 0);
+    assert.match(text.view.spacer.textContent, /ABCD.*EFGH/);
+    await f.tick(50);
+    assert.equal(text.source.frames.length, 1);
+    assert.deepEqual([...text.source.frames.rawBytesAt(0)], [...payload]);
+    f.change('export-format', 'text');
+    assert.equal(f.get('export-text-boundary').value, 'records');
+    const saved = f.app.getConfig();
+    assert.equal(saved.global.textBoundary, 'idle-basic');
+    const loaded = bootApplication(saved);
+    t.after(() => loaded.app.dispose());
+    assert.notEqual(loaded.app.widgets.widgets.get(text.id).source, loaded.app.service.baseSource);
+    assert.equal(loaded.app.widgets.widgets.get(basicHex.id).source, loaded.app.widgets.widgets.get(text.id).source);
+    service.endStream();
+    controller.activate(text.id);
+    f.change('text-boundary', 'idle');
+    await f.settle();
+    assert.equal(text.source, hexSource);
+    assert.equal(text.source.frames.length, 2);
 });
 
 test('channel names and formulas are global while widget selectors only change visibility', async t => {

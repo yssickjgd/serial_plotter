@@ -34,7 +34,16 @@ test('engine idle settings default to fifty milliseconds per mode and preserve e
         { Raw_Data: 1, Data_Array: 0, Self_Defined_Frame: 100 });
     const input = { idleTimeouts: { Raw_Data: 0, Data_Array: .5, Self_Defined_Frame: 25 } };
     const text = JSON.stringify(input), saved = normalizeDataEngine(input, array);
-    assert.deepEqual(saved.idleTimeouts, input.idleTimeouts); assert.equal(JSON.stringify(input), text);
+    assert.deepEqual(saved.idleTimeouts, input.idleTimeouts);
+    assert.deepEqual(saved.rawIdleTimeouts, input.idleTimeouts);
+    assert.deepEqual(normalizeDataEngine(undefined, array).rawIdleTimeouts,
+        { Raw_Data: 50, Data_Array: 50, Self_Defined_Frame: 50 });
+    const legacyDraft = { ...saved, idleTimeouts: { ...saved.idleTimeouts, Data_Array: 10 } };
+    delete legacyDraft.rawIdleTimeouts;
+    const migrated = normalizeDataEngine({ ...input, rawIdleTimeouts: { Data_Array: 20 }, draft: legacyDraft }, array);
+    assert.deepEqual(migrated.rawIdleTimeouts, { ...input.idleTimeouts, Data_Array: 20 });
+    assert.equal(migrated.draft.rawIdleTimeouts.Data_Array, 10);
+    assert.equal(JSON.stringify(input), text);
     for (const value of [-1, '', null, true, 'NaN', Infinity, 2147483648])
         assert.throws(() => normalizeDataEngine({ idleTimeouts: { Data_Array: value } }, array), /空闲|毫秒|超时/);
 });
@@ -120,13 +129,13 @@ test('numeric replay uses recorded arrival gaps and carries a disabled timeout a
 test('inactive mode idle edits preserve live outputs and switching restores separate saved settings', async t => {
     const f=setup(t,'Data_Array',{Data_Array:5,Raw_Data:0,Self_Defined_Frame:20});
     f.receive([0xab,1,0]);const source=f.engine.output();
-    const settings=f.engine.serialize();settings.idleTimeouts.Raw_Data=10;
+    const settings=f.engine.serialize();settings.rawIdleTimeouts.Raw_Data=10;
     await f.engine.apply(settings,{rebuild:false});assert.equal(f.engine.output(),source);assert.equal(source.frames.length,1);
     await f.engine.apply({...f.engine.serialize(),mode:'Raw_Data'},{rebuild:false});
     assert.equal(f.service.baseSource.parser.idleGapSeconds,.01);
     await f.engine.apply({...f.engine.serialize(),mode:'Data_Array'},{rebuild:false});
     assert.equal(f.service.baseSource.parser.idleGapSeconds,.005);
-    assert.deepEqual(normalizeDataEngine(JSON.parse(JSON.stringify(f.engine.serialize())),f.globals).idleTimeouts,
+    assert.deepEqual(normalizeDataEngine(JSON.parse(JSON.stringify(f.engine.serialize())),f.globals).rawIdleTimeouts,
         {Raw_Data:10,Data_Array:5,Self_Defined_Frame:20});
 });
 
@@ -158,7 +167,7 @@ test('raw idle and line-ending sources stay shared and independent while the act
     const hex=f.service.acquireSource({captureMode:'hex'}), line=f.service.acquireSource({captureMode:'text',textBoundary:'lf'});
     assert.equal(hex,f.service.baseSource);f.receive([65,10,66]);f.at(10);f.fire();
     assert.equal(line.frames.length,1);assert.equal(hex.frames.length,0);
-    const settings=f.engine.serialize();settings.idleTimeouts.Raw_Data=2;
+    const settings=f.engine.serialize();settings.rawIdleTimeouts.Raw_Data=2;
     await f.engine.apply(settings,{rebuild:true});
     assert.equal(line.frames.length,1);assert.equal(hex.parser.idleGapSeconds,.002);
     f.at(12);f.fire();assert.equal(hex.frames.length,1);assert.equal(hex.frames.timestampAt(0),1000);

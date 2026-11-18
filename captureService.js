@@ -57,19 +57,25 @@ class CaptureService {
     }
 
     _rawFormat(format) {
-        const boundary = format.captureMode === 'hex' ? 'idle' : format.textBoundary ?? format.boundary ?? 'idle';
+        const requested = (format.captureMode === 'hex' ? format.hexBoundary : format.textBoundary ?? format.boundary) ?? 'idle';
+        const basicIdle = requested === 'idle-basic';
+        // The saved 'idle' value follows the data engine for compatibility.
+        const boundary = basicIdle ? 'idle' : requested;
+        const followEngine = boundary === 'idle' && !basicIdle;
         const encoding = format.textEncoding ?? format.encoding ?? 'utf-8';
-        return { captureMode: boundary === 'idle' ? 'hex' : 'text', textBoundary: boundary,
+        return { captureMode: boundary === 'idle' ? 'hex' : 'text', textBoundary: boundary, basicIdle,
             idleGapSeconds: this.rawIdleGapSeconds ?? Number(format.idleGapSeconds ?? 0.001),
             textEncoding: boundary === 'idle' || !encoding.startsWith('utf-16') ? 'utf-8' : encoding,
-            arrayFraming: boundary === 'idle' ? this.rawArrayFraming : null,
+            arrayFraming: followEngine ? this.rawArrayFraming : null,
+            protocolFraming: followEngine ? this.rawProtocolFraming : null,
             maxRawFrameBytes: this.maxRawFrameBytes };
     }
 
     _sourceKey(format, rebuild) {
         const boundary = format.textBoundary;
         return `${this.epoch}:${rebuild ? 'history' : this.history.endByte}:` +
-            `${boundary}:${boundary === 'idle' ? format.idleGapSeconds : format.textEncoding}:${this.maxRawFrameBytes}`;
+            `${boundary}:${boundary === 'idle' ? format.idleGapSeconds : format.textEncoding}:${this.maxRawFrameBytes}` +
+            (format.basicIdle ? ':basic' : '');
     }
 
     _newParser(format, startByte) {
@@ -79,7 +85,7 @@ class CaptureService {
         parser.nextByte = startByte;
         parser.setFormat(numeric ? format : { boundary: format.textBoundary,
             idleGapSeconds: format.idleGapSeconds, encoding: format.textEncoding,
-            maxFrameBytes: this.maxRawFrameBytes, arrayFraming: format.arrayFraming });
+            maxFrameBytes: this.maxRawFrameBytes, arrayFraming: format.arrayFraming, protocolFraming: format.protocolFraming });
         if (numeric) captureServiceDependencies.configureFrameIdleTimeout(parser,
             { ...this.parserOptions, timeoutMs: format.idleTimeoutMs ?? 0 });
         return parser;
@@ -295,7 +301,7 @@ class CaptureService {
                 channels: Number(format.channelsCount), type: format.dataType,
                 littleEndian: format.isLittleEndian !== false });
         };
-        else if (source.format.captureMode === 'hex' && !source.format.arrayFraming) options.assembleRawBatch = records =>
+        else if (source.format.captureMode === 'hex' && !source.format.arrayFraming && !source.format.protocolFraming) options.assembleRawBatch = records =>
             pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0), parts: records.flatMap(record => record.parts) });
         return options;
     }
@@ -390,7 +396,8 @@ class CaptureService {
     memoryUsage() { return this.memory.measure(); }
     setMemoryLimit(bytes) { this.memory.setLimit(bytes); }
 
-    setRawIdleFraming(seconds, { arrayFormat, rebuild = this.rebuildHistory } = {}) {
+    setRawIdleFraming(seconds, { arrayFormat, protocolFraming = null, protocolSignature = null,
+        rebuild = this.rebuildHistory } = {}) {
         if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 > 2147483647)
             throw new RangeError('空闲断帧时间无效');
         const previous = this.rawIdleGapSeconds ?? .001;
@@ -403,15 +410,21 @@ class CaptureService {
             const frameLength = footerOffset + footer.length + Number(parser.enableChecksum);
             arrayFraming = { header, footer, footerOffset, frameLength };
         }
-        const framingChanged = JSON.stringify(this.rawArrayFraming ?? null) !== JSON.stringify(arrayFraming);
+        const framingChanged = JSON.stringify(this.rawArrayFraming ?? null) !== JSON.stringify(arrayFraming) ||
+            (this.rawProtocolSignature ?? null) !== protocolSignature;
         this.rawIdleGapSeconds = seconds;
         this.rawArrayFraming = arrayFraming;
+        this.rawProtocolFraming = protocolFraming;
+        this.rawProtocolSignature = protocolSignature;
         if (previous === seconds && !framingChanged) return Promise.resolve();
         const pending = [];
         this.sourceKeys.clear();
         for (const source of this.sources) {
-            if (source.kind === 'raw' && source.format.textBoundary === 'idle') {
-                source.format = { ...source.format, idleGapSeconds: seconds, arrayFraming };
+            if (source.kind === 'raw' && source.format.textBoundary === 'idle' &&
+                (previous !== seconds || framingChanged && !source.format.basicIdle)) {
+                source.format = { ...source.format, idleGapSeconds: seconds,
+                    arrayFraming: source.format.basicIdle ? null : arrayFraming,
+                    protocolFraming: source.format.basicIdle ? null : protocolFraming };
                 source.key = this._sourceKey(source.format, rebuild);
                 pending.push(this._restart(source, rebuild));
             }

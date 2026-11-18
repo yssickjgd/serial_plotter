@@ -956,6 +956,18 @@ class MonitorView {
 
     _layoutColumns(columns) { return Math.max(2, columns - this._foldColumns(columns)); }
 
+    _pendingRecord() {
+        if (this.mode !== 'hex' && this.mode !== 'text') return null;
+        const row = this.getPendingFrame(this.mode);
+        if (!row || this.mode === 'hex') return row;
+        // The open protocol frame may be large. Decode a bounded tail per repaint.
+        let start = Math.max(0, row.bytes.length - 4096);
+        const offset = (row.byteOffset ?? 0) - (row.streamStartByte ?? 0);
+        if (start && this.encoding.startsWith('utf-16')) start += (offset + start) % 2;
+        return { ...row, pendingText: true, textOffset: offset + start,
+            bytes: row.bytes.subarray(start), reason: start ? '接收中 · 文本尾部预览' : row.reason };
+    }
+
     _records() {
         const sources = [], options = this._displayOptions();
         const frames = this.frames;
@@ -966,7 +978,7 @@ class MonitorView {
             if (frames.orderAt(index) === this.revealOrder) sources.push({ length: 1,
                 orderAt: () => this.revealOrder, itemAt: () => ({ ...frames.frameAt(index, { copyBytes: false }), frameIndex: index }) });
         }
-        const pending = options.showRx && this.mode === 'hex' ? this.getPendingFrame() : null;
+        const pending = options.showRx ? this._pendingRecord() : null;
         if (pending) sources.push({ length: 1, orderAt: () => pending.order, itemAt: () => pending });
         if (options.showTx && this.txFrames) {
             const tx = this.txFrames;
@@ -1292,6 +1304,10 @@ class MonitorView {
     }
 
     _textTokens(row, includeCrossing = false) {
+        if (row.pendingText) {
+            const decoder = new monitorTextUtils.MappedTextDecoder(this.encoding, { byteOffset: row.textOffset });
+            return decoder.write(row.bytes, 0);
+        }
         const index = row.frameIndex;
         if (index === undefined || row.kind !== 'rx') {
             const decoder = new monitorTextUtils.MappedTextDecoder(this.encoding);
@@ -1487,6 +1503,7 @@ class MonitorView {
         if (this.mode === 'text') {
             const prefix = monitorPrefix(row, options, this.frames);
             const bodyColumns = Math.max(2, columns - textCells(prefix));
+            if (row.pendingText) return { prefix, byteMode: 'text', ...wrapTextTokens(this._textTokens(row), bodyColumns, options) };
             const key = this._textLayoutKey(row, bodyColumns);
             const cached = this.textLayouts.get(key);
             const tokens = countOnly && cached ? null : this._textTokens(row);

@@ -4,6 +4,7 @@
         ...require('./channelOperations'), ...require('./engineFrames'), ...require('./configValidation'),
         ...require('./frameIdleTimeout'), Protocol: require('./protocolEngine').Protocol } : root.SerialPlotter;
     const ARRAY_FIELDS = ['dataType', 'endianness', 'channelsCount', 'enableHeader', 'headerHex', 'enableFooter', 'footerHex', 'enableChecksum'];
+    const MODES = ['Raw_Data', 'Data_Array', 'Self_Defined_Frame'];
     const clone = value => JSON.parse(JSON.stringify(value));
     function protocolWireSignature(schema) {
         const normalize = (value, key = '', kind = '') => {
@@ -54,28 +55,33 @@
         input = (typeof module !== 'undefined' ? require('./configSymbols') : root.SerialPlotter).migrateEngineSymbols(input).settings;
         const s = { mode: 'Data_Array', array: Object.fromEntries(ARRAY_FIELDS.map(key => [key, globals[key] ?? defaults[key]])),
             protocols: [], protocolId: null, mappings: [], synchronization: { sampleRate: 1000, expiry: {} }, editorState: {}, draft: null, ...clone(input ?? {}) };
-        const idle = s.idleTimeouts;
-        if (idle !== undefined && (!idle || typeof idle !== 'object' || Array.isArray(idle))) throw new Error('空闲超时配置无效');
-        s.idleTimeouts = {};
-        for (const mode of ['Raw_Data','Data_Array','Self_Defined_Frame']) {
-            const value = idle && Object.hasOwn(idle, mode) ? idle[mode] : 50;
-            if (!['number','string'].includes(typeof value) || String(value).trim() === '' ||
-                !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 2147483647)
-                throw new RangeError('空闲断帧时间必须为 0–2147483647 毫秒');
-            s.idleTimeouts[mode] = Number(value);
-        }
+        const normalizeTimeouts = (values, fallback, label) => {
+            if (values !== undefined && (!values || typeof values !== 'object' || Array.isArray(values)))
+                throw new Error(label + '配置无效');
+            return Object.fromEntries(MODES.map(mode => {
+                const value = values && Object.hasOwn(values, mode) ? values[mode] : fallback?.[mode] ?? 50;
+                if (!['number', 'string'].includes(typeof value) || String(value).trim() === '' ||
+                    !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 2147483647)
+                    throw new RangeError(label + '必须为 0–2147483647 毫秒');
+                return [mode, Number(value)];
+            }));
+        };
+        s.idleTimeouts = normalizeTimeouts(s.idleTimeouts, null, '解析残帧超时');
+        s.rawIdleTimeouts = normalizeTimeouts(s.rawIdleTimeouts, s.idleTimeouts, '原始记录空闲间隔');
         if (!s.editorState || typeof s.editorState !== 'object' || Array.isArray(s.editorState) || JSON.stringify(s.editorState).length > 8388608)
             throw new Error('协议编辑器状态或样例超出限制');
         if (s.draft !== null) {
             const draft = s.draft, object = value => value && typeof value === 'object' && !Array.isArray(value);
-            if (!object(draft) || !['Raw_Data', 'Data_Array', 'Self_Defined_Frame'].includes(draft.mode) ||
+            if (!object(draft) || !MODES.includes(draft.mode) ||
                 !object(draft.array) || !ARRAY_FIELDS.every(key => Object.hasOwn(draft.array, key)) ||
                 !Array.isArray(draft.protocols) || draft.protocols.some(schema => !object(schema)) ||
                 draft.protocolId !== null && typeof draft.protocolId !== 'string' || !Array.isArray(draft.mappings) ||
                 draft.mappings.some(mapping => !object(mapping)) || !object(draft.synchronization) || !object(draft.synchronization.expiry))
                 throw new Error('数据引擎草稿结构无效');
+            draft.rawIdleTimeouts = { ...s.rawIdleTimeouts, ...(draft.rawIdleTimeouts ?? draft.idleTimeouts) };
+            draft.idleTimeouts = { ...s.idleTimeouts, ...draft.idleTimeouts };
         }
-        if (!['Raw_Data', 'Data_Array', 'Self_Defined_Frame'].includes(s.mode)) throw new Error('数据引擎模式无效');
+        if (!MODES.includes(s.mode)) throw new Error('数据引擎模式无效');
         api().validateConfig(s.array);
         if (!ARRAY_FIELDS.every(key => Object.hasOwn(s.array, key))) throw new Error('数组解析参数不完整');
         if (!Array.isArray(s.protocols) || !Array.isArray(s.mappings)) throw new Error('协议库或字段映射无效');
@@ -194,11 +200,20 @@
                     symbolVersion: this.globals.symbolVersion, yieldControl: this.service.yieldControl });
             return frames;
         }
+        _configureRaw(rebuild) {
+            const schema = this.mode === 'Self_Defined_Frame' ? this.config.protocols.find(p => p.id === this.config.protocolId) : null;
+            this.rawReady = this.service.setRawIdleFraming(this.config.rawIdleTimeouts[this.mode] / 1000, {
+                arrayFormat: this.mode === 'Data_Array' ? this.config.array : null, protocolFraming: schema ? this.compiled : null,
+                protocolSignature: schema ? protocolWireSignature(schema) : null, rebuild
+            });
+            return this.rawReady;
+        }
         _configure({ rebuild = this.service.rebuildHistory } = {}) {
             const a = api();
+            const schema = this.mode === 'Self_Defined_Frame' ? this.config.protocols.find(p => p.id === this.config.protocolId) : null;
+            this.compiled = schema ? a.Protocol.compile(schema) : null;
             for (const source of this.managed) { source.generation++; source.parser.reset(); source.frames.dispose?.(); this.service.sources.delete(source); }
-            this.rawReady = this.service.setRawIdleFraming(this.config.idleTimeouts[this.mode] / 1000,
-                { arrayFormat: this.mode === 'Data_Array' ? this.config.array : null, rebuild });
+            this._configureRaw(rebuild);
             this.outputs.clear(); this.managed.clear(); this.cache.clear(); this.anchor = null; this.running = false;
             this.preserveRecordsThroughByte = null; this.replayQueue = null; this.replayBatches = null;
             this.service.catalogCount = this.channelCount; this.arraySource.catalogCount = this.channelCount;
@@ -216,7 +231,6 @@
             this.arraySource.startByte = this.service.history.endByte; this.arraySource.ready = Promise.resolve(this.arraySource);
             this.emptySource = this._source('empty', this._numericFrames());
             if (this.mode === 'Raw_Data') { this.service.numericSource = this.emptySource; return; }
-            this.compiled = a.Protocol.compile(this.config.protocols.find(p => p.id === this.config.protocolId));
             const parser = new a.Protocol.StreamParser(); parser.setFormat({ protocol: this.compiled });
             a.configureFrameIdleTimeout(parser, { ...this.service.parserOptions, timeoutMs: this.config.idleTimeouts.Self_Defined_Frame });
             parser.maxDecodedFields = Math.max(1, Math.min(32768, Math.floor(this.service.memory.limitBytes / 2048)));
@@ -374,8 +388,10 @@
             const selected = config => protocolWireSignature(config.protocols.find(schema => schema.id === config.protocolId));
             const unchangedProtocol = sameIdle && previous.mode === 'Self_Defined_Frame' && next.mode === previous.mode &&
                 selected(previous) === selected(next);
-            if (!force && (unchangedArray || sameIdle && previous.mode === 'Raw_Data' && next.mode === 'Raw_Data')) {
-                this.config = next; this.onChange(this.config); return this.config;
+            if (!force && (unchangedArray || previous.mode === 'Raw_Data' && next.mode === 'Raw_Data')) {
+                this.config = next;
+                await this._configureRaw(rebuild);
+                this.onChange(this.config); return this.config;
             }
             if (!force && unchangedProtocol) {
                 const activeMappings = config => config.mappings.filter(mapping => mapping.protocolId === config.protocolId);
@@ -384,6 +400,7 @@
                 this.config = next;
                 this.compiled = api().Protocol.compile(next.protocols.find(schema => schema.id === next.protocolId));
                 this.recordsSource.parser.protocol = this.compiled; this.clearDecodeCache(); this._indexMappings();
+                const rawReady = this._configureRaw(rebuild);
                 if (rulesChanged) {
                     this.syncSource.sampleRate.rate = next.synchronization.sampleRate;
                     if (rebuild) {
@@ -393,6 +410,7 @@
                     } else this.syncSource.frames.updateSynchronization(next.synchronization, {
                         timestamp: this.anchor ? this.anchor.timestamp + this.service.now() - this.anchor.arrival : NaN });
                 }
+                await rawReady;
                 this.onChange(this.config); return this.config;
             }
             this.generation++; this.config = next; this.rebuilding = false;

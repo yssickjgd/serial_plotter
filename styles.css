@@ -116,6 +116,7 @@ body {
 .engine-channel-view { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .engine-channel-view > :not(.engine-channel-list) { flex-shrink: 0; }
 .data-engine .control-group { margin-bottom: var(--ui-group-gap); }
+#engine-edit-actions { flex-shrink: 0; padding: 4px 8px 0; border-top: 1px solid var(--border); }
 .engine-apply-bar { display: flex; flex-wrap: wrap; gap: 5px; }
 .engine-apply-bar .btn { flex: 1 1 100px; }
 #engine-status { margin: 6px 0; overflow-wrap: anywhere; }

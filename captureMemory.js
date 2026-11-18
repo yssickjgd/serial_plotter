@@ -72,6 +72,13 @@ class CaptureMemoryBudget {
                 count += 2 * Math.floor((pending + byteLength) / parser.arrayFraming.frameLength);
                 extra += 256;
             }
+            if (parser.protocolScanner) {
+                const protocol = parser.protocolScanner.protocol;
+                const minimum = protocol.framing.fixedLength ?? Math.max(1,
+                    (protocol.sync?.offset ?? 0) + (protocol.sync?.bytes.length ?? protocol.framing.header?.length ?? 0));
+                count += 2 * Math.floor((pending + byteLength) / minimum);
+                extra += byteLength * 2 + 256;
+            }
             extra += source.frames.estimateAppendMemory(count, byteLength, frameLength, numeric ? parser.channelsCount : 0) + byteLength * 2;
         }
         extra += this.service.dataEngine?.estimateReceiveMemory(byteLength) ?? 0;

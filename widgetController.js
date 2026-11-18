@@ -27,7 +27,7 @@ class WidgetController {
             plotFftWindow: 'plot-fft-window', plotFftRemoveDc: 'plot-fft-remove-dc',
             plotContent: 'plot-content',
             plotPhaseUnwrap: 'plot-phase-unwrap', plotPhaseUnit: 'plot-phase-unit', plotResponseSampleRate: 'plot-response-sample-rate',
-            captureMode: 'capture-mode', textEncoding: 'text-encoding', textBoundary: 'text-boundary'
+            captureMode: 'capture-mode', hexBoundary: 'hex-boundary', textEncoding: 'text-encoding', textBoundary: 'text-boundary'
         };
         this.globalIds = { channelsCount: 'channels-count', dataType: 'data-type', endianness: 'endianness',
             enableHeader: 'chk-header', headerHex: 'frame-header', enableFooter: 'chk-footer', footerHex: 'frame-footer',
@@ -277,7 +277,7 @@ class WidgetController {
         }
         this.syncGlobals();
         if (widget.type === 'wave') this._bindYBounds(widget);
-        else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.settings.captureMode === 'engine' ? this.service.dataEngine?.mode === 'Data_Array' ? 'number' : 'engine' : widget.settings.captureMode); }
+        else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.view.mode); }
         else this.poseConfigView.render(widget);
         this.displayView.setChannels(this.channelMeta());
         this._renderChannels(widget);
@@ -328,9 +328,12 @@ class WidgetController {
 
     rebindEngineSources() {
         for (const widget of this.widgets.values()) {
-            const previous = widget.source;
-            widget.source = this.service.acquireSource(widget.type === 'byte' ? widget.settings : { captureMode: 'number', engineSource: widget.settings.engineSource });
-            this.service.releaseSource(previous);
+            // The capture service updates existing raw sources in place when their framing changes.
+            if (widget.type !== 'byte' || widget.settings.captureMode === 'engine') {
+                const previous = widget.source;
+                widget.source = this.service.acquireSource(widget.type === 'byte' ? widget.settings : { captureMode: 'number', engineSource: widget.settings.engineSource });
+                this.service.releaseSource(previous);
+            }
             if (widget.type !== 'wave' || widget.settings.plotContent !== 'response') widget.view.setFrames(widget.source.frames);
             this.applySettings(widget); this._whenReady(widget);
         }
@@ -540,6 +543,26 @@ class WidgetController {
         // Numeric controls are an explicit-apply global draft; selecting widgets cannot overwrite it.
     }
 
+    syncByteRecordRule() {
+        if (this.active?.type !== 'byte') return;
+        const { kind, format } = this.active.source;
+        let rule;
+        if (kind === 'raw') {
+            const limit = format.maxRawFrameBytes + ' B';
+            const delimiter = { cr: '\\r', lf: '\\n', crlf: '\\r\\n', lfcr: '\\n\\r' }[format.textBoundary];
+            if (delimiter) rule = '按 ' + delimiter + ' 分段 · 上限 ' + limit;
+            else {
+                const prefix = format.arrayFraming ? '数组帧优先' : format.protocolFraming ? '自定义帧优先'
+                    : format.basicIdle ? '仅基本空闲断帧' : '原始记录';
+                const timeout = Number((format.idleGapSeconds * 1000).toPrecision(12));
+                const finish = timeout ? '空闲 ' + timeout + ' ms 或达到 ' + limit + ' 时收尾' : '达到 ' + limit + ' 时收尾（空闲计时已关闭）';
+                const unmatched = format.arrayFraming || format.protocolFraming ? '未匹配字节在' : '在';
+                rule = prefix + ' · ' + unmatched + finish;
+            }
+        } else rule = kind === 'protocol' ? '按当前协议显示解析结果' : '按当前数组规则显示解析结果';
+        this.element('monitor-record-rule').textContent = rule;
+    }
+
     updateTextRules(rules) {
         const candidate = { ...this.globals, ...rules };
         SerialPlotter.validateConfig(candidate);
@@ -603,7 +626,10 @@ class WidgetController {
         this.element('wrap-plot-frequency-axis').style.display = s.plotViewMode !== 'time' ? '' : 'none';
         this.element('wrap-fft-remove-dc').style.display = s.plotViewMode !== 'time' && !response ? '' : 'none';
         this.element('wrap-plot-y-bounds').style.display = this.element('plot-y-scale-mode').value === 'manual' ? '' : 'none';
+        this.element('frame-hex-settings').hidden = s.captureMode !== 'hex';
+        this.element('frame-text-boundary-settings').hidden = s.captureMode !== 'text';
         this.element('frame-raw-settings').hidden = s.captureMode !== 'text';
+        this.syncByteRecordRule();
         this.element('frame-text-settings').hidden = s.captureMode !== 'text';
         const independent = response && s.plotViewMode === 'time';
         this.element('plot-window-points').max = String(SerialPlotter.Limits.maxPlotWindowPoints);
@@ -715,7 +741,7 @@ class WidgetController {
                     }
                 }
                 const next = SerialPlotter.WidgetConfig.normalizeWidgetSettings(widget.type, candidate, this.globals);
-                const ruleChanged = widget.type === 'byte' && ['captureMode', 'textEncoding', 'textBoundary'].includes(key);
+                const ruleChanged = widget.type === 'byte' && (key === 'captureMode' || key === 'hexBoundary' && next.captureMode === 'hex');
                 widget.settings = next;
                 if (key === 'plotPhaseUnit' && widget.pendingViewport)
                     widget.pendingViewport = next[next.plotContent === 'response' ? 'responseViewport' : 'viewport'];
@@ -819,7 +845,7 @@ class WidgetController {
 
     syncData(source, { pendingRaw = false } = {}) {
         for (const widget of this.widgets.values()) if (!source || widget.source === source) {
-            if (pendingRaw && (widget.type !== 'byte' || widget.view?.mode !== 'hex')) continue;
+            if (pendingRaw && (widget.type !== 'byte' || !['hex', 'text'].includes(widget.view?.mode))) continue;
             if (widget.type === 'wave' && widget.settings.plotContent === 'response') continue;
             if (widget.view && widget.view.frames !== widget.source.frames) widget.view.setFrames(widget.source.frames);
             if (widget.view) this._restoreViewport(widget);
