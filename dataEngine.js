@@ -197,7 +197,8 @@
         _configure({ rebuild = this.service.rebuildHistory } = {}) {
             const a = api();
             for (const source of this.managed) { source.generation++; source.parser.reset(); source.frames.dispose?.(); this.service.sources.delete(source); }
-            this.rawReady = this.service.setRawIdleGapSeconds(this.config.idleTimeouts[this.mode] / 1000, { rebuild });
+            this.rawReady = this.service.setRawIdleFraming(this.config.idleTimeouts[this.mode] / 1000,
+                { arrayFormat: this.mode === 'Data_Array' ? this.config.array : null, rebuild });
             this.outputs.clear(); this.managed.clear(); this.cache.clear(); this.anchor = null; this.running = false;
             this.preserveRecordsThroughByte = null; this.replayQueue = null; this.replayBatches = null;
             this.service.catalogCount = this.channelCount; this.arraySource.catalogCount = this.channelCount;

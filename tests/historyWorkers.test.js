@@ -347,7 +347,8 @@ test('Hex worker failure falls back asynchronously without losing a long frame o
     const capture = new CaptureHistory();
     const bytes = Uint8Array.from({ length: 150000 }, (_, i) => i % 251);
     capture.append(bytes, { arrival: 0, timestamp: 1000, order: 1 });
-    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01 }, 5, {
+    const result = await replayCaptureHistory(capture, { captureMode: 'hex', idleGapSeconds: 0.01,
+        maxRawFrameBytes: bytes.length + 1 }, 5, {
         assembleRawBatch: records => pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0),
             parts: records.flatMap(record => record.parts) })
     });

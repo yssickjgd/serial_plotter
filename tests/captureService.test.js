@@ -158,9 +158,11 @@ test('one-kilohertz numeric input retains every raw byte with per-source frame c
     for (let i = 0; i < 1000; i++) assert.deepEqual(hex.frames.rawBytesAt(i), data);
     s.clear();
     for (let i = 0; i < 300; i++) s.receive(data, { arrival: i * .5, timestamp: 1700000000000 + i });
-    assert.equal(hex.frames.length, 0, 'continuous arrivals shorter than the idle gap are a pending raw record');
+    assert.equal(hex.frames.length, Math.floor(300 * 92 / 1024), 'continuous input is split at the default raw record limit');
+    assert.equal(hex.parser.length, 300 * 92 % 1024);
     s.endStream();
-    assert.equal(hex.frames.length, 1); assert.equal(hex.frames.retainedByteLength, 300 * 92);
+    assert.equal(hex.frames.length, Math.ceil(300 * 92 / 1024));
+    assert.equal(hex.frames.retainedByteLength, 300 * 92);
 });
 
 test('large-capacity idle history preserves batched 23-channel frames and 1024-byte segments', t => {
@@ -432,8 +434,9 @@ test('large numeric raw and text replays use one worker budget and preserve resu
     const counts = s.getTextStats(s.baseSource, 'ascii');
     await Promise.all([raw.ready, counts.ready,
         s.updateNumericFormat({ ...numericFormat, dataType: 'uint16' })]);
-    assert.equal(raw.frames.length, 1);
-    assert.deepEqual(raw.frames.rawBytesAt(0), input);
+    assert.equal(raw.frames.length, input.length / 1024);
+    for (let index = 0; index < raw.frames.length; index++)
+        assert.deepEqual(raw.frames.rawBytesAt(index), input.subarray(index * 1024, (index + 1) * 1024));
     assert.equal(counts.total, 524288);
     assert.equal(counts.failed, 0);
     assert.equal(s.numericSource.frames.getValue(0, 999), 16705);

@@ -38,6 +38,12 @@ class DataParser {
         return parserByteUtils.hexToBytes(value);
     }
 
+    static matchesBytes(buffer, offset, pattern) {
+        for (let index = 0; index < pattern.length; index++)
+            if (buffer[offset + index] !== pattern[index]) return false;
+        return true;
+    }
+
     setFormat({ enableHeader, headerHex, enableFooter, footerHex,
         dataType, isLittleEndian, channelsCount, enableChecksum }) {
         const count = Number(channelsCount);
@@ -147,20 +153,10 @@ class DataParser {
         };
         while (this.writeOffset - this.readOffset >= frameLen) {
             const start = this.readOffset;
-            if (headerLen) {
-                let matches = true;
-                for (let j = 0; j < headerLen; j++) {
-                    if (this.buffer[start + j] !== this.headerBytes[j]) { matches = false; break; }
-                }
-                if (!matches) { this.readOffset++; continue; }
-            }
+            if (!DataParser.matchesBytes(this.buffer, start, this.headerBytes)) { this.readOffset++; continue; }
             const payloadStart = start + headerLen;
             const footerStart = payloadStart + payloadLen;
-            let footerValid = true;
-            for (let j = 0; j < footerLen; j++) {
-                if (this.buffer[footerStart + j] !== this.footerBytes[j]) { footerValid = false; break; }
-            }
-            if (!footerValid) {
+            if (!DataParser.matchesBytes(this.buffer, footerStart, this.footerBytes)) {
                 this.failCount++;
                 if (rejectedStart < 0) rejectedStart = start;
                 this.readOffset++;

@@ -6,6 +6,7 @@ const widgetRegistryUtils = typeof module !== 'undefined' ? require('./channelRe
 const widgetViewportUtils = () => typeof module !== 'undefined' ? require('./widgetViewport') : globalThis.SerialPlotter.WidgetViewport;
 const widgetPoseUtils = () => typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : globalThis.SerialPlotter.PoseConfig;
 const widgetCommandUtils = () => typeof module !== 'undefined' ? require('./commandLibrary') : globalThis.SerialPlotter;
+const widgetLimits = typeof module !== 'undefined' ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 
 const widgetSymbolUtils = () => typeof module !== 'undefined' ? require('./configSymbols') : globalThis.SerialPlotter;
 
@@ -13,7 +14,7 @@ const GLOBAL_DEFAULTS = {
     symbolVersion: 2,
     connType: 'serial', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
     netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
-    maxRawFrameBytes: 1048576, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
+    maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
     endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
     footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };

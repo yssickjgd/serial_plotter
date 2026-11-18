@@ -170,7 +170,7 @@ async function replayCaptureHistory(history, format, capacity, {
         frames.setRawMode(true);
         parser.setFormat({ boundary: format.captureMode === 'hex' ? 'idle' : (format.textBoundary || 'idle'),
             idleGapSeconds: Number(format.idleGapSeconds ?? 0.001), encoding: format.textEncoding || 'utf-8',
-            maxFrameBytes: format.maxRawFrameBytes ?? format.maxFrameBytes ?? 1048576 });
+            maxFrameBytes: format.maxRawFrameBytes ?? format.maxFrameBytes, arrayFraming: format.arrayFraming });
         parser.suspendTimers = true;
     }
     parser.suspendTimers = true;
@@ -207,7 +207,7 @@ async function replayCaptureHistory(history, format, capacity, {
         captureHistoryErrorCallbacks.add(recordError);
     }
     const batchedDecode = numeric && !!decodeBatch && !previousResult && !preserveCallbacks;
-    const batchedRaw = format.captureMode === 'hex' && !!assembleRawBatch && !previousResult && !preserveCallbacks;
+    const batchedRaw = format.captureMode === 'hex' && !format.arrayFraming && !!assembleRawBatch && !previousResult && !preserveCallbacks;
     const batchedFrames = batchedDecode || batchedRaw;
     let decodeRecords = [], decodeBytes = 0, pendingDecodes = [];
     const dispatchDecode = () => {

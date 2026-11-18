@@ -28,6 +28,21 @@ test('idle and UTF16 framing remain bounded at odd size limits', () => {
     assert.equal(text.frames[1].endReason, 'delimiter');
 });
 
+test('array boundaries take priority over raw size cuts, with footer-only resynchronization and idle fallback', () => {
+    const footer = Uint8Array.of(13, 10);
+    const f = fixture({ idleGapSeconds: 0.001, maxFrameBytes: 3, arrayFraming: {
+        header: new Uint8Array(0), footer, footerOffset: 4, frameLength: 6
+    } });
+    f.parser.appendData(Uint8Array.of(99, 1, 2, 3), { timestamp: 100 });
+    f.at(.5);
+    f.parser.appendData(Uint8Array.of(4, 13, 10, 20, 21, 22, 23), { timestamp: 101 });
+    assert.deepEqual(f.frames.map(frame => frame.bytes), [[99], [1, 2, 3, 4, 13, 10]]);
+    assert.deepEqual(f.frames.map(frame => frame.timestamp), [100, 100]);
+    f.at(2); f.fire();
+    assert.deepEqual(f.frames.map(frame => frame.bytes), [[99], [1, 2, 3, 4, 13, 10], [20, 21, 22], [23]]);
+    assert.deepEqual(f.frames.map(frame => frame.endReason), ['unmatched', 'array', 'limit', 'idle']);
+});
+
 test('an idle gap after an exact size limit starts a fresh unsegmented frame', () => {
     const f = fixture({ maxFrameBytes: 2 });
     f.parser.appendData(Uint8Array.of(1, 2));

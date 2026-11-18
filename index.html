@@ -99,7 +99,7 @@
                             <label id="max-points-label" for="max-points">最大采样点数</label>
                             <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
                         </div>
-                        <div class="input-group"><label for="max-raw-frame-bytes">原始帧分段上限（字节）</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1024" value="1048576" /><span class="hint-text">超限分段保留全部字节，默认 1 MiB。</span></div>
+                        <div class="input-group"><label for="max-raw-frame-bytes">原始帧分段上限（字节）</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /><span class="hint-text">未匹配的原始记录超限时分段，默认 1024 B。</span></div>
                         <div class="input-group"><label for="capture-memory-mib">采集内存预算（MiB）</label><input id="capture-memory-mib" type="number" min="64" max="4096" step="64" value="4096" /><span class="hint-text">所有来源、接收历史与 TX 共用；达到预算提前淘汰最旧帧，继续采集。浏览器总内存还包括画布及其它开销。</span></div>
                         <div class="hint-text" id="capture-memory-status" role="status" aria-live="polite"></div>
                         <div class="row buffer-actions">

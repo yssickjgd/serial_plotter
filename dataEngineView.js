@@ -153,7 +153,9 @@
         syncVisibility() {
             this.el('engine-idle-hint').textContent = this.draft.mode === 'Raw_Data'
                 ? '各模式独立保存，默认 50 ms，0 关闭。空闲时结束原始记录；时间戳保留首字节接收时间。'
-                : '各模式独立保存，默认 50 ms，0 关闭。完整帧仍立即解析；超时只保留并清理残帧，不停止同步采样。';
+                : this.draft.mode === 'Data_Array'
+                    ? '默认 50 ms，0 关闭。Hex 和空闲文本优先按启用的帧首／帧尾及数组长度断帧，未匹配字节按空闲间隔分段。'
+                    : '各模式独立保存，默认 50 ms，0 关闭。完整帧仍立即解析；超时只保留并清理残帧，不停止同步采样。';
             this.el('engine-array-settings').hidden = this.draft.mode !== 'Data_Array';
             this.el('engine-protocol-settings').hidden = this.draft.mode !== 'Self_Defined_Frame';
             this.el('engine-protocol-mappings').hidden = this.draft.mode !== 'Self_Defined_Frame';

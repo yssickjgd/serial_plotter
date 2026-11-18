@@ -64,9 +64,14 @@ class CaptureMemoryBudget {
                 (parser.enableHeader ? parser.headerBytes.length : 0) +
                 (parser.enableFooter ? parser.footerBytes.length : 0) + (parser.enableChecksum ? 1 : 0) : 0;
             const pending = numeric ? parser.writeOffset - parser.readOffset : parser.length;
-            const count = numeric ? Math.ceil((pending + byteLength) / frameLength) :
+            let count = numeric ? Math.ceil((pending + byteLength) / frameLength) :
                 parser.boundary === 'idle' ? Math.ceil((pending + byteLength) / parser.maxFrameBytes) + 1 :
                     Math.ceil(byteLength / parser.delimiter.length) + 1;
+            // Each matched frame may also close an unmatched prefix.
+            if (parser.arrayFraming) {
+                count += 2 * Math.floor((pending + byteLength) / parser.arrayFraming.frameLength);
+                extra += 256;
+            }
             extra += source.frames.estimateAppendMemory(count, byteLength, frameLength, numeric ? parser.channelsCount : 0) + byteLength * 2;
         }
         extra += this.service.dataEngine?.estimateReceiveMemory(byteLength) ?? 0;

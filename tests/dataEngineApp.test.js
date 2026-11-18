@@ -113,6 +113,36 @@ test('Hex shows continuous protocol traffic before the raw idle record closes', 
     assert.equal(byte.view.lastRows.length, 1, 'the committed record replaces the preview');
 });
 
+test('array mode gives Hex the configured wire boundaries and replays unmatched bytes by idle', async t => {
+    const f = fixture(t), engine = f.app.dataEngine;
+    assert.equal(f.app.service.maxRawFrameBytes, 1024);
+    const array = { ...engine.config.array, dataType: 'uint16', headerHex: 'AA 55',
+        enableFooter: true, footerHex: '0D' };
+    const settings = { ...engine.serialize(), array };
+    await engine.apply(settings, { rebuild: false });
+    const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    const service = f.app.service, frames = byte.source.frames;
+    const rows = () => Array.from({ length: frames.length }, (_, index) => [...frames.rawBytesAt(index)]);
+    const first = [0xAA, 0x55, 0x0D, 0x11, 0x0D], second = [0xAA, 0x55, 2, 3, 0x0D];
+    const noise = [0xAA, 0x55, 9, 9, 9], tail = [0xAA, 0x55, 4];
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(...noise, first[0]));
+    await f.tick(1);
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(...first.slice(1), ...second, ...tail));
+    await f.tick(1);
+    assert.deepEqual(rows(), [noise, first, second]);
+    assert.equal(service.numericSource.frames.length, 2);
+    assert.ok(frames.timestampAt(1) < frames.timestampAt(2), 'a split frame keeps its first byte timestamp');
+    await f.tick(50);
+    assert.deepEqual(rows(), [noise, first, second, tail]);
+    service.endStream();
+    const rebuilt = engine.apply({ ...settings, array: { ...array, footerHex: '0E' } }, { rebuild: true });
+    await f.settle(); await rebuilt;
+    assert.deepEqual(rows(), [[...noise, ...first, ...second, ...tail]]);
+    const restored = engine.apply(settings, { rebuild: true });
+    await f.settle(); await restored;
+    assert.deepEqual(rows(), [noise, first, second, tail]);
+});
+
 test('channel names and formulas are global while widget selectors only change visibility', async t => {
     const f = fixture(t), controller = f.app.widgets;
     controller.setChannelName(0, '温度');

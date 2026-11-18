@@ -3,13 +3,14 @@ const captureServiceDependencies = typeof module !== 'undefined'
     ? { ...require('./captureHistory'), ...require('./rawFrameParser'), ...require('./dataParser'),
         ...require('./frameBuffer'), ...require('./historyWorkers'), ...require('./textHistory'),
         ...require('./computedFrames'), ...require('./channelOperations'), ...require('./sampleRate'), ...require('./frameIdleTimeout'),
-        ...require('./captureMemory'), TextCodec: require('./textCodec') } : globalThis.SerialPlotter;
+        ...require('./captureMemory'), Limits: require('./projectLimits').PROJECT_LIMITS,
+        TextCodec: require('./textCodec') } : globalThis.SerialPlotter;
 
 class CaptureService {
     constructor(options = {}) {
         const { CaptureHistory, HistoryWorkerPool } = captureServiceDependencies;
         this.capacity = options.capacity ?? 1000;
-        this.maxRawFrameBytes = options.maxRawFrameBytes ?? 1048576;
+        this.maxRawFrameBytes = options.maxRawFrameBytes ?? captureServiceDependencies.Limits.defaultMaxRawFrameBytes;
         this._validateLimit(this.maxRawFrameBytes);
         this.rebuildHistory = options.rebuildHistory !== false;
         this.now = options.now ?? (() => performance.now());
@@ -61,6 +62,7 @@ class CaptureService {
         return { captureMode: boundary === 'idle' ? 'hex' : 'text', textBoundary: boundary,
             idleGapSeconds: this.rawIdleGapSeconds ?? Number(format.idleGapSeconds ?? 0.001),
             textEncoding: boundary === 'idle' || !encoding.startsWith('utf-16') ? 'utf-8' : encoding,
+            arrayFraming: boundary === 'idle' ? this.rawArrayFraming : null,
             maxRawFrameBytes: this.maxRawFrameBytes };
     }
 
@@ -77,7 +79,7 @@ class CaptureService {
         parser.nextByte = startByte;
         parser.setFormat(numeric ? format : { boundary: format.textBoundary,
             idleGapSeconds: format.idleGapSeconds, encoding: format.textEncoding,
-            maxFrameBytes: this.maxRawFrameBytes });
+            maxFrameBytes: this.maxRawFrameBytes, arrayFraming: format.arrayFraming });
         if (numeric) captureServiceDependencies.configureFrameIdleTimeout(parser,
             { ...this.parserOptions, timeoutMs: format.idleTimeoutMs ?? 0 });
         return parser;
@@ -293,7 +295,7 @@ class CaptureService {
                 channels: Number(format.channelsCount), type: format.dataType,
                 littleEndian: format.isLittleEndian !== false });
         };
-        else if (source.format.captureMode === 'hex') options.assembleRawBatch = records =>
+        else if (source.format.captureMode === 'hex' && !source.format.arrayFraming) options.assembleRawBatch = records =>
             pool.runTask({ kind: 'hex-assemble', bytes: new Uint8Array(0), parts: records.flatMap(record => record.parts) });
         return options;
     }
@@ -388,17 +390,28 @@ class CaptureService {
     memoryUsage() { return this.memory.measure(); }
     setMemoryLimit(bytes) { this.memory.setLimit(bytes); }
 
-    setRawIdleGapSeconds(seconds, { rebuild = this.rebuildHistory } = {}) {
+    setRawIdleFraming(seconds, { arrayFormat, rebuild = this.rebuildHistory } = {}) {
         if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 > 2147483647)
             throw new RangeError('空闲断帧时间无效');
         const previous = this.rawIdleGapSeconds ?? .001;
+        let arrayFraming = null;
+        if (arrayFormat && (arrayFormat.enableHeader || arrayFormat.enableFooter)) {
+            const parser = new captureServiceDependencies.DataParser();
+            parser.setFormat(arrayFormat);
+            const header = parser.headerBytes, footer = parser.footerBytes;
+            const footerOffset = header.length + parser.channelsCount * parser.getTypeLength();
+            const frameLength = footerOffset + footer.length + Number(parser.enableChecksum);
+            arrayFraming = { header, footer, footerOffset, frameLength };
+        }
+        const framingChanged = JSON.stringify(this.rawArrayFraming ?? null) !== JSON.stringify(arrayFraming);
         this.rawIdleGapSeconds = seconds;
-        if (previous === seconds) return Promise.resolve();
+        this.rawArrayFraming = arrayFraming;
+        if (previous === seconds && !framingChanged) return Promise.resolve();
         const pending = [];
         this.sourceKeys.clear();
         for (const source of this.sources) {
             if (source.kind === 'raw' && source.format.textBoundary === 'idle') {
-                source.format = { ...source.format, idleGapSeconds: seconds };
+                source.format = { ...source.format, idleGapSeconds: seconds, arrayFraming };
                 source.key = this._sourceKey(source.format, rebuild);
                 pending.push(this._restart(source, rebuild));
             }
