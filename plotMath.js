@@ -45,9 +45,10 @@ function bucketTraceExtrema(values, pixels) {
     return points;
 }
 
-/** Keep chronological extrema for samples sharing the same horizontal pixel. */
-function bucketAxisExtrema(values, xPositions) {
+/** Keep ordered pixel extrema and split the trace at gaps or jumps above maxStep. */
+function bucketAxisExtrema(values, xPositions, maxStep = Infinity) {
     const result = [];
+    const splitOnJump = Number.isFinite(maxStep);
     let pixel = -1, minIndex = -1, maxIndex = -1;
     let broken = false;
     const flush = () => {
@@ -63,8 +64,10 @@ function bucketAxisExtrema(values, xPositions) {
             flush(); minIndex = maxIndex = pixel = -1; broken = true; continue;
         }
         const nextPixel = Math.floor(xPositions[i]);
-        if (nextPixel !== pixel) {
+        const jump = splitOnJump && Math.abs(values[i] - values[i - 1]) > maxStep;
+        if (nextPixel !== pixel || jump) {
             flush();
+            if (jump) broken = true;
             pixel = nextPixel;
             minIndex = maxIndex = i;
         } else {

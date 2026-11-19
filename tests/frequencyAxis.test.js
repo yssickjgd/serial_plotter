@@ -8,14 +8,17 @@ const { SystemResponseFrames } = require('../systemResponseFrames');
 function createPlotter(responseFrames = null, options = {}) {
     const labels = [];
     const canvasOps = [];
+    const markers = [], dots = [];
     const canvasEvents = new Map();
     const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? text => ({ width: String(text).length * 6 })
         : key === 'fillText' ? text => { labels.push(String(text)); }
             : key === 'clearRect' || key === 'fillRect' ? (...args) => {
                 canvasOps.push(key);
+                if (key === 'fillRect' && args[2] === 3 && args[3] === 3) dots.push(args);
                 assert.ok(args.every(Number.isFinite));
             }
+            : key === 'arc' ? (x, y) => { markers.push({ x, y }); }
             : key === 'moveTo' || key === 'lineTo' ? (x, y) => {
                 assert.ok(Number.isFinite(x) && Number.isFinite(y));
             }
@@ -50,7 +53,7 @@ function createPlotter(responseFrames = null, options = {}) {
     if (!responseFrames) for (let i = 0; i < 1024; i++)
         plotter.addFrame([Math.sin(2 * Math.PI * 100 * i / 1024)]);
     plotter.setDisplayOptions({ displayMode: 'frequency' });
-    return { plotter, labels, canvasEvents, canvasOps, context };
+    return { plotter, labels, canvasEvents, canvasOps, context, markers, dots };
 }
 
 test('dB conversion only processes frequency bins inside the visible viewport', () => {
@@ -389,7 +392,7 @@ test('time seconds, frequency bins, and logarithmic axes use their selected unit
     assert.ok(plotter._drawState.min > 0, 'log amplitude uses positive bounds');
     assert.ok(labels.includes('1'));
     assert.ok(labels.includes('512'));
-    assert.ok(labels.some(label => label.includes('Bin 23')),
+    assert.ok(labels.includes('Freq: 22.627 Hz (Bin 22.627)'),
         'the cursor in the middle of a log axis lands near the geometric mean');
 });
 
@@ -414,12 +417,28 @@ test('time hover shows seconds and sample position regardless of the axis unit',
         plotter.vp.time.autoFollow = false;
         plotter.vp.time.scrollOffset = 200;
         plotter.vp.time.displayCount = 101;
-        plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
-        labels.length = 0;
-        plotter.draw();
-        assert.ok(labels.includes('Time: 0.25 s (Sample 250)'));
-        assert.ok(labels.some(label => label.startsWith('Value: ')));
+        const plotW = plotter.canvas.width - plotter.pX;
+        for (const [position, seconds] of [[50, '0.25'], [50.25, '0.25025'], [50.5, '0.2505']]) {
+            plotter.mousePos = { x: plotW * position / 100, y: 100 };
+            labels.length = 0;
+            plotter.draw();
+            assert.ok(labels.includes('Time: ' + seconds + ' s (Sample ' + (200 + position) + ')'));
+            assert.ok(labels.some(label => label.startsWith('Value: ')));
+        }
     }
+});
+
+test('time system response hover interpolates the sample position from the visible left edge', () => {
+    const { plotter, labels } = createResponsePlotter('[0]=1,[1]=3,[2]=5');
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    Object.assign(plotter.vp.time, { scrollOffset: 1, displayCount: 3, autoFollow: false });
+    plotter.draw();
+    assert.equal(plotter._drawState.startIdx, 1);
+    plotter.mousePos = { x: plotter._drawState.plotW / 4, y: 100 };
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Sample: [0.5]'));
+    assert.ok(labels.includes('CH00002: 4.000000'));
 });
 
 test('frequency hover retains hertz alongside the bin when the axis displays bins', () => {
@@ -435,6 +454,92 @@ test('frequency hover retains hertz alongside the bin when the axis displays bin
     assert.ok(labels.some(label => label.startsWith('Mag: ')));
 });
 
+test('sparse spectra show true bin markers and hover between bins in GPU and Canvas rendering', () => {
+    let traces;
+    const gpu = { available: true, resize() {}, dispose() {}, render(items) { traces = items; return true; } };
+    const { plotter, labels, markers, dots } = createPlotter(null, { gpuRenderer: gpu });
+    const freq = { mags: [1, 3, 5, 7], fftSize: 8 };
+    plotter._computeFftForVisibleChannels = () => new Map([[0, freq]]);
+    plotter.setSampleRateHz(8);
+    plotter.setDisplayOptions({ freqXScale: 'linear', freqYScale: 'linear' });
+    plotter.draw();
+    const { plotW } = plotter._drawState;
+    assert.equal(traces[0].dots, true);
+    assert.deepEqual(Array.from(traces[0].points, point => point.index), [0, 1, 2, 3]);
+    plotter.mousePos = { x: plotW / 2, y: 100 };
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Freq: 1.5 Hz (Bin 1.5)'));
+    assert.ok(labels.includes('CH00001: 4.000000'));
+    const [, left, right] = traces[0].points;
+    assert.ok(Math.abs(markers.at(-1).y - (left.y + right.y) / 2) < 1e-9);
+
+    gpu.available = false;
+    plotter.draw();
+    assert.equal(dots.length, 4, 'the Canvas fallback paints all four frequency markers');
+    assert.ok(dots.every((dot, index) => dot[0] === traces[0].points[index].x - 1.5));
+
+    gpu.available = true;
+    plotter.setDisplayOptions({ magnitudeUnit: 'db', dbFactor: 20 });
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('CH00001: ' + (10 * Math.log10(15)).toFixed(6) + ' dB'));
+
+    plotter.mousePos = null;
+    plotter._computeFftForVisibleChannels = () => new Map([[0, { mags: Array(1025).fill(1), fftSize: 2048 }]]);
+    plotter.draw();
+    assert.equal(traces[0].dots, false, 'dense spectra still draw a line without per-bin markers');
+});
+
+test('logarithmic frequency hover interpolates along the plotted segment on both axes', () => {
+    const { plotter, labels, markers } = createPlotter();
+    const freq = { mags: [0, 1, 100, 10000], fftSize: 8 };
+    plotter._computeFftForVisibleChannels = () => new Map([[0, freq]]);
+    plotter.setSampleRateHz(8);
+    plotter.setDisplayOptions({ freqXScale: 'log', freqYScale: 'log',
+        yScaleModeFreq: 'manual', yMinFreq: 1, yMaxFreq: 10000 });
+    plotter.draw();
+    const { plotW, plotH } = plotter._drawState;
+    plotter.mousePos = { x: plotW * Math.log(2) / (2 * Math.log(3)), y: 100 };
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Freq: 1.414 Hz (Bin 1.414)'));
+    assert.ok(labels.includes('CH00001: 10'));
+    assert.ok(Math.abs(markers.at(-1).y - plotH * .75) < 1e-9);
+});
+
+test('phase hover respects wrapped discontinuities and missing bins but interpolates unwrapped phase', () => {
+    let traces;
+    const gpu = { available: true, resize() {}, dispose() {}, render(items) { traces = items; return true; } };
+    const { plotter, labels, markers } = createPlotter(null, { gpuRenderer: gpu });
+    const freq = { mags: [1, 1, 1, 1, 1], phases: [90, 170, -170, NaN, -123], fftSize: 8 };
+    plotter._computeFftForVisibleChannels = () => new Map([[0, freq]]);
+    plotter.setDisplayOptions({ displayMode: 'phase', freqXScale: 'linear',
+        phaseUnwrap: false, phaseUnit: 'radians' });
+    plotter.draw();
+    const { plotW } = plotter._drawState;
+    const hover = fraction => {
+        labels.length = markers.length = 0;
+        plotter.mousePos = { x: plotW * fraction, y: 100 };
+        plotter.draw();
+    };
+    hover(3 / 8);
+    assert.equal(traces[0].dots, true);
+    assert.equal(traces[0].points.find(point => point.index === 2).break, true);
+    assert.equal(markers.length, 0);
+    assert.ok(labels.every(label => !label.startsWith('CH00001:')));
+
+    plotter.setDisplayOptions({ phaseUnwrap: true });
+    hover(3 / 8);
+    assert.ok(labels.includes('CH00001: 3.141593 rad'));
+    assert.ok(markers.length > 0);
+    hover(5 / 8);
+    assert.equal(markers.length, 0);
+    assert.ok(labels.every(label => !label.startsWith('CH00001:')));
+    hover(1);
+    assert.ok(markers.length > 0, 'the exact bin remains readable after a gap');
+});
+
 test('hover preserves sample or bin positions when the sample rate is unknown', () => {
     const { plotter, labels } = createPlotter();
     plotter.mousePos = { x: 0, y: 100 };
@@ -445,6 +550,11 @@ test('hover preserves sample or bin positions when the sample rate is unknown', 
     labels.length = 0;
     plotter.draw();
     assert.ok(labels.includes('Time: -- s (Sample 200)'));
+    plotter.mousePos.x = plotter._drawState.plotW / 200;
+    labels.length = 0;
+    plotter.draw();
+    assert.ok(labels.includes('Time: -- s (Sample 200.5)'));
+    plotter.mousePos.x = 0;
     plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins' });
     labels.length = 0;
     plotter.draw();

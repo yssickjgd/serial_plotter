@@ -158,6 +158,10 @@ class Plotter {
     /** 返回当前显示模式对应的视口状态对象 */
     get _vp() { return this.vp[this.displayMode]; }
     get _logY() { return this.displayMode === 'frequency' && this.magnitudeUnit !== 'db' && this.freqYScale === 'log'; }
+    get _maxPhaseStep() {
+        if (this.displayMode !== 'phase' || this.phaseUnwrap) return Infinity;
+        return this.phaseUnit === 'radians' ? Math.PI : 180;
+    }
 
     /** 返回当前显示模式对应的 Y 轴范围对象 */
     get _yBounds() { return this.yBounds[this.displayMode]; }
@@ -589,10 +593,14 @@ class Plotter {
         return Number(value > 0 && value < 0.001 ? value.toPrecision(4) : value.toFixed(3));
     }
 
-    _formatTimeIndex(index, unit = this.timeXUnit) {
+    _formatTimeIndex(index, unit = this.timeXUnit, samplePrecision = 0) {
         if (unit !== 's') return String(index);
         if (!(this.sampleRateHz > 0)) return '-- s';
-        return `${this._formatAxisNumber(index / this.sampleRateHz)} s`;
+        const seconds = index / this.sampleRateHz;
+        if (!samplePrecision) return `${this._formatAxisNumber(seconds)} s`;
+        // Keep fractional samples visible even when a full sample is under a millisecond.
+        const decimals = Math.max(3, Math.min(15, Math.ceil(Math.log10(this.sampleRateHz)) + samplePrecision));
+        return `${Number(seconds.toFixed(decimals))} s`;
     }
 
     /** 设置每个通道的最大采样点数 */
@@ -941,6 +949,7 @@ class Plotter {
                 this._frequencyPositions = { start, end, width, scale, values: positions };
             }
         }
+        const maxStep = this._maxPhaseStep;
         for (const item of series) {
             if (this.displayMode === 'time') {
                 if (item.points && item.pointWidth === width) continue;
@@ -949,7 +958,7 @@ class Plotter {
                 for (const point of item.points) point.x = point.index * step;
                 item.pointWidth = width;
             } else {
-                item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.mags, positions);
+                item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.mags, positions, maxStep);
                 for (const point of item.points) point.x = positions[point.index];
             }
         }
@@ -1427,7 +1436,7 @@ class Plotter {
         const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
         this._prepareTracePoints(series, startIdx, actualEnd, plotW, xScale);
 
-        let min, max, bounded;
+        let min, max;
         const logY = this._logY;
         const zoomY = this._boxZoomY[this.displayMode];
         if (zoomY) {
@@ -1479,7 +1488,6 @@ class Plotter {
                 min -= pad; max += pad;
             }
         }
-        bounded = max - min;
         let yScale = logY ? 'log' : 'linear';
         if (zoomY && this._zoomBaseY[this.displayMode]?.yScale) {
             yScale = this._zoomBaseY[this.displayMode].yScale;
@@ -1534,19 +1542,17 @@ class Plotter {
             this.ctx.fillText(label, px, plotH + 3);
         }
 
-        // —— 波形绘制（频域曲线 / 时域折线+散点）——
+        // —— 波形绘制：稀疏窗口显示点标记，密集窗口保留像素极值 ——
         const traces = [];
+        const { axisFraction } = globalThis.SerialPlotter;
         for (const item of series) {
-            const points = item.points;
-            for (let i = 0; i < points.length; i++) {
-                if (this.displayMode !== 'time') {
-                    const yRatio = globalThis.SerialPlotter.axisFraction(
-                        logY ? Math.max(points[i].value, min) : points[i].value, min, max, yScale);
-                    points[i].y = plotH - yRatio * plotH;
-                } else points[i].y = plotH - ((points[i].value - min) / bounded) * plotH;
+            for (const point of item.points) {
+                const yRatio = axisFraction(
+                    logY ? Math.max(point.value, min) : point.value, min, max, yScale);
+                point.y = plotH - yRatio * plotH;
             }
-            traces.push({ points, color: item.ch.color,
-                dots: this.displayMode === 'time' ? item.rawValues.length <= plotW : points.length === 1 });
+            traces.push({ points: item.points, color: item.ch.color,
+                dots: item.mags.length <= plotW || item.points.length === 1 });
         }
         if (!gpuAvailable || !this.gpuRenderer.render(traces, W, H, plotW, plotH)) {
             if (gpuAvailable) this._drawGrid2D(plotW, plotH);
@@ -1694,20 +1700,22 @@ class Plotter {
         const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
         const yScale = this._drawState.yScale;
         const logY = this._logY;
-        const fIdx = visibleCnt > 1
-            ? globalThis.SerialPlotter.axisValueAtFraction(mx / Math.max(1, plotW),
-                startIdx, startIdx + visibleCnt - 1, xScale) - startIdx : 0;
-        const xIdx = Math.max(0, Math.min(visibleCnt - 1, Math.round(fIdx)));
-        const yVal = globalThis.SerialPlotter.axisValueAtFraction(1 - my / plotH, min, max, yScale);
+        const { axisValueAtFraction, axisFraction } = globalThis.SerialPlotter;
+        let cursorIndex = visibleCnt > 1
+            ? axisValueAtFraction(mx / Math.max(1, plotW), startIdx, startIdx + visibleCnt - 1, xScale) : startIdx;
+        const nearestIndex = Math.round(cursorIndex);
+        // Undo floating-point drift at exact data points, including points next to gaps.
+        if (Math.abs(cursorIndex - nearestIndex) <= 8 * Number.EPSILON * Math.max(1, cursorIndex))
+            cursorIndex = nearestIndex;
+        const yVal = axisValueAtFraction(1 - my / plotH, min, max, yScale);
+        const unit = this._phaseSuffix() || (this.displayMode === 'frequency' && this.magnitudeUnit === 'db' ? ' dB' : '');
 
-        // Hover always pairs physical units with the discrete position, independently of axis units.
-        const sampleIndex = startIdx + xIdx;
-        const validSample = sampleIndex >= 0 && sampleIndex < total;
+        const validSample = cursorIndex >= 0 && cursorIndex < total;
         const tipLines = this.displayMode !== 'time'
-            ? [`Freq: ${this._formatFrequencyBin(sampleIndex, series[0].fftSize, 'hz')} (Bin ${sampleIndex})`,
-                `${this.displayMode === 'phase' ? 'Phase' : 'Mag'}: ${logY ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}${this.displayMode === 'phase' ? this._phaseSuffix() : this.magnitudeUnit === 'db' ? ' dB' : ''}`]
-            : [this.frames.responseMode ? `Sample: [${Math.max(0, xIdx)}]`
-                : `Time: ${validSample ? this._formatTimeIndex(sampleIndex, 's') : '-- s'} (Sample ${validSample ? sampleIndex : '--'})`,
+            ? [`Freq: ${this._formatFrequencyBin(cursorIndex, series[0].fftSize, 'hz')} (Bin ${this._formatAxisNumber(cursorIndex)})`,
+                `${this.displayMode === 'phase' ? 'Phase' : 'Mag'}: ${logY ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}${unit}`]
+            : [this.frames.responseMode ? `Sample: [${this._formatAxisNumber(cursorIndex - startIdx)}]`
+                : `Time: ${validSample ? this._formatTimeIndex(cursorIndex, 's', 3) : '-- s'} (Sample ${validSample ? this._formatAxisNumber(cursorIndex) : '--'})`,
                 `Value: ${yVal.toFixed(6)}`];
         ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;
@@ -1724,31 +1732,22 @@ class Plotter {
         ctx.fillStyle = '#e0e0e0'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
         tipLines.forEach((line, i) => ctx.fillText(line, tx + tipPad, ty + tipPad/2 + i * lineH));
 
-        // Per-channel intersections
+        // Interpolate along the visible segment in axis coordinates.
         const labels = [];
-        // 构建 channelIndex → series item 的查找表
-        const seriesMap = new Map(series.map(s => [s.channelIndex, s]));
-        for (const ch of this.channels) {
-            if (!ch.visible || this.frames.length === 0) continue;
-            const idx = this.channels.indexOf(ch);
-            let val = 0;
-            if (this.displayMode !== 'time') {
-                const s = seriesMap.get(idx);
-                val = (s && s.mags.length > 0) ? s.mags[Math.min(s.mags.length - 1, xIdx)] : 0;
-            } else {
-                const iLow  = startIdx + Math.floor(fIdx);
-                const iHigh = startIdx + Math.ceil(fIdx);
-                const t     = fIdx - Math.floor(fIdx);
-                const staticValues = this.frames.responseMode ? seriesMap.get(idx)?.rawValues : null;
-                const vLow = staticValues ? staticValues[Math.floor(fIdx)] : globalThis.SerialPlotter.transformChannelValue(
-                    this.frames.getValue(idx, iLow), ch);
-                const vHigh = staticValues ? staticValues[Math.ceil(fIdx)] : globalThis.SerialPlotter.transformChannelValue(
-                    this.frames.getValue(idx, iHigh), ch);
-                val = vLow + t * (vHigh - vLow);
-            }
-            if (!Number.isFinite(val)) continue;
-            const ratio = globalThis.SerialPlotter.axisFraction(
-                logY ? Math.max(val, min) : val, min, max, yScale);
+        const leftIndex = Math.floor(cursorIndex), rightIndex = Math.ceil(cursorIndex);
+        const exact = leftIndex === rightIndex;
+        const weight = exact ? 0 : axisFraction(cursorIndex, leftIndex, rightIndex, xScale);
+        const maxStep = this._maxPhaseStep;
+        const yRatioFor = value => axisFraction(logY ? Math.max(value, min) : value, min, max, yScale);
+        for (const { ch, mags } of series) {
+            const left = mags[leftIndex - startIdx], right = mags[rightIndex - startIdx];
+            if (!Number.isFinite(left) || !Number.isFinite(right) ||
+                (Number.isFinite(maxStep) && Math.abs(right - left) > maxStep)) continue;
+            const leftRatio = yRatioFor(left);
+            const ratio = exact ? leftRatio : leftRatio + (yRatioFor(right) - leftRatio) * weight;
+            const val = exact || left === right ? left
+                : logY ? axisValueAtFraction(ratio, min, max, yScale) : left * (1 - weight) + right * weight;
+            if (!Number.isFinite(val) || !Number.isFinite(ratio)) continue;
             const origY = plotH - ratio * plotH;
             labels.push({ ch, val, origY, labelY: origY });
         }
@@ -1786,7 +1785,7 @@ class Plotter {
 
             // Value label box
             const lbl = `${item.ch.name}: ${logY
-                ? Number(item.val.toPrecision(4)) : item.val.toFixed(6)}${this._phaseSuffix()}`;
+                ? Number(item.val.toPrecision(4)) : item.val.toFixed(6)}${unit}`;
             ctx.font   = `11px ${this.fontFamily}`;
             const lw   = ctx.measureText(lbl).width + 10;
             const lh   = 16;
