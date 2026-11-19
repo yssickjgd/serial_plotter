@@ -66,6 +66,94 @@ test('empty workspaces configure explicit parsing drafts and applying is the onl
     assert.equal(f.app.getConfig().dataEngine.array.dataType, 'int16');
 });
 
+test('23-to-25 array cutover shifts the same channels and keeps both wire widths in history', async t => {
+    const f = fixture(t), { service, dataEngine, widgets, engineView } = f.app;
+    const frame = (count, first) => {
+        const bytes = new Uint8Array(count * 4 + 1), view = new DataView(bytes.buffer);
+        bytes[0] = 0xab;
+        for (let i = 0; i < count; i++) view.setFloat32(1 + 4 * i, first + i, true);
+        return bytes;
+    };
+    f.change('channels-count', '23');
+    await engineView.apply();
+    await widgets.updateChannelDefinition({ id: 'total', number: 24, type: 'formula', expression: 'CH1+CH2' });
+    await widgets.updateChannelDefinition({ id: 'calibrated', number: 25, type: 'formula', expression: 'CH24+CH3' });
+    widgets.setChannelName(23, 'Sum');
+    widgets.setChannelColor(23, '#654321');
+    const wave = widgets.create({ type: 'wave' });
+    widgets.setChannelVisible(23, true);
+    const pose = widgets.create({ type: 'pose', settings: { bindings: { euler: [23, 24, 1] } } });
+    const byte = widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    const old = frame(23, 1), otherOld = frame(23, 51), next = frame(25, 101);
+    service.receive(old); service.receive(otherOld);
+    const tail = Uint8Array.of(0xab, 0x12);
+    service.receive(tail);
+    engineView.channels.drafts.set('calibrated', { ...widgets.globals.channelDefinitions[1], expression: 'CH24+' });
+    const numeric = service.numericSource, history = numeric.frames;
+    assert.equal(history.length, 2);
+    assert.equal(history.getValue(23, 0), 3);
+
+    f.change('channels-count', '25');
+    const originalNewParser = service._newParser;
+    service._newParser = function(format, offset) {
+        if (format.captureMode === 'number' && Number(format.channelsCount) === 25)
+            throw new Error('模拟解析器初始化失败');
+        return originalNewParser.call(this, format, offset);
+    };
+    try {
+        await assert.rejects(engineView.apply(), /模拟解析器初始化失败/);
+    } finally { service._newParser = originalNewParser; }
+    assert.equal(widgets.globals.channelsCount, '23');
+    assert.equal(dataEngine.config.array.channelsCount, '23');
+    assert.equal(numeric.parser.channelsCount, 23);
+    assert.equal(numeric.parser.writeOffset - numeric.parser.readOffset, tail.length);
+    assert.equal(history.length, 2);
+    assert.equal(widgets.getChannelRegistry().get('total').number, 24);
+    assert.equal(pose.settings.bindings.euler[0], 23);
+
+    const applying = engineView.apply();
+    await f.settle();
+    await applying;
+    assert.equal(numeric.parser.channelsCount, 25);
+    assert.equal(dataEngine.config.array.channelsCount, '25');
+    assert.equal(widgets.getChannelRegistry().get('total').number, 26);
+    assert.equal(widgets.getChannelRegistry().get('calibrated').number, 27);
+    assert.equal(widgets.getChannelRegistry().get(24).name, 'CH00024');
+    assert.equal(widgets.getChannelRegistry().get('total').name, 'Sum');
+    assert.equal(widgets.globals.channelColors[25], '#654321');
+    assert.equal(wave.view.getChannelMeta()[25].visible, true);
+    assert.deepEqual([...pose.settings.bindings.euler], [25, 26, 1]);
+    assert.equal(widgets.globals.channelDefinitions[1].expression, 'CH00026+CH00003');
+    assert.equal(engineView.channels.drafts.get('calibrated').expression, 'CH00026+');
+    assert.equal(numeric.errors.at(-1).type, 'incomplete');
+    assert.deepEqual([...numeric.errors.at(-1).bytes], [...tail]);
+    assert.equal(numeric.frames, history);
+    assert.equal(history.length, 2);
+    assert.ok(Number.isNaN(history.getValue(23, 0)));
+    assert.ok(Number.isNaN(history.getValue(24, 0)));
+    assert.equal(history.getValue(25, 0), 3);
+    assert.equal(history.getValue(26, 0), 6);
+
+    service.receive(next.subarray(0, 37));
+    service.receive(next.subarray(37));
+    assert.deepEqual(Array.from({ length: history.length }, (_, i) => history.rawBytesAt(i).length), [93, 93, 101]);
+    const rawLengths = source => Array.from({ length: source.frames.length }, (_, i) => source.frames.rawBytesAt(i).length);
+    assert.deepEqual(rawLengths(byte.source), [93, 93, 2, 101]);
+    assert.equal(history.getValue(23, 2), 124);
+    assert.equal(history.getValue(24, 2), 125);
+    assert.equal(history.getValue(26, 2), 306);
+    f.change('engine-idle-timeout', '75');
+    f.change('engine-raw-idle-timeout', '80');
+    await engineView.apply();
+    await service.setMaxRawFrameBytes(2048);
+    const text = widgets.create({ type: 'byte', settings: { captureMode: 'text' } });
+    assert.equal(text.source, byte.source);
+    assert.deepEqual(rawLengths(text.source), [93, 93, 2, 101]);
+    assert.deepEqual(rawLengths(numeric), [93, 93, 101]);
+    const saved = JSON.parse(JSON.stringify(f.app.getConfig()));
+    assert.equal(f.S.WidgetConfig.validateWorkspaceConfig(saved).dataEngine.array.channelsCount, '25');
+});
+
 test('raw mode preserves receive history without sampled values or widget parsing editors', async t => {
     const f = fixture(t), wave = f.app.widgets.create({ type: 'wave' });
     f.change('engine-mode', 'Raw_Data'); await f.app.engineView.apply();

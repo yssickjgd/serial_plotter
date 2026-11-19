@@ -286,6 +286,20 @@ class EngineChannelView {
         return row;
     }
 
+    remapDrafts(numberMap) {
+        const drafts = new Map();
+        for (const [key, draft] of this.drafts) {
+            const number = numberMap.get(draft.number);
+            if (number === undefined) continue;
+            const newKey = typeof key === 'number' ? number : key;
+            const expression = draft.type === 'formula'
+                ? globalThis.SerialPlotter.renumberChannelExpression(draft.expression, numberMap) : draft.expression;
+            drafts.set(newKey, { ...draft, number, expression });
+            this.errors.delete(key);
+        }
+        this.drafts = drafts;
+    }
+
     renderEditor(channel, error, key) {
         const { definition, number } = channel, draft = this.drafts.get(key) ?? this.drafts.get(number) ?? definition;
         const details = this.element('div', 'channel-definition'), label = this.element('label');

@@ -71,9 +71,9 @@ class CaptureService {
             maxRawFrameBytes: this.maxRawFrameBytes };
     }
 
-    _sourceKey(format, rebuild) {
+    _sourceKey(format, rebuild, startByte = this.history.endByte) {
         const boundary = format.textBoundary;
-        return `${this.epoch}:${rebuild ? 'history' : this.history.endByte}:` +
+        return `${this.epoch}:${rebuild ? 'history' : startByte}:` +
             `${boundary}:${boundary === 'idle' ? format.idleGapSeconds : format.textEncoding}:${this.maxRawFrameBytes}` +
             (format.basicIdle ? ':basic' : '');
     }
@@ -396,8 +396,27 @@ class CaptureService {
     memoryUsage() { return this.memory.measure(); }
     setMemoryLimit(bytes) { this.memory.setLimit(bytes); }
 
-    setRawIdleFraming(seconds, { arrayFormat, protocolFraming = null, protocolSignature = null,
-        rebuild = this.rebuildHistory } = {}) {
+    get hasRetainedArrayCutover() { return this.arrayCutoverByte > this.history.startByte; }
+
+    _switchParser(source, format, parser) {
+        this._dropTextStats(source);
+        source.parser.flushPending();
+        source.parser.reset();
+        source.sampleRate?.reset({ keepRate: true });
+        source.generation++;
+        source.format = format; source.parser = parser;
+        source.ready = Promise.resolve(source);
+        this._attach(source);
+        this._safeNotify(this.onChange, source);
+        return source.ready;
+    }
+
+    setRawIdleFraming(seconds, options) {
+        return this.prepareRawIdleFraming(seconds, options)();
+    }
+
+    prepareRawIdleFraming(seconds, { arrayFormat, protocolFraming = null, protocolSignature = null,
+        rebuild = this.rebuildHistory, preserveArrayHistory = false } = {}) {
         if (!Number.isFinite(seconds) || seconds < 0 || seconds * 1000 > 2147483647)
             throw new RangeError('空闲断帧时间无效');
         const previous = this.rawIdleGapSeconds ?? .001;
@@ -412,25 +431,42 @@ class CaptureService {
         }
         const framingChanged = JSON.stringify(this.rawArrayFraming ?? null) !== JSON.stringify(arrayFraming) ||
             (this.rawProtocolSignature ?? null) !== protocolSignature;
-        this.rawIdleGapSeconds = seconds;
-        this.rawArrayFraming = arrayFraming;
-        this.rawProtocolFraming = protocolFraming;
-        this.rawProtocolSignature = protocolSignature;
-        if (previous === seconds && !framingChanged) return Promise.resolve();
-        const pending = [];
-        this.sourceKeys.clear();
-        for (const source of this.sources) {
-            if (source.kind === 'raw' && source.format.textBoundary === 'idle' &&
-                (previous !== seconds || framingChanged && !source.format.basicIdle)) {
-                source.format = { ...source.format, idleGapSeconds: seconds,
-                    arrayFraming: source.format.basicIdle ? null : arrayFraming,
-                    protocolFraming: source.format.basicIdle ? null : protocolFraming };
-                source.key = this._sourceKey(source.format, rebuild);
-                pending.push(this._restart(source, rebuild));
-            }
-            this.sourceKeys.set(source.key, source);
+        const changes = new Map();
+        if (previous !== seconds || framingChanged) for (const source of this.sources) {
+            if (source.kind !== 'raw' || source.format.textBoundary !== 'idle' ||
+                (previous === seconds && source.format.basicIdle)) continue;
+            const format = { ...source.format, idleGapSeconds: seconds,
+                arrayFraming: source.format.basicIdle ? null : arrayFraming,
+                protocolFraming: source.format.basicIdle ? null : protocolFraming };
+            const keep = !source.format.basicIdle && arrayFormat && (preserveArrayHistory || this.hasRetainedArrayCutover);
+            const parser = keep ? this._newParser(format, this.history.endByte) : null;
+            changes.set(source, { format, parser });
         }
-        return Promise.all(pending);
+        return () => {
+            this.rawIdleGapSeconds = seconds;
+            this.rawArrayFraming = arrayFraming;
+            this.rawProtocolFraming = protocolFraming;
+            this.rawProtocolSignature = protocolSignature;
+            if (!changes.size) return Promise.resolve();
+            const pending = [];
+            this.sourceKeys.clear();
+            for (const source of this.sources) {
+                const change = changes.get(source);
+                if (change) {
+                    if (change.parser) {
+                        // The persistent source retains both array formats for new follow-engine views.
+                        source.key = this._sourceKey(change.format, source === this.baseSource, source.startByte);
+                        pending.push(this._switchParser(source, change.format, change.parser));
+                    } else {
+                        source.key = this._sourceKey(change.format, rebuild);
+                        source.format = change.format;
+                        pending.push(this._restart(source, rebuild));
+                    }
+                }
+                this.sourceKeys.set(source.key, source);
+            }
+            return Promise.all(pending);
+        };
     }
 
     setMaxRawFrameBytes(bytes) {
@@ -441,9 +477,17 @@ class CaptureService {
         this.sourceKeys.clear();
         for (const source of this.sources) {
             if (source.kind === 'raw') {
-                source.format = { ...source.format, maxRawFrameBytes: bytes };
-                source.key = this._sourceKey(source.format, this.rebuildHistory);
-                pending.push(this._restart(source, this.rebuildHistory));
+                const format = { ...source.format, maxRawFrameBytes: bytes };
+                source.key = this._sourceKey(format, this.rebuildHistory);
+                if (this.hasRetainedArrayCutover && this.dataEngine?.mode === 'Data_Array' &&
+                    !format.basicIdle && format.textBoundary === 'idle' && !source.rebuilding) {
+                    const parser = this._newParser(format, this.history.endByte);
+                    source.key = this._sourceKey(format, source === this.baseSource, source.startByte);
+                    pending.push(this._switchParser(source, format, parser));
+                } else {
+                    source.format = format;
+                    pending.push(this._restart(source, this.rebuildHistory));
+                }
             }
             this.sourceKeys.set(source.key, source);
         }
@@ -571,6 +615,7 @@ class CaptureService {
 
     clear() {
         this.epoch++;
+        this.arrayCutoverByte = undefined;
         this.history.clear();
         this.textStats.clear();
         this.txFrames.clear();

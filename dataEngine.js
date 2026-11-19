@@ -156,7 +156,7 @@
         const requiredMemoryBytes = engine.requiredMemoryBytes * outputCount;
         if (memoryLimitBytes !== undefined && (!Number.isSafeInteger(memoryLimitBytes) || memoryLimitBytes < 1)) throw new RangeError('内存预算必须为正整数字节数');
         if (memoryLimitBytes !== undefined && requiredMemoryBytes > memoryLimitBytes) throw new RangeError('运算通道历史状态超过内存预算');
-        return { normalized, config: normalized, requiredMemoryBytes, outputCount, rawCount };
+        return { normalized, config: normalized, requiredMemoryBytes, outputCount, rawCount, channelOperations: engine };
     }
     class DataEngine {
         constructor(service, settings, globals, { onChange = () => {}, onProgress = () => {} } = {}) {
@@ -378,18 +378,63 @@
             if (this.anchor) this.syncSource.frames.advance(this.anchor.timestamp + (stamp.arrival ?? this.service.now()) - this.anchor.arrival);
             this.syncSource.frames.stop(); this.running = false; this.anchor = null;
         }
-        async apply(settings, { rebuild = this.service.rebuildHistory, force = false } = {}) {
-            const next = preflightDataEngine(settings ?? this.config.draft ?? this.config, this.globals,
-                { memoryLimitBytes: this.service.memory.limitBytes }).normalized; next.draft = null;
-            if (Number(next.array.channelsCount) > this.channelCount) throw new Error('请先扩展全局原始通道目录');
+        async apply(settings, { rebuild = this.service.rebuildHistory, force = false, channelExpansion = null } = {}) {
+            const globals = channelExpansion?.globals ?? this.globals;
+            const { normalized: next, channelOperations } = preflightDataEngine(settings ?? this.config.draft ?? this.config, globals,
+                { memoryLimitBytes: this.service.memory.limitBytes });
+            next.draft = null;
+            const catalogCount = Number(globals.channelsCount);
+            if (Number(next.array.channelsCount) > catalogCount) throw new Error('请先扩展全局原始通道目录');
             const previous = this.config;
             const sameIdle = previous.mode === next.mode && previous.idleTimeouts[previous.mode] === next.idleTimeouts[next.mode];
             const unchangedArray = sameIdle && previous.mode === 'Data_Array' && next.mode === 'Data_Array' && JSON.stringify(previous.array) === JSON.stringify(next.array);
             const selected = config => protocolWireSignature(config.protocols.find(schema => schema.id === config.protocolId));
             const unchangedProtocol = sameIdle && previous.mode === 'Self_Defined_Frame' && next.mode === previous.mode &&
                 selected(previous) === selected(next);
+            const arrayToArray = !force && previous.mode === 'Data_Array' && next.mode === 'Data_Array';
+            const widthChanged = arrayToArray && Number(previous.array.channelsCount) !== Number(next.array.channelsCount);
+            const preserveArrayHistory = widthChanged || (arrayToArray && this.service.hasRetainedArrayCutover);
+            if (preserveArrayHistory) {
+                const pending = [...this.service.sources].filter(source => source.rebuilding &&
+                    (source === this.arraySource || source.kind === 'raw' && source.format.textBoundary === 'idle'));
+                if (pending.length) {
+                    await Promise.all(pending.map(source => source.ready));
+                    if (this.service.disposed || this.config !== previous)
+                        throw new Error('采集配置已变化，请重新应用设置');
+                    return this.apply(next, { rebuild, force, channelExpansion });
+                }
+            }
+            if (arrayToArray && (widthChanged || preserveArrayHistory && !unchangedArray || channelExpansion)) {
+                const source = this.arraySource, service = this.service, position = service.history.endByte;
+                const format = { ...next.array, captureMode: 'number', catalogCount,
+                    isLittleEndian: next.array.endianness !== 'big', idleTimeoutMs: next.idleTimeouts.Data_Array };
+                const parser = service._newParser(format, position);
+                const commitRaw = service.prepareRawIdleFraming(next.rawIdleTimeouts.Data_Array / 1000,
+                    { arrayFormat: next.array, rebuild, preserveArrayHistory: widthChanged });
+                // All validation and parser setup finish before any live channel identity or format is changed.
+                channelExpansion?.commit();
+                this.config = next;
+                service.catalogCount = source.catalogCount = catalogCount;
+                if (widthChanged) service.arrayCutoverByte = position;
+                if (channelExpansion) {
+                    service.channelNames = source.frames.channelNames = this.globals.channelNames;
+                    service.channelDefinitions = this.globals.channelDefinitions;
+                    // Preserve raw columns, computed results and state as their channel numbers move.
+                    source.frames.updateDefinitions(service.channelDefinitions, { rebuild: false,
+                        numberMap: channelExpansion.numberMap, rawChannelCount: catalogCount, preparedEngine: channelOperations });
+                }
+                for (const key of ARRAY_FIELDS) if (key !== 'channelsCount') this.globals[key] = next.array[key];
+                service._switchParser(source, format, parser);
+                await commitRaw();
+                this.onChange(this.config); return this.config;
+            }
+            channelExpansion?.commit();
+            const catalogReady = channelExpansion && previous.mode === next.mode
+                ? this.updateChannelDefinitions(globals.channelDefinitions, { rebuild: false, numberMap: channelExpansion.numberMap })
+                : null;
             if (!force && (unchangedArray || previous.mode === 'Raw_Data' && next.mode === 'Raw_Data')) {
                 this.config = next;
+                await catalogReady;
                 await this._configureRaw(rebuild);
                 this.onChange(this.config); return this.config;
             }
@@ -411,9 +456,11 @@
                         timestamp: this.anchor ? this.anchor.timestamp + this.service.now() - this.anchor.arrival : NaN });
                 }
                 await rawReady;
+                await catalogReady;
                 this.onChange(this.config); return this.config;
             }
             this.generation++; this.config = next; this.rebuilding = false;
+            this.service.arrayCutoverByte = undefined;
             this.service.channelDefinitions = this.globals.channelDefinitions ?? [];
             this.service.channelNames = this.globals.channelNames ?? [];
             this.arraySource.frames.channelNames = this.service.channelNames;

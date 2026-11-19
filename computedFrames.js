@@ -128,9 +128,9 @@ class ComputedFrames {
         return affected;
     }
     updateDefinitions(definitions, { rebuild = true, all = false, reapply = [], numberMap = null,
-        rawChannelCount = this.raw.channelCount, symbolVersion = 2 } = {}) {
+        rawChannelCount = this.raw.channelCount, symbolVersion = 2, preparedEngine = null } = {}) {
         this.chunkSize = this.raw.chunkSize ?? COMPUTED_CHUNK_SIZE;
-        const next = new computedChannelApi.ChannelOperations(rawChannelCount, definitions, { names: this.channelNames, symbolVersion });
+        const next = preparedEngine ?? new computedChannelApi.ChannelOperations(rawChannelCount, definitions, { names: this.channelNames, symbolVersion });
         definitions = next.definitions;
         this.raw.setChannelCount(rawChannelCount, { preserve: true });
         if (numberMap) {

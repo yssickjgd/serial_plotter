@@ -172,25 +172,34 @@
             this.engine.config.draft = JSON.parse(JSON.stringify({ ...this.draft, draft: null }));
             this.status('草稿待应用；采集仍使用已应用规则'); this.onChange();
         }
-        validate() {
+        prepareApply() {
             const settings = { ...this.collect(), draft: null };
             let required = Number(this.engine.globals.channelsCount);
             if (settings.mode === 'Data_Array') required = Math.max(required, Number(settings.array.channelsCount));
             for (const mapping of settings.mappings) required = Math.max(required, mapping.channel + 1);
-            return root.SerialPlotter.preflightDataEngine(settings, this.controller.previewRawChannels(required),
+            const expansion = this.controller.prepareRawChannelExpansion(required);
+            return { settings, expansion };
+        }
+        validate() {
+            const { settings, expansion } = this.prepareApply();
+            return root.SerialPlotter.preflightDataEngine(settings, expansion?.globals ?? this.engine.globals,
                 { memoryLimitBytes: this.engine.service.memory.limitBytes }).normalized;
         }
         status(text, error = false) { const status = this.el('engine-status'); status.textContent = text; status.classList.toggle('is-error', error); }
         async apply() {
             const revision = this.applyRevision = (this.applyRevision ?? 0) + 1, draftRevision = this.draftRevision ?? 0;
             try {
-                const settings = this.validate();
-                let required = Number(this.engine.globals.channelsCount);
-                if (settings.mode === 'Data_Array') required = Math.max(required, Number(settings.array.channelsCount));
-                for (const mapping of settings.mappings) required = Math.max(required, mapping.channel + 1);
-                this.controller.ensureRawChannels(required);
-                this.el('engine-apply').disabled = true; this.status('正在应用并重建受影响输出…');
-                const ready = this.engine.apply(settings); this.controller.rebindEngineSources();
+                const { settings, expansion } = this.prepareApply();
+                this.el('engine-apply').disabled = true; this.status('正在应用配置…');
+                const previous = this.engine.config;
+                const ready = this.engine.apply(settings, { channelExpansion: expansion && {
+                    globals: expansion.globals, numberMap: expansion.numberMap,
+                    commit: () => {
+                        this.controller.commitChannelRemap(expansion);
+                        this.channels.remapDrafts(expansion.numberMap);
+                    }
+                } });
+                if (this.engine.config !== previous) this.controller.rebindEngineSources();
                 await ready;
                 if (this.disposed || revision !== this.applyRevision) return false;
                 this.controller.rebindEngineSources(); this.channels.refresh(); this.onApply();

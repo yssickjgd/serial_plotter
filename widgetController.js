@@ -302,23 +302,17 @@ class WidgetController {
     }
 
     ensureRawChannels(count) {
-        const old = Number(this.globals.channelsCount); if (count <= old) return;
+        const plan = this.prepareRawChannelExpansion(count);
+        if (plan) return this._applyChannelRemap(plan);
+    }
+
+    prepareRawChannelExpansion(count) {
+        const old = Number(this.globals.channelsCount);
+        if (count <= old) return null;
         if (!Number.isInteger(count) || count + this.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
         const registry = this.getChannelRegistry(), delta = count - old;
         const numberMap = new Map(registry.getChannels().map(entry => [entry.number, entry.number > old ? entry.number + delta : entry.number]));
-        this._remapChannels(this.globals.channelDefinitions, numberMap, { rawCount: count });
-    }
-
-    previewRawChannels(count) {
-        const old = Number(this.globals.channelsCount); if (count <= old) return this.globals;
-        if (!Number.isInteger(count) || count + this.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
-        const registry = this.getChannelRegistry(), delta = count - old;
-        const mapping = new Map(registry.getChannels().map(entry => [entry.number, entry.number > old ? entry.number + delta : entry.number]));
-        const definitions = this.globals.channelDefinitions.map(definition => ({ ...definition, number: mapping.get(definition.number),
-            expression: SerialPlotter.renumberChannelExpression(definition.type === 'formula' ? registry.canonicalizeExpression(definition.expression) : definition.expression, mapping) }));
-        const names = [];
-        for (const entry of registry.getChannels()) names[mapping.get(entry.number) - 1] = entry.name;
-        return { ...this.globals, channelsCount: String(count), channelNames: names, channelDefinitions: definitions };
+        return this._prepareChannelRemap(this.globals.channelDefinitions, numberMap, count);
     }
 
     addMappedChannel() {
@@ -342,8 +336,8 @@ class WidgetController {
         this.onRulesChange(); this.onChange();
     }
 
-    channelColor(index) {
-        return this.globals.channelColors[index] ?? ['#ff0000', '#00ff00', '#00ffff', '#ffff00', '#ff00ff', '#ffffff'][index % 6];
+    channelColor(index, colors = this.globals.channelColors) {
+        return colors[index] ?? ['#ff0000', '#00ff00', '#00ffff', '#ffff00', '#ff00ff', '#ffffff'][index % 6];
     }
 
     channelVisible(widget, index) {
@@ -438,17 +432,42 @@ class WidgetController {
         return this._remapChannels(this.globals.channelDefinitions, numberMap);
     }
 
-    _remapChannels(previousDefinitions, numberMap, { rawCount = Number(this.globals.channelsCount) } = {}) {
+    _remapChannels(previousDefinitions, numberMap) {
+        return this._applyChannelRemap(this._prepareChannelRemap(previousDefinitions, numberMap, Number(this.globals.channelsCount)));
+    }
+
+    _prepareChannelRemap(previousDefinitions, numberMap, rawCount) {
         const oldRegistry = this.getChannelRegistry();
-        const remapDefinition = definition => ({ ...definition, number: numberMap.get(definition.number),
-            expression: SerialPlotter.renumberChannelExpression(definition.type === 'formula' ? oldRegistry.canonicalizeExpression(definition.expression) : definition.expression, numberMap) });
-        const definitions = previousDefinitions.map(remapDefinition).sort((a, b) => a.number - b.number);
-        new SerialPlotter.ChannelOperations(rawCount, definitions, { symbolVersion: 2 });
+        const definitions = previousDefinitions.map(definition => ({ ...definition, number: numberMap.get(definition.number),
+            expression: SerialPlotter.renumberChannelExpression(definition.type === 'formula'
+                ? oldRegistry.canonicalizeExpression(definition.expression) : definition.expression, numberMap)
+        })).sort((a, b) => a.number - b.number);
+        const count = definitions.reduce((max, definition) => Math.max(max, definition.number), rawCount);
+        const noSavedColors = [];
+        const channelNames = Array.from({ length: count }, (_, index) => SerialPlotter.formatChannelId(index));
+        const channelColors = Array.from({ length: count }, (_, index) => this.channelColor(index, noSavedColors));
+        const channelRecords = [];
+        for (const entry of oldRegistry.toJSON()) {
+            if (!numberMap.has(entry.number)) continue;
+            const number = numberMap.get(entry.number);
+            const name = SerialPlotter.parseChannelId(entry.name) === entry.number
+                ? SerialPlotter.formatChannelId(number - 1) : entry.name;
+            channelNames[number - 1] = name;
+            channelColors[number - 1] = this.channelColor(entry.number - 1);
+            channelRecords.push({ ...entry, number, name });
+        }
+        const previous = this.globals.channelDefinitions;
+        const globals = { ...this.globals, channelsCount: String(rawCount),
+            channelDefinitions: definitions, channelNames, channelColors, channelRecords };
+        new SerialPlotter.ChannelOperations(rawCount, definitions, { names: channelNames, symbolVersion: 2 });
+        return { globals, numberMap, previous, previousRawCount: this.globals.channelsCount };
+    }
+
+    commitChannelRemap({ globals, numberMap, previous, previousRawCount }) {
+        if (this.globals.channelsCount !== previousRawCount || this.globals.channelDefinitions !== previous)
+            throw new Error('通道目录已变化，请重新应用设置');
         this.onBeforeChannelRenumber(numberMap);
         const indices = values => values.filter(index => numberMap.has(index + 1)).map(index => numberMap.get(index + 1) - 1);
-        const oldCount = this.service.numericSource.frames.channelCount;
-        const names = Array.from({ length: oldCount }, (_, index) => this.globals.channelNames[index] ?? SerialPlotter.formatChannelId(index));
-        const colors = Array.from({ length: oldCount }, (_, index) => this.channelColor(index));
         const reorder = values => {
             const result = [];
             values.forEach((value, index) => {
@@ -456,18 +475,14 @@ class WidgetController {
             });
             return result;
         };
-        this.globals.channelNames = reorder(names.map((name, index) => name === SerialPlotter.formatChannelId(index) && numberMap.has(index + 1)
-            ? SerialPlotter.formatChannelId(numberMap.get(index + 1) - 1) : name));
-        this.globals.channelColors = reorder(colors);
-        this.globals.channelRecords = oldRegistry.toJSON().filter(entry => numberMap.has(entry.number))
-            .map(entry => ({ ...entry, number: numberMap.get(entry.number) }));
-        this.globals.channelsCount = String(rawCount);
+        const { channelNames, channelColors } = globals;
+        Object.assign(this.globals, { channelsCount: globals.channelsCount, channelDefinitions: globals.channelDefinitions,
+            channelNames, channelColors, channelRecords: globals.channelRecords });
         this.channelRegistry = null;
-        this.service.channelNames = this.globals.channelNames;
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave') for (const key of ['channels', 'responseChannels'])
-                widget.settings[key] = reorder(widget.settings[key]).map((channel, index) => ({ ...channel,
-                    name: this.globals.channelNames[index], color: this.globals.channelColors[index] }));
+                widget.settings[key] = Array.from(reorder(widget.settings[key]), (channel, index) => ({ visible: false, ...channel,
+                    index, name: channelNames[index], color: channelColors[index] }));
             else if (widget.type === 'pose') widget.settings = { ...SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap), engineSource: widget.settings.engineSource ?? null };
             else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
             for (const profile of Object.values(widget.settings.exportSettings?.formats ?? {}))
@@ -475,19 +490,13 @@ class WidgetController {
         }
         this.channelView.expanded = new Set([...this.channelView.expanded].filter(value => numberMap.has(value)).map(value => numberMap.get(value)));
         this.channelView.drafts = new Map([...this.channelView.drafts].filter(([value]) => numberMap.has(value))
-            .map(([value, draft]) => [numberMap.get(value), remapDefinition(draft)]));
-        let ready;
-        if (rawCount !== oldRegistry.rawCount) {
-            this.service.channelDefinitions = definitions;
-            const sources = [...this.service.sources].filter(source => source.kind === 'numeric');
-            for (const source of sources) if (source.frames.resetFormat) {
-                source.catalogCount = rawCount; source.frames.channelNames = this.globals.channelNames;
-                source.frames.resetFormat(rawCount, definitions);
-            }
-            if (this.service.dataEngine) this.service.dataEngine.arraySource.catalogCount = rawCount;
-            ready = Promise.resolve();
-        } else ready = this.service.updateChannelDefinitions(definitions, { rebuild: false, numberMap });
-        this.globals.channelDefinitions = definitions;
+            .map(([value, draft]) => [numberMap.get(value), { ...draft, number: numberMap.get(value),
+                expression: SerialPlotter.renumberChannelExpression(draft.expression, numberMap) }]));
+    }
+
+    _applyChannelRemap(plan) {
+        this.commitChannelRemap(plan);
+        const ready = this.service.updateChannelDefinitions(plan.globals.channelDefinitions, { rebuild: false, numberMap: plan.numberMap });
         this._channelsChanged();
         return ready.catch(error => this._showError(error.message));
     }
