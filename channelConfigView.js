@@ -56,7 +56,7 @@ class ChannelConfigView {
         const help = this.document.getElementById(`channel-help-${widget.type}`);
         if (help) help.textContent = '名称和颜色全局共用；勾选仅控制当前控件的可见性。';
         const cleanups = []; this.listeners.set(list, cleanups);
-        const all = this.controller.channelMeta().filter(channel => !widget.channelCategory || widget.channelCategory === 'all' ||
+        const all = this.controller.channelMeta(widget).filter(channel => !widget.channelCategory || widget.channelCategory === 'all' ||
             (channel.definition?.type ?? 'raw') === widget.channelCategory);
         const query = String(this.controller.channelSearchText ?? '').trim().normalize('NFC').toLocaleLowerCase();
         const reference = /^ch0*(\d+)$/i.exec(query);
@@ -103,7 +103,7 @@ class ChannelConfigView {
                 const color = this.document.createElement('input'); color.type = 'color'; color.value = channel.color;
                 color.setAttribute('data-role', 'channel-color'); color.setAttribute('aria-label', `${label.textContent} 颜色（全局共用）`);
                 listenRow(color, 'input', () => {
-                    try { this.controller.setChannelColor(index, color.value); channel.color = color.value; }
+                    try { this.controller.setChannelColor(index, color.value, widget.capture); channel.color = color.value; }
                     catch (error) { this.showError(widget, error.message); }
                 });
                 const name = this.document.createElement('input'); name.type = 'text'; name.className = 'channel-readonly-name channel-name-editor';
@@ -112,7 +112,7 @@ class ChannelConfigView {
                 const clearError = () => { name.removeAttribute('aria-invalid'); name.setCustomValidity?.(''); name.title = channel.name; this.showError(widget, ''); };
                 const commitName = () => {
                     try {
-                        if (name.value !== channel.name) { this.controller.setChannelName(index, name.value); channel.name = name.value; }
+                        if (name.value !== channel.name) { this.controller.setChannelName(index, name.value, widget.capture); channel.name = name.value; }
                         clearError();
                     } catch (error) {
                         name.setAttribute('aria-invalid', 'true'); name.setCustomValidity?.(error.message); name.title = error.message;

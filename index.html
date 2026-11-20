@@ -175,8 +175,9 @@
             <section id="data-engine" class="data-engine tab-group" aria-label="数据引擎">
                 <div class="sidebar-section-header config-pane-heading">数据引擎 <span id="engine-applied-mode" class="scope-badge">Data_Array</span></div>
                 <div class="tab-bar"><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-raw-records">原始记录</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
+                <div class="input-group" id="engine-connection-source-wrap" hidden><label for="engine-connection-source">接收来源</label><select id="engine-connection-source"></select></div>
                 <div id="engine-parsing" class="tab-content active">
-                    <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">全局数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。解析规则对所有控件生效。</span></div>
+                    <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。规则作用于使用该来源的控件。</span></div>
                     <div class="control-group" id="engine-residual-timeout-settings"><div class="section-title">解析残帧超时 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">解析残帧超时（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">完整帧立即解析，残帧超时后重新同步。0 关闭。两项计时都开启时，建议与「原始记录空闲间隔」设为相同值。</span></div>
                     <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
                         <div class="control-group" id="frame-numeric-settings">
@@ -265,7 +266,7 @@
                         <span id="engine-raw-limit-status" class="hint-text is-error" role="status" hidden></span>
                     </div>
                 </div>
-                <div id="engine-channels" class="tab-content"><div id="engine-channel-panel"></div></div>
+                <div id="engine-channels" class="tab-content"><p id="engine-channel-scope" class="hint-text" hidden>此页管理主连接通道。其他来源的通道名称和颜色可在其控件属性中调整。</p><div id="engine-channel-panel"></div></div>
                 <div id="engine-edit-actions">
                     <div class="engine-apply-bar"><button id="engine-validate" class="btn btn-secondary" type="button">校验草稿</button><button id="engine-apply" class="btn btn-primary" type="button">应用设置</button></div><p id="engine-status" class="hint-text" role="status" aria-live="polite"></p>
                 </div>
@@ -375,6 +376,7 @@
                         <button id="send-tab-regular" type="button" role="tab" aria-controls="send-panel" aria-selected="true">常规发送</button>
                         <button id="send-tab-commands" type="button" role="tab" aria-controls="command-panel" aria-selected="false" tabindex="-1">一键发送</button>
                     </div>
+                    <label id="send-connection-target" class="send-connection-target" hidden>目标连接 <select id="send-connection-source" aria-label="发送目标连接"></select></label>
                 </div>
                 <div class="send-panel" id="send-panel" role="tabpanel" aria-labelledby="send-tab-regular">
                                 <div class="send-toolbar">
@@ -422,6 +424,7 @@
             <div class="inspector-heading"><div class="sidebar-section-header config-pane-heading"><span id="active-monitor-caption" aria-live="polite">控件属性</span><span id="active-widget-type" class="scope-badge active-widget-type" hidden></span></div><button id="sidebar-close-right" class="sidebar-close" type="button" aria-label="收起控件设置">收起</button></div>
             <div id="widget-selection-prompt" class="widget-selection-prompt"><strong>选择一个控件</strong><span>点击工作区中的波形、字节流或位姿控件，右侧将显示该控件的设置。也可从左侧“控件”添加新控件。</span></div>
             <div id="widget-title-tools" class="widget-title-tools" hidden><input id="widget-title" aria-label="控件标题" /><button id="widget-delete" type="button" class="btn btn-danger">删除</button></div>
+            <div id="widget-connection-source-wrap" class="widget-engine-source input-group" hidden><label for="widget-connection-source">接收来源</label><select id="widget-connection-source"></select></div>
             <div id="widget-engine-source-wrap" class="widget-engine-source input-group" hidden><label for="widget-engine-source">显示数据源</label><select id="widget-engine-source"></select><span class="hint-text">仅选择该控件读取的采样输出，不修改解析规则。</span></div>
             <div class="channel-settings-content tab-group" id="monitor-settings-tabs" hidden>
                 <div class="tab-bar settings-tabs">

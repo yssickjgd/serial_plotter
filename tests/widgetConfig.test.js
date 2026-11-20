@@ -129,7 +129,7 @@ test('import rejects coerced widget identities and malformed send settings befor
     }
     for (const send of [{ interval: '0', unit: 'hz', mode: 'hex' }, { interval: '0.5', unit: 's', mode: 'text' }])
         assert.deepEqual(validateWorkspaceConfig({ ...migrateWorkspaceConfig(null), send }).send,
-            { ...send, tab: 'regular', commands: [] });
+            { ...send, tab: 'regular', connectionSource: 'primary', commands: [] });
 });
 
 test('unknown config versions and coordinates outside workspace bounds are rejected', () => {

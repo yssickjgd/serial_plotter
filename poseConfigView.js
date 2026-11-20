@@ -54,7 +54,7 @@
                     const value = options === 'checkbox' ? input.checked : options === 'number' || path.includes('bindings.')
                         ? input.value === '' && path.includes('bindings.') ? null : input.value.trim() === '' ? NaN : Number(input.value) : input.value;
                     if (binding.write) binding.write(settings, value); else set(settings, path, value);
-                    widget.settings = S.WidgetConfig.normalizeWidgetSettings('pose', settings, this.controller.globals);
+                    widget.settings = S.WidgetConfig.normalizeWidgetSettings('pose', settings, this.controller.globalsFor(widget.capture));
                     this.controller.applySettings(widget); this.render(widget); this.controller.onRulesChange(); this.controller.onChange();
                 } catch (failure) { error.textContent = failure.message.includes('有限数') ? '请输入有效的有限数值' : failure.message; error.hidden = false; }
             });

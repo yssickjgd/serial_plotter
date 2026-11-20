@@ -110,6 +110,7 @@ body {
 .data-engine { position: relative; min-height: 0; flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
 .data-engine > .sidebar-section-header { flex-shrink: 0; }
 .data-engine > .tab-bar { flex-shrink: 0; }
+#engine-connection-source-wrap { flex-shrink: 0; margin: 4px 8px; }
 .data-engine > .tab-content { overflow-y: auto; }
 .data-engine > #engine-channels { min-height: 0; overflow: hidden; }
 .data-engine > #engine-channels.engine-size-probe { display: flex !important; position: absolute; top: 0; left: 0; right: 0; visibility: hidden; pointer-events: none; }
@@ -1023,6 +1024,8 @@ canvas {
 .global-send-title { margin: 0; padding: 4px 8px; font-size: var(--ui-label-size); white-space: nowrap; }
 .global-send-heading { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; background: #18212a; gap: 2px 8px; padding-right: 8px; }
 .send-tabs { display: flex; gap: 2px; padding: 2px 0; }
+.send-connection-target { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #d4dfeb; }
+.send-connection-target select { max-width: min(220px, 45vw); min-height: var(--send-control-height); }
 .send-tabs button { min-height: var(--send-control-height); padding: 2px 8px; border: 1px solid #526173; border-radius: 3px; background: #202c38; color: #d4dfeb; font: inherit; font-size: var(--ui-note-size); cursor: pointer; }
 .send-tabs button[aria-selected="true"] { background: #214b70; border-color: #65b8ff; color: #fff; }
 .send-tabs button:hover { border-color: #93caff; }

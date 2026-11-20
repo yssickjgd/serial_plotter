@@ -120,10 +120,10 @@ class SendController {
             this.inFlight = true;
             try {
                 await engine.send(bytes);
-                if (!this.disposed) this.onSent(bytes);
+                if (!this.disposed) this.onSent(bytes, engine);
                 return true;
             } catch (error) {
-                if (!this.disposed) this.onSendError(error, bytes);
+                if (!this.disposed) this.onSendError(error, bytes, engine);
                 return false;
             } finally { this.inFlight = false; }
         };

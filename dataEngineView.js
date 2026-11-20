@@ -3,6 +3,7 @@
     class DataEngineView {
         constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onLayout = () => {}, getProtocolReferences = () => [] }) {
             Object.assign(this, { document, engine, controller, onChange, onApply, onLayout, getProtocolReferences });
+            this.primaryEngine = engine;
             this.listeners = []; this.mappingPage = 0; this.binding = false;
             this.arrayIds = { dataType: 'data-type', endianness: 'endianness', channelsCount: 'channels-count',
                 enableHeader: 'chk-header', headerHex: 'frame-header', enableFooter: 'chk-footer', footerHex: 'frame-footer', enableChecksum: 'chk-checksum' };
@@ -74,8 +75,8 @@
                     if (id === 'engine-protocol' || id === 'engine-mode') this.renderMappings();
                 } });
             this.listen(this.el('rebuild-history'), 'change', () => {
-                engine.globals.rebuildHistory = this.el('rebuild-history').checked;
-                engine.service.rebuildHistory = engine.globals.rebuildHistory; this.onChange();
+                this.engine.globals.rebuildHistory = this.el('rebuild-history').checked;
+                this.engine.service.rebuildHistory = this.engine.globals.rebuildHistory; this.onChange();
             });
             this.listen(this.el('engine-validate'), 'click', () => { try { this.validate(); this.status('草稿校验通过；应用后生效'); } catch (e) { this.status(e.message, true); } });
             this.listen(this.el('engine-apply'), 'click', () => { void this.apply().catch(() => {}); });
@@ -83,6 +84,16 @@
             this.render();
         }
         el(id) { return this.document.getElementById(id); }
+        setEngine(engine) {
+            if (engine === this.engine) return;
+            this.applyRevision = (this.applyRevision ?? 0) + 1;
+            this.editor.close();
+            this.engine = engine; this.mappingPage = 0;
+            this.draft = JSON.parse(JSON.stringify(engine.config.draft ?? engine.serialize()));
+            this.draft.draft = null;
+            this.el('engine-apply').disabled = false;
+            this.render(); this.onLayout();
+        }
         minimumHeight() {
             if (!this.channels) return 140;
             const panel = this.el('engine-channels'), engine = this.el('data-engine');
@@ -93,6 +104,7 @@
                 const controls = Math.max(0, this.channels.list.getBoundingClientRect().top - panel.getBoundingClientRect().top);
                 const style = this.document.defaultView?.getComputedStyle?.(panel);
                 return Math.max(140, Math.ceil(engine.children[0].offsetHeight + engine.children[1].offsetHeight +
+                    (this.el('engine-connection-source-wrap').hidden ? 0 : this.el('engine-connection-source-wrap').offsetHeight) +
                     controls + this.channels.minimumListHeight + (parseFloat(style?.paddingBottom) || 0)));
             } finally { if (probe) panel.classList.remove('engine-size-probe'); }
         }
@@ -177,7 +189,17 @@
             let required = Number(this.engine.globals.channelsCount);
             if (settings.mode === 'Data_Array') required = Math.max(required, Number(settings.array.channelsCount));
             for (const mapping of settings.mappings) required = Math.max(required, mapping.channel + 1);
-            const expansion = this.controller.prepareRawChannelExpansion(required);
+            const local = this.engine.globals, current = Number(local.channelsCount);
+            let expansion;
+            if (this.engine === this.primaryEngine) expansion = this.controller.prepareRawChannelExpansion(required);
+            else if (required > current) {
+                if (!Number.isInteger(required) || required > 65535) throw new Error('来源通道数不能超过 65535');
+                expansion = {
+                    globals: { ...local, channelsCount: String(required) },
+                    numberMap: new Map(Array.from({ length: current }, (_, index) => [index + 1, index + 1])),
+                    commit: () => { local.channelsCount = String(required); }
+                };
+            }
             return { settings, expansion };
         }
         validate() {
@@ -191,18 +213,23 @@
             try {
                 const { settings, expansion } = this.prepareApply();
                 this.el('engine-apply').disabled = true; this.status('正在应用配置…');
-                const previous = this.engine.config;
-                const ready = this.engine.apply(settings, { channelExpansion: expansion && {
+                const engine = this.engine, previous = engine.config;
+                const ready = engine.apply(settings, { channelExpansion: expansion && {
                     globals: expansion.globals, numberMap: expansion.numberMap,
                     commit: () => {
-                        this.controller.commitChannelRemap(expansion);
-                        this.channels.remapDrafts(expansion.numberMap);
+                        if (expansion.commit) expansion.commit();
+                        else {
+                            this.controller.commitChannelRemap(expansion);
+                            this.channels.remapDrafts(expansion.numberMap);
+                        }
                     }
                 } });
-                if (this.engine.config !== previous) this.controller.rebindEngineSources();
+                if (engine.config !== previous) this.controller.rebindEngineSources(engine.service);
                 await ready;
-                if (this.disposed || revision !== this.applyRevision) return false;
-                this.controller.rebindEngineSources(); this.channels.refresh(); this.onApply();
+                if (this.disposed || engine.service.disposed) return false;
+                this.controller.rebindEngineSources(engine.service); this.onApply(engine); this.onChange();
+                if (revision !== this.applyRevision) return true;
+                this.channels.refresh();
                 if ((this.draftRevision ?? 0) === draftRevision) {
                     this.engine.config.draft = null; this.draft = this.engine.serialize(); this.render();
                 } else { this.markDraft(); this.el('engine-applied-mode').textContent = this.engine.mode; }
@@ -214,7 +241,7 @@
         renderMappings() {
             const host = this.el('engine-mappings'), list = this.node('div', undefined, 'engine-mapping-list');
             const title = this.node('div', '字段 → 数值通道', 'section-title');
-            title.append(this.node('span', '全局共用', 'scope-badge'));
+            title.append(this.node('span', '来源共用', 'scope-badge'));
             const message = this.node('select'), path = this.node('input'), channel = this.node('input');
             const add = this.node('button', '映射'), create = this.node('button', '新建通道并映射');
             path.placeholder = '字段路径，如 position.x / items[0]'; channel.placeholder = 'CH00001';
@@ -233,7 +260,11 @@
                         number++;
                         if (number + this.engine.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
                         entry = { type: 'raw', number };
-                    } else entry = this.controller.getChannelRegistry().resolve(channel.value.trim());
+                    } else if (this.engine === this.primaryEngine) entry = this.controller.getChannelRegistry().resolve(channel.value.trim());
+                    else {
+                        const number = Number(/^CH(\d+)$/u.exec(channel.value.trim())?.[1]);
+                        if (number > 0 && number <= Number(this.engine.globals.channelsCount)) entry = { type: 'raw', number };
+                    }
                     if (!entry || entry.type !== 'raw') throw new Error('请选择已有原始字段通道，或新建通道');
                     const mapping = { channel: entry.number - 1, protocolId: this.draft.protocolId,
                         messageId: message.value, path: path.value.trim() };

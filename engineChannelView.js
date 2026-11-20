@@ -141,7 +141,7 @@ class EngineChannelView {
 
     filteredChannels() {
         const query = String(this.searchText).normalize('NFC').toLocaleLowerCase();
-        return this.controller.channelMeta().filter(channel => {
+        return this.controller.channelMeta(null).filter(channel => {
             if (this.category !== 'all' && (channel.definition?.type ?? 'raw') !== this.category) return false;
             const canonical = engineChannelHelpers.formatChannelId(channel.index).toLowerCase();
             return !query || String(channel.name).normalize('NFC').toLocaleLowerCase().includes(query) || canonical.includes(query) ||

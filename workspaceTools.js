@@ -1,4 +1,4 @@
-/** Paused navigation and search across independent views of one receive byte stream. */
+/** Paused navigation and search across receive sources. */
 (function(root) {
     'use strict';
     const dependencies = typeof module !== 'undefined' && module.exports
@@ -6,6 +6,15 @@
             ...require('./channelTransform'), MonitorDisplay: require('./monitorDisplay'), PoseConfig: require('./poseConfig').PoseConfig } : root.SerialPlotter;
     const { MonitorSearch, FrameNavigation, transformChannelValue, MonitorDisplay, PoseConfig } = dependencies;
     const framesOf = widget => widget?.source?.frames ?? widget?.source;
+    const timeIndex = (frames, time) => {
+        if (!frames?.length || !Number.isFinite(time)) return -1;
+        let a = frames.timestampAt(0), b = frames.timestampAt(frames.length - 1);
+        if (frames.timestampsMonotonic === false) for (let index = 1; index < frames.length; index++) {
+            const value = frames.timestampAt(index);
+            if (Number.isFinite(value)) { a = Number.isFinite(a) ? Math.min(a, value) : value; b = Number.isFinite(b) ? Math.max(b, value) : value; }
+        }
+        return time >= a && time <= b ? frames.nearestTimestampIndex(time) : -1;
+    };
     const isWave = widget => widget?.type === 'wave' || widget?.type === 'waveform';
     const hasMarkers = widget => isWave(widget) || widget?.type === 'pose';
     const endAt = (frames, index) => frames.rawEndByteAt?.(index) ?? frames.rawByteOffsetAt(index) + frames.rawBytesAt(index).length;
@@ -28,8 +37,9 @@
 
     class WorkspaceTools {
         constructor({ document = root.document, service, getWidgets, getActiveWidget = () => null, onStateChange = () => {},
-            onMessage = () => {}, getChannelNames = () => service.channelNames ?? service.numericSource?.format?.channelNames ?? [] }) {
-            Object.assign(this, { document, service, getWidgets, getActiveWidget, onStateChange, onMessage, getChannelNames });
+            onMessage = () => {}, getChannelNames = () => service.channelNames ?? service.numericSource?.format?.channelNames ?? [],
+            getTimeOffset = () => 0 }) {
+            Object.assign(this, { document, service, getWidgets, getActiveWidget, onStateChange, onMessage, getChannelNames, getTimeOffset });
             this.sourceId = this.referenceId = null;
             this.matches = [];
             this.currentMatch = -1;
@@ -68,6 +78,11 @@
             target?.addEventListener(name, fn); list.push(() => target?.removeEventListener(name, fn));
         }
         _source() { return this.getWidgets().get(this.sourceId); }
+        _capture(widget) { return widget?.capture ?? this.service; }
+        _matchingTimeIndex(widget, origin, timestamp) {
+            const ownTime = timestamp + this.getTimeOffset(origin) - this.getTimeOffset(widget);
+            return timeIndex(framesOf(widget), ownTime);
+        }
         _enabled() { return !this.disposed && this.service.paused && !!this._source() && !this._source().view?.frames?.responseMode &&
             !this._source().source?.rebuilding && !framesOf(this._source())?.rebuilding; }
         _status(id, text) { const element = this._el(id); if (element) element.textContent = text; }
@@ -154,7 +169,7 @@
 
         _kind() {
             const widget = this._source();
-            if (this.service.dataEngine?.mode === 'Raw_Data') return 'hex';
+            if (widget?.settings?.captureMode === 'engine' && this._capture(widget).dataEngine?.mode === 'Raw_Data') return 'hex';
             if (widget?.source?.kind === 'protocol') return 'protocol';
             if (widget?.source?.kind === 'numeric') return 'number';
             return hasMarkers(widget) ? 'number' : widget?.settings?.captureMode === 'engine' ? 'hex' : widget?.settings?.captureMode ?? 'hex';
@@ -286,17 +301,21 @@
                 const frames = framesOf(widget), mapped = [];
                 if (widget.view?.frames?.responseMode) continue;
                 let current = -1;
+                const crossSource = this._capture(widget) !== this._capture(origin);
                 for (let index = 0; index < this.matches.length; index++) {
                     const match = this.matches[index];
                     if (match.unretained) continue;
                     const sample = frames === framesOf(origin) && Number.isInteger(match.sampleFrame);
-                    const first = sample ? match.sampleFrame : indexAt(frames, match.startByte), last = sample ? first : indexAt(frames, match.endByte - 1);
+                    const first = crossSource ? this._matchingTimeIndex(widget, origin, match.timestamp)
+                        : sample ? match.sampleFrame : indexAt(frames, match.startByte);
+                    const last = sample || crossSource ? first : indexAt(frames, match.endByte - 1);
                     if (first < 0 || last < 0 || !coversSpan(frames, first, last)) continue;
                     const local = { ...match, startFrame: first, endFrame: last,
                         startOrder: frames.orderAt(first), endOrder: frames.orderAt(last),
-                        startByte: sample ? 0 : match.startByte - frames.rawByteOffsetAt(first),
-                        endByte: sample ? frames.rawBytesAt(last)?.length ?? 0 : match.endByte - frames.rawByteOffsetAt(last),
-                        absoluteStartByte: match.startByte, absoluteEndByte: match.endByte };
+                        startByte: sample || crossSource ? 0 : match.startByte - frames.rawByteOffsetAt(first),
+                        endByte: sample || crossSource ? frames.rawBytesAt(last)?.length ?? 0 : match.endByte - frames.rawByteOffsetAt(last),
+                        absoluteStartByte: crossSource ? frames.rawByteOffsetAt(first) : match.startByte,
+                        absoluteEndByte: crossSource ? endAt(frames, last) : match.endByte };
                     if (frames !== framesOf(origin)) delete local.channel;
                     if (index === this.currentMatch) current = mapped.length;
                     mapped.push(local);
@@ -312,14 +331,19 @@
             }
         }
 
-        _jumpAll(offset, timeMarker = false, preferred = null) {
-            const skipped = [];
+        _jumpAll(offset, timeMarker = false, preferred = null, timestamp = NaN) {
+            const skipped = [], origin = this._source();
             for (const widget of this.getWidgets().values()) {
                 const frames = framesOf(widget), sample = preferred && frames === preferred.frames;
-                const index = sample ? preferred.index : indexAt(frames, offset);
+                const crossSource = this._capture(widget) !== this._capture(origin);
+                const index = crossSource ? this._matchingTimeIndex(widget, origin, timestamp) : sample ? preferred.index : indexAt(frames, offset);
                 if (widget.view?.frames?.responseMode) continue;
-                if (index < 0) { skipped.push(widget.title); continue; }
-                const moved = sample && widget.view.jumpToFrame ? widget.view.jumpToFrame(index) : widget.view.jumpToByteOffset ? widget.view.jumpToByteOffset(offset)
+                if (index < 0) {
+                    if (timeMarker && hasMarkers(widget)) widget.view.setNavigationMarkers?.({ ...widget.view.navigationMarkers, timeOrder: null });
+                    skipped.push(widget.title); continue;
+                }
+                const moved = (sample || crossSource) && widget.view.jumpToFrame ? widget.view.jumpToFrame(index)
+                    : widget.view.jumpToByteOffset ? widget.view.jumpToByteOffset(crossSource ? frames.rawByteOffsetAt(index) : offset)
                     : widget.view.jumpToFrame?.(index);
                 if (moved === false) { skipped.push(widget.title); continue; }
                 if (timeMarker && hasMarkers(widget)) widget.view.setNavigationMarkers?.({
@@ -334,11 +358,11 @@
                 startByte: frames.rawByteOffsetAt(match.startFrame) + (match.startByte ?? 0),
                 endByte: match.endByte === undefined ? endAt(frames, match.endFrame)
                     : frames.rawByteOffsetAt(match.endFrame) + match.endByte,
-                sourceId: widget.id, sessionEpoch: epoch };
+                sourceId: widget.id, sessionEpoch: epoch, timestamp: frames.timestampAt?.(match.startFrame) };
             if (typeof frames.provenanceAt !== 'function' || match.channel === undefined) return mapped;
             const origin = frames.provenanceAt(match.channel, match.startFrame);
             const provenance = frames.provenanceInfoAt?.(match.channel, match.startFrame);
-            const records = this.service.dataEngine?.recordsSource?.frames;
+            const records = this._capture(widget).dataEngine?.recordsSource?.frames;
             let record = null;
             if (origin && records?.length) {
                 const index = records.indexAtOrAfterOrder(origin.order);
@@ -371,7 +395,7 @@
                 this._status('nav-jump-status', '时间超出来源控件的保留范围'); return false;
             }
             const index = frames.nearestTimestampIndex(target);
-            const skipped = this._jumpAll(frames.rawByteOffsetAt(index), true, { frames, index });
+            const skipped = this._jumpAll(frames.rawByteOffsetAt(index), true, { frames, index }, target);
             const textStatus = `已定位第 ${index + 1} 帧` + (skipped.length ? `；${skipped.join('、')} 超出保留范围` : '');
             this._status('nav-jump-status', textStatus); this.onMessage(textStatus);
             return true;
@@ -383,7 +407,13 @@
             if (!widget || !reference) { this._searchStatus(!widget ? '请激活一个控件' : '请选择参考控件'); return Promise.resolve(false); }
             if (!frames?.length) { this._searchStatus('当前控件没有保留数据'); return Promise.resolve(false); }
             try {
-                const byteOffset = reference.view.getReferenceByteOffset?.();
+                const capture = this._capture(widget), refFrames = framesOf(reference);
+                let byteOffset = reference.view.getReferenceByteOffset?.();
+                if (capture !== this._capture(reference)) {
+                    const refIndex = indexAt(refFrames, byteOffset);
+                    const mapped = this._matchingTimeIndex(widget, reference, refFrames?.timestampAt?.(refIndex));
+                    byteOffset = mapped >= 0 ? frames.rawByteOffsetAt(mapped) : NaN;
+                }
                 if (!Number.isFinite(byteOffset)) { this._searchStatus('参考控件没有可用的时间位置'); return Promise.resolve(false); }
                 const query = this._el('monitor-search-query').value, tolerance = this._el('monitor-search-tolerance').value;
                 const channels = this.selectedChannels ? [...this.selectedChannels].sort((a, b) => a - b) : this._poseChannels() ?? -1;
@@ -399,7 +429,7 @@
                         return decoder.call(widget.source, index);
                     } } : MonitorSearch.parseMonitorSearch(kind, query, tolerance, channels, encoding, caseSensitive);
                 if (!structured && isWave(widget)) options.valueTransform = (value, channel) => transformChannelValue(value, widget.settings.channels?.[channel]);
-                const key = JSON.stringify([widget.id, frames.version, this.service.epoch, widget.source.generation,
+                const key = JSON.stringify([widget.id, frames.version, capture.epoch, widget.source.generation,
                     kind, structured ? fieldKind : null, structured ? paths : null, query, tolerance, channels, encoding, caseSensitive, isWave(widget) ? widget.settings.channels : null]);
                 const request = { action, byteOffset };
                 if (key === this.searchKey) {
@@ -408,7 +438,7 @@
                 }
                 this.invalidate(); this.searchKey = key;
                 const session = structured ? new MonitorSearch.ProtocolFieldSearchSession(frames, options) : new MonitorSearch.MonitorSearchSession(frames, options);
-                const generation = this.generation, epoch = this.service.epoch, sourceGeneration = widget.source.generation;
+                const generation = this.generation, epoch = capture.epoch, sourceGeneration = widget.source.generation;
                 const version = frames.version;
                 let resolve;
                 const promise = new Promise(done => { resolve = done; });
@@ -416,7 +446,7 @@
                 const scan = () => {
                     this.timer = null;
                     if (generation !== this.generation) return;
-                    if (!this._enabled() || this.service.epoch !== epoch || widget.source.generation !== sourceGeneration ||
+                    if (!this._enabled() || capture.epoch !== epoch || widget.source.generation !== sourceGeneration ||
                         framesOf(this._source()) !== frames || frames.version !== version) { this.invalidate(); return; }
                     try {
                         if (session.step(256)) {
@@ -457,7 +487,7 @@
                     (match.noSource ? '该运算值没有关联源消息' : '值仍匹配，源消息已超出保留范围')); return false;
             }
             const skipped = this._jumpAll(match.startByte, false, Number.isInteger(match.sampleFrame)
-                ? { frames: framesOf(this._source()), index: match.sampleFrame } : null);
+                ? { frames: framesOf(this._source()), index: match.sampleFrame } : null, match.timestamp);
             this._publish();
             this._searchStatus(`${this.currentMatch + 1} / ${this.matches.length}` + (skipped.length ? `；${skipped.join('、')} 超出保留范围` : ''));
             return true;

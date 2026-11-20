@@ -28,7 +28,6 @@ class CaptureService {
         this.history = new CaptureHistory();
         this.workerPool = options.workerPool ?? new HistoryWorkerPool(options.workerOptions);
         this.ownsWorkerPool = options.ownsWorkerPool !== false;
-        this.rawIdleGapSeconds = options.rawIdleGapSeconds;
         this.sources = new Set();
         this.sourceKeys = new Map();
         this.textStats = new Map();
@@ -46,7 +45,7 @@ class CaptureService {
         numeric.isLittleEndian ??= numeric.endianness !== 'big';
         this.catalogCount = Math.max(Number(numeric.channelsCount), Number(options.catalogCount ?? numeric.catalogCount ?? numeric.channelsCount));
         numeric.catalogCount = this.catalogCount;
-        this.numericSource = options.rawOnly ? null : this._createSource(numeric, true, 'numeric', 0);
+        this.numericSource = this._createSource(numeric, true, 'numeric', 0);
         const baseFormat = this._rawFormat({ captureMode: 'hex' });
         const baseKey = this._sourceKey(baseFormat, true);
         this.baseSource = this._createSource(baseFormat, true, baseKey, 0);

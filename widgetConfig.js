@@ -19,7 +19,7 @@ const GLOBAL_DEFAULTS = {
     footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
 const WAVE_DEFAULTS = {
-    engineSource: null, plotViewMode: 'time', plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
+    connectionSource: 'primary', engineSource: null, plotViewMode: 'time', plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
     plotResponseSampleRate: '0', plotResponseTimePoints: '1000', responseChannels: [], responseViewport: null,
@@ -29,7 +29,7 @@ const WAVE_DEFAULTS = {
     plotYMinFreq: '0.001', plotYMaxFreq: '1', channels: [], viewport: null, exportSettings: null
 };
 const BYTE_DEFAULTS = {
-    engineSource: null, protocolFieldPaths: null, captureMode: 'hex', hexBoundary: 'idle', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
+    connectionSource: 'primary', engineSource: null, protocolFieldPaths: null, captureMode: 'hex', hexBoundary: 'idle', textEncoding: 'utf-8', textBoundary: 'idle', idleGapSeconds: '0.001', exportSettings: null
 };
 const UI_LAYOUT_DEFAULTS = { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200, leftSplitRatio: .5 };
 const copy = value => JSON.parse(JSON.stringify(value));
@@ -115,13 +115,16 @@ function legacyWindowPoints(settings = {}) {
 
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
+    const connectionSource = settings.connectionSource ?? 'primary';
+    if (typeof connectionSource !== 'string' || !/^(?:primary|serial-[1-9]\d*)$/.test(connectionSource))
+        throw new Error('控件接收来源无效');
     if (settings.engineSource !== undefined && settings.engineSource !== null &&
         (typeof settings.engineSource !== 'string' || settings.engineSource.length > 512)) throw new Error('控件数据源无效');
     if (type === 'pose') {
         const originalCount = Number(globals.channelsCount);
         const engine = new widgetChannelUtils.ChannelOperations(originalCount, globals.channelDefinitions ?? [], { names: globals.channelNames, symbolVersion: globals.symbolVersion });
         return { ...widgetPoseUtils().normalize(settings, { channelCount: engine.channelCount,
-            isSignal: index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula' }), engineSource: settings.engineSource ?? null };
+            isSignal: index => index < originalCount || engine.entries.get(index + 1)?.definition.type === 'formula' }), engineSource: settings.engineSource ?? null, connectionSource };
     }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
@@ -169,13 +172,35 @@ function normalizeSerialSource(input) {
     const dataBits = Number(input.dataBits), stopBits = Number(input.stopBits), parity = input.parity;
     if (![7, 8].includes(dataBits) || ![1, 2].includes(stopBits) || !['none', 'even', 'odd'].includes(parity))
         throw new Error('串口来源的串行参数无效');
-    return { id: input.id, name, baudRate, dataBits, stopBits, parity };
+    const timeOffsetMs = input.timeOffsetMs === undefined ? 0 : Number(input.timeOffsetMs);
+    if (!Number.isSafeInteger(timeOffsetMs) || input.timeOffsetMs === '' || input.timeOffsetMs === null ||
+        input.timeOffsetMs !== undefined && !['string', 'number'].includes(typeof input.timeOffsetMs))
+        throw new Error('对齐偏移必须为整数毫秒');
+    return { id: input.id, name, baudRate, dataBits, stopBits, parity, timeOffsetMs };
 }
 
-function normalizeSerialSources(input = { nextNumber: 2, entries: [] }) {
+function serialSourceGlobals(globals, entry) {
+    return { ...globals, channelsCount: String(entry.channelCount),
+        channelNames: [...(entry.channelNames ?? [])], channelColors: [...(entry.channelColors ?? [])],
+        channelDefinitions: [], channelRecords: [] };
+}
+
+function normalizeSerialSources(input = { nextNumber: 2, entries: [] }, globals, engineApi) {
     if (!input || !Array.isArray(input.entries) || !Number.isSafeInteger(input.nextNumber) || input.nextNumber < 2)
         throw new Error('串口来源配置无效');
-    const entries = input.entries.map(normalizeSerialSource), ids = new Set(entries.map(entry => entry.id));
+    const entries = input.entries.map(entry => {
+        const settings = normalizeSerialSource(entry);
+        const channelCount = widgetConfigUtils.parseIntInRange(entry.channelCount ?? globals.channelsCount, 1, 65535, '来源通道数');
+        const channelNames = entry.channelNames ?? [], channelColors = entry.channelColors ?? [];
+        widgetConfigUtils.validateConfig({ channelNames, channelColors });
+        const local = serialSourceGlobals(globals, { channelCount, channelNames, channelColors });
+        const engine = engineApi.normalizeDataEngine(entry.engine === undefined ? { mode: 'Raw_Data' } : entry.engine, local);
+        if (Number(engine.array.channelsCount) > channelCount) throw new Error('数组通道数超出来源的通道目录');
+        const rebuildHistory = entry.rebuildHistory ?? globals.rebuildHistory;
+        if (typeof rebuildHistory !== 'boolean') throw new Error('来源重建历史开关无效');
+        return { ...settings, channelCount, channelNames, channelColors, rebuildHistory, engine };
+    });
+    const ids = new Set(entries.map(entry => entry.id));
     if (ids.size !== entries.length || entries.some(entry => Number(entry.id.slice(7)) >= input.nextNumber))
         throw new Error('串口来源编号重复或超出分配范围');
     return { nextNumber: input.nextNumber, entries };
@@ -216,6 +241,9 @@ function validateWorkspaceConfig(config) {
     const registry = new widgetRegistryUtils.ChannelRegistry({ rawCount: Number(globals.channelsCount), definitions: globals.channelDefinitions, names: globals.channelNames, channels: globals.channelRecords });
     globals.channelRecords = registry.toJSON();
     globals.channelNames = globals.channelNames.map((name, index) => /^CH0*\d+$/.test(name) && Number(name.slice(2)) === index + 1 ? `CH${String(index + 1).padStart(5, '0')}` : name);
+    const engineApi = typeof module !== 'undefined' ? require('./dataEngine') : globalThis.SerialPlotter;
+    const serialSources = normalizeSerialSources(config.serialSources, globals, engineApi);
+    const serialById = new Map(serialSources.entries.map(entry => [entry.id, entry]));
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
@@ -224,8 +252,10 @@ function validateWorkspaceConfig(config) {
         ids.add(widget.id);
         if (widget.settings?.engineSource !== undefined && widget.settings.engineSource !== null &&
             (typeof widget.settings.engineSource !== 'string' || widget.settings.engineSource.length > 512)) throw new Error('控件数据源无效');
+        const sourceId = widget.settings?.connectionSource ?? 'primary', entry = serialById.get(sourceId);
+        if (sourceId !== 'primary' && !entry) throw new Error('控件引用了不存在的串口来源');
         return { id: widget.id, type: widget.type, title: widget.title,
-            settings: normalizeWidgetSettings(widget.type, widget.settings, globals) };
+            settings: normalizeWidgetSettings(widget.type, widget.settings, entry ? serialSourceGlobals(globals, entry) : globals) };
     });
     const workspace = copy(config.workspace ?? { step: 10, rects: {} });
     if (workspace.zoom === undefined) workspace.zoom = 1;
@@ -299,11 +329,12 @@ function validateWorkspaceConfig(config) {
     if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) throw new Error('控件序号无效');
     if (config.send !== undefined && (!config.send || typeof config.send !== 'object' || Array.isArray(config.send)))
         throw new Error('发送设置无效');
-    const send = { interval: '0', unit: 's', mode: 'hex', tab: 'regular', ...config.send };
+    const send = { interval: '0', unit: 's', mode: 'hex', tab: 'regular', connectionSource: 'primary', ...config.send };
     if (!['hex', 'text', 'protocol'].includes(send.mode) || !['s', 'hz'].includes(send.unit) ||
         !['string', 'number'].includes(typeof send.interval) || String(send.interval).trim() === '' ||
         !Number.isFinite(Number(send.interval)) || Number(send.interval) < 0 || !['regular', 'commands'].includes(send.tab))
         throw new Error('发送模式、间隔或单位无效');
+    if (send.connectionSource !== 'primary' && !serialById.has(send.connectionSource)) throw new Error('发送目标连接无效');
     send.commands = widgetCommandUtils().normalizeCommands(send.commands);
     if (send.protocol !== undefined) send.protocol = (typeof module !== 'undefined' ? require('./protocolSendView') : globalThis.SerialPlotter).normalizeProtocolCommand(send.protocol);
     if (!globals.channelColors.length) {
@@ -318,7 +349,6 @@ function validateWorkspaceConfig(config) {
         !Number.isFinite(uiLayout.leftSplitRatio) || uiLayout.leftSplitRatio <= 0 || uiLayout.leftSplitRatio >= 1 ||
         !Number.isFinite(uiLayout.sendHeight) || uiLayout.sendHeight < 160 || uiLayout.sendHeight > 1e7)
         throw new Error('界面布局尺寸或收起状态无效');
-    const engineApi = typeof module !== 'undefined' ? require('./dataEngine') : globalThis.SerialPlotter;
     const migration = widgetSymbolUtils().migrateEngineSymbols(config.dataEngine);
     const dataEngine = engineApi.normalizeDataEngine(migration.settings, globals);
     if (send.protocol) send.protocol = widgetSymbolUtils().migrateCommandSymbols(send.protocol, migration.renamesByProtocol);
@@ -331,7 +361,6 @@ function validateWorkspaceConfig(config) {
         const renames = [...migration.renamesByProtocol.values()].flat();
         widget.settings.protocolFieldPaths = widget.settings.protocolFieldPaths.map(path => widgetSymbolUtils().migrateSymbolPath(path, renames));
     }
-    const serialSources = normalizeSerialSources(config.serialSources);
     if (serialSources.entries.some(entry => ids.has(entry.id))) throw new Error('串口来源与控件编号重复');
     return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine, serialSources };
 }
@@ -360,7 +389,7 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
 }
 
 const WidgetConfig = { GLOBAL_DEFAULTS, WAVE_DEFAULTS, BYTE_DEFAULTS,
-    isValidWidgetId, normalizeSerialSource, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
+    isValidWidgetId, normalizeSerialSource, serialSourceGlobals, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.WidgetConfig = WidgetConfig;
 if (typeof module !== 'undefined') module.exports = WidgetConfig;

@@ -32,6 +32,7 @@ class SerialSourceView {
                 option.textContent = label; node.append(option);
             }
             if (key === 'baudRate') node.inputMode = 'numeric';
+            if (key === 'timeOffsetMs') { node.type = 'number'; node.step = '1'; }
             if (key === 'name') node.maxLength = 80;
             node.addEventListener('change', () => this.onEdit(source, key, node.value));
             row.append(label, node); return { row, node };
@@ -45,11 +46,14 @@ class SerialSourceView {
         serialBits.append(data.row, stop.row); section.append(serialBits);
         const parity = field('parity', '奇偶校验', [['none', '无 (None)'], ['even', '偶校验 (Even)'], ['odd', '奇校验 (Odd)']]);
         section.append(parity.row);
+        const offset = field('timeOffsetMs', '接收时间对齐偏移（ms）');
+        offset.node.title = '近似对齐。以主连接为参考，正值后移，负值前移。';
+        section.append(offset.row);
         const status = document.createElement('span');
         status.id = id + '-status'; status.className = 'hint-text'; status.setAttribute('role', 'status');
         section.append(status); this.root.append(section); this.root.hidden = false;
         this.rows.set(id, { section, connect, remove, status,
-            inputs: { name: name.node, baudRate: baud.node, dataBits: data.node, stopBits: stop.node, parity: parity.node } });
+            inputs: { name: name.node, baudRate: baud.node, dataBits: data.node, stopBits: stop.node, parity: parity.node, timeOffsetMs: offset.node } });
         this.apply(source); this.refresh(source);
     }
 
@@ -64,10 +68,13 @@ class SerialSourceView {
         const { connected, pending, capture, error } = source;
         row.connect.textContent = connected ? '断开连接' : '连接';
         row.connect.disabled = pending; row.remove.disabled = connected || pending;
-        for (const [key, node] of Object.entries(row.inputs)) if (key !== 'name') node.disabled = connected || pending;
+        for (const [key, node] of Object.entries(row.inputs)) if (!['name', 'timeOffsetMs'].includes(key)) node.disabled = connected || pending;
         const state = pending ? '处理中…' : connected ? '已连接' : '已断开';
-        const current = state + ' · RX ' + capture.stats.rxBytes.toLocaleString() + ' B · 保留 ' +
-            capture.baseSource.frames.length.toLocaleString() + ' 条记录' + (error ? ' · ' + error : '');
+        const output = capture.dataEngine?.mode === 'Self_Defined_Frame' ? capture.dataEngine.recordsSource : capture.numericSource;
+        const parsed = capture.dataEngine?.mode === 'Raw_Data' ? '' : ' · 解析 ' + output.parser.frameCount.toLocaleString() +
+            ' 帧 / 错误 ' + output.parser.failCount.toLocaleString();
+        const current = state + ' · RX ' + capture.stats.rxBytes.toLocaleString() + ' B · TX ' + capture.stats.txBytes.toLocaleString() +
+            ' B · 保留 ' + capture.baseSource.frames.length.toLocaleString() + ' 条记录' + parsed + (error ? ' · ' + error : '');
         if (row.status.textContent !== current) row.status.textContent = current;
     }
 
