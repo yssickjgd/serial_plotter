@@ -160,6 +160,27 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     return result;
 }
 
+function normalizeSerialSource(input) {
+    if (!input || typeof input.id !== 'string' || !/^serial-(?:[2-9]|[1-9]\d+)$/.test(input.id))
+        throw new Error('串口来源编号无效');
+    const name = typeof input.name === 'string' ? input.name.trim() : '';
+    if (!name || name.length > 80) throw new Error('串口来源名称需为 1–80 个字符');
+    const baudRate = widgetConfigUtils.parseIntInRange(input.baudRate, 1, Number.MAX_SAFE_INTEGER, '波特率');
+    const dataBits = Number(input.dataBits), stopBits = Number(input.stopBits), parity = input.parity;
+    if (![7, 8].includes(dataBits) || ![1, 2].includes(stopBits) || !['none', 'even', 'odd'].includes(parity))
+        throw new Error('串口来源的串行参数无效');
+    return { id: input.id, name, baudRate, dataBits, stopBits, parity };
+}
+
+function normalizeSerialSources(input = { nextNumber: 2, entries: [] }) {
+    if (!input || !Array.isArray(input.entries) || !Number.isSafeInteger(input.nextNumber) || input.nextNumber < 2)
+        throw new Error('串口来源配置无效');
+    const entries = input.entries.map(normalizeSerialSource), ids = new Set(entries.map(entry => entry.id));
+    if (ids.size !== entries.length || entries.some(entry => Number(entry.id.slice(7)) >= input.nextNumber))
+        throw new Error('串口来源编号重复或超出分配范围');
+    return { nextNumber: input.nextNumber, entries };
+}
+
 function validateWorkspaceConfig(config) {
     if (!config || ![2, 3].includes(config.version) || !config.global || typeof config.global !== 'object' ||
         Array.isArray(config.global) || !Array.isArray(config.widgets))
@@ -310,7 +331,9 @@ function validateWorkspaceConfig(config) {
         const renames = [...migration.renamesByProtocol.values()].flat();
         widget.settings.protocolFieldPaths = widget.settings.protocolFieldPaths.map(path => widgetSymbolUtils().migrateSymbolPath(path, renames));
     }
-    return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine };
+    const serialSources = normalizeSerialSources(config.serialSources);
+    if (serialSources.entries.some(entry => ids.has(entry.id))) throw new Error('串口来源与控件编号重复');
+    return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine, serialSources };
 }
 
 function migrateWorkspaceConfig(legacy, legacyLayout) {
@@ -337,7 +360,7 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
 }
 
 const WidgetConfig = { GLOBAL_DEFAULTS, WAVE_DEFAULTS, BYTE_DEFAULTS,
-    isValidWidgetId, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
+    isValidWidgetId, normalizeSerialSource, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.WidgetConfig = WidgetConfig;
 if (typeof module !== 'undefined') module.exports = WidgetConfig;

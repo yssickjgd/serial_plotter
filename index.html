@@ -91,6 +91,8 @@
                             <p class="hint-text">需预先启动 <code>node bridge.js</code> 辅助代理。</p>
                         </div>
                         <div class="status-text" id="connection-status">Ready.</div>
+                        <button id="serial-source-add" class="btn btn-secondary" type="button">添加串口</button>
+                        <div id="serial-source-list" class="sidebar-stack" hidden></div>
                     </div>
 
                     <div class="control-group" id="board-toolbar" aria-label="缓冲区设置">
@@ -830,6 +832,7 @@
     <script src="historyWorkers.js"></script>
     <script src="textHistory.js"></script>
     <script src="serialEngine.js"></script>
+    <script src="serialSourceView.js"></script>
     <script src="netEngine.js"></script>
     <script src="sendController.js"></script>
     <script src="monitorWorkspace.js"></script>

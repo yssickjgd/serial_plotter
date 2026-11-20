@@ -11,6 +11,9 @@ async function startSerialPlotterApplication() {
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
     let boundExportSourceId = null, boundExportFormat = null, bindingExport = false;
     let activeEngine = null, connecting = false, widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
+    const serialSources = new Map();
+    let nextSerialSourceNumber = 2;
+    const captureQuota = (global, count) => Math.floor(Number(global.captureMemoryMiB) * 1048576 / (count + 1));
     let previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: 0 };
     const listen = (target, name, fn) => { target?.addEventListener(name, fn); cleanups.push(() => target?.removeEventListener(name, fn)); };
     const status = (id, message) => { const node = el(id); if (node) { node.textContent = message; node.hidden = !message; } };
@@ -19,7 +22,7 @@ async function startSerialPlotterApplication() {
     let storageBlocked = false, storageLoadError = null, storageWarnings = 0, configRevision = 0;
     const validateStoredConfig = (candidate, layout) => {
         const config = S.WidgetConfig.migrateWorkspaceConfig(candidate, layout);
-        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: config.global.captureMemoryMiB * 1048576 });
+        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: captureQuota(config.global, config.serialSources.entries.length) });
         return config;
     };
     const workspaceStorage = new S.WorkspaceStorage({ indexedDB: globalThis.indexedDB, localStorage: globalThis.localStorage,
@@ -105,7 +108,7 @@ async function startSerialPlotterApplication() {
         });
     }
     const service = new S.CaptureService({ capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes,
-        memoryLimitBytes: Number(globals.captureMemoryMiB) * 1048576,
+        memoryLimitBytes: captureQuota(globals, initial.serialSources.entries.length),
         rebuildHistory: globals.rebuildHistory, numericFormat: { ...globals, ...initial.dataEngine.array }, channelNames: globals.channelNames, channelDefinitions: globals.channelDefinitions,
         onChange(source, { pendingRaw = false } = {}) {
             if (disposed) return;
@@ -118,7 +121,7 @@ async function startSerialPlotterApplication() {
         onMemoryPressure(state) {
             tools?.invalidate();
             if (state.blocked) setPaused(true);
-            updateMemoryStatus(state); scheduleSourceUi();
+            updateMemoryStatus(); scheduleSourceUi();
         },
         onError(error, source) {
             if (error.bytes) widgets?.appendExtra(error, source);
@@ -128,6 +131,108 @@ async function startSerialPlotterApplication() {
     });
     const dataEngine = new S.DataEngine(service, initial.dataEngine, globals, { onProgress: showProgress });
     const serialAdapter = new S.SerialEngine(), netAdapter = new S.NetEngine();
+    const serialSourceView = new S.SerialSourceView(el('serial-source-list'), {
+        onConnect: source => { void toggleAdditionalSerial(source); },
+        onRemove(source) {
+            if (source.connected || source.pending) return;
+            if (source.capture.history.endByte > source.capture.history.startByte &&
+                !window.confirm('删除「' + source.settings.name + '」及其接收记录？')) return;
+            dropSerialSource(source); applyCaptureQuotas(); syncExportSources(); saveSoon();
+        },
+        onEdit(source, key, value) {
+            if (key !== 'name' && (source.connected || source.pending)) return;
+            try {
+                source.settings = S.WidgetConfig.normalizeSerialSource({ ...source.settings, [key]: value });
+                source.error = ''; syncExportSources(); saveSoon();
+            } catch (error) { source.error = error.message; }
+            serialSourceView.apply(source); serialSourceView.refresh(source);
+        }
+    });
+    function applyCaptureQuotas() {
+        const limit = captureQuota(globals, serialSources.size);
+        if (service.memory.limitBytes !== limit) service.setMemoryLimit(limit);
+        for (const { capture } of serialSources.values()) if (capture.memory.limitBytes !== limit) capture.setMemoryLimit(limit);
+    }
+    function createSerialSource(settings, limit, rawIdleGapSeconds) {
+        const adapter = new S.SerialEngine();
+        const capture = new S.CaptureService({
+            rawOnly: true, rawIdleGapSeconds, workerPool: service.workerPool, ownsWorkerPool: false,
+            capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes, memoryLimitBytes: limit,
+            rebuildHistory: globals.rebuildHistory,
+            onChange: scheduleSourceUi,
+            onMemoryPressure(state) {
+                if (state.blocked) source.error = state.blockedReason;
+                serialSourceView.refresh(source); scheduleSourceUi();
+            }
+        });
+        const source = { settings, adapter, capture, connected: false, pending: false, error: '' };
+        serialSources.set(settings.id, source);
+        capture.pause(service.paused);
+        adapter.onData((bytes, stamp) => capture.receive(bytes, stamp));
+        adapter.onStatusChange((connected, error) => {
+            if (disposed || serialSources.get(settings.id) !== source) return;
+            if (!connected) capture.endStream();
+            source.connected = connected;
+            source.error = error?.message ?? '';
+            serialSourceView.refresh(source); scheduleSourceUi();
+        });
+        serialSourceView.add(source);
+        return source;
+    }
+    async function toggleAdditionalSerial(source) {
+        if (source.pending || disposed) return;
+        source.pending = true; source.error = ''; serialSourceView.refresh(source);
+        try {
+            if (source.connected) await source.adapter.disconnect();
+            else await source.adapter.connect(source.settings);
+        } catch (error) {
+            if (error.name !== 'AbortError') source.error = '连接失败：' + error.message;
+        } finally {
+            source.pending = false; serialSourceView.refresh(source); scheduleSourceUi();
+        }
+    }
+    function dropSerialSource(source) {
+        const { id } = source.settings;
+        serialSources.delete(id); serialSourceView.remove(id);
+        source.capture.dispose(); void source.adapter.dispose();
+    }
+    function installSerialSources(config, rawTimeout) {
+        nextSerialSourceNumber = config.nextNumber;
+        const ids = new Set(config.entries.map(entry => entry.id));
+        const limit = captureQuota(globals, ids.size);
+        for (const source of serialSources.values()) if (!ids.has(source.settings.id)) dropSerialSource(source);
+        for (const settings of config.entries) {
+            const source = serialSources.get(settings.id);
+            if (!source) createSerialSource(settings, limit, rawTimeout / 1000);
+            else {
+                const previous = source.settings;
+                source.settings = settings;
+                serialSourceView.apply(source);
+                if (['baudRate', 'dataBits', 'stopBits', 'parity'].some(key => previous[key] !== settings[key]))
+                    void source.adapter.disconnect();
+                const { capture } = source;
+                capture.rebuildHistory = globals.rebuildHistory;
+                capture.setCapacity(Number(globals.maxPoints));
+                void capture.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+                void capture.setRawIdleFraming(rawTimeout / 1000);
+            }
+        }
+        applyCaptureQuotas();
+    }
+    listen(el('serial-source-add'), 'click', () => {
+        let number = nextSerialSourceNumber;
+        while (Number.isSafeInteger(number + 1) && widgets.widgets.has('serial-' + number)) number++;
+        try {
+            if (!Number.isSafeInteger(number + 1)) throw new Error('串口来源编号已达上限');
+            const limit = captureQuota(globals, serialSources.size + 1);
+            S.preflightDataEngine(dataEngine.serialize(), globals, { memoryLimitBytes: limit });
+            const settings = S.WidgetConfig.normalizeSerialSource({ id: 'serial-' + number, name: '串口 ' + number,
+                baudRate: globals.serialBaud, dataBits: globals.serialData, stopBits: globals.serialStop, parity: globals.serialParity });
+            createSerialSource(settings, limit, dataEngine.config.rawIdleTimeouts.Raw_Data / 1000);
+            nextSerialSourceNumber = number + 1;
+            applyCaptureQuotas(); syncExportSources(); saveSoon();
+        } catch (error) { status('connection-status', error.message); }
+    });
     const workspace = new S.WidgetWorkspace({ document, window, viewport: el('workspace-viewport'), surface: el('workspace-surface'),
         step: initial.workspace.step, zoom: initial.workspace.zoom,
         onZoomChange: zoom => {
@@ -168,7 +273,13 @@ async function startSerialPlotterApplication() {
             return references;
         },
         onLayout: syncEngineSplit,
-        onApply() { tools?.invalidate(); rates.clear(); syncExportSources(); regularProtocolView.refresh(); commandView.render(); } });
+        onApply() {
+            for (const { capture } of serialSources.values()) {
+                capture.rebuildHistory = globals.rebuildHistory;
+                void capture.setRawIdleFraming(dataEngine.config.rawIdleTimeouts.Raw_Data / 1000);
+            }
+            tools?.invalidate(); rates.clear(); syncExportSources(); regularProtocolView.refresh(); commandView.render();
+        } });
     tools = new S.WorkspaceTools({ document, service, getWidgets: () => widgets.widgets,
         getActiveWidget: () => widgets.active,
         getChannelNames: () => globals.channelNames, onStateChange: saveSoon });
@@ -194,10 +305,13 @@ async function startSerialPlotterApplication() {
             }
             item.aliases.push(widget.id); item.associated.push(widget.title);
         }
+        for (const { settings, capture } of serialSources.values())
+            items.push({ id: settings.id, title: settings.name + ' · 原始记录', source: capture.baseSource, capture, aliases: [settings.id], associated: [] });
         return items;
     }
+    function rawExportCapture() { return exportRecordSource?.capture ?? service; }
     function rawExportSource() {
-        if (el('export-direction').value === 'tx') return service.baseSource;
+        if (el('export-direction').value === 'tx') return rawExportCapture().baseSource;
         return exportRecordSource?.source ?? null;
     }
     function saveExportProfile() {
@@ -274,13 +388,13 @@ async function startSerialPlotterApplication() {
     }
     function syncExportAvailability() {
         if (!exportView || !widgets || disposed) return;
-        const source = rawExportSource(), direction = el('export-direction').value, tx = service.txFrames;
+        const source = rawExportSource(), direction = el('export-direction').value, tx = rawExportCapture().txFrames;
         const rxCount = direction !== 'tx' ? source?.frames.length ?? 0 : 0, txCount = direction !== 'rx' ? tx.length : 0;
         const rawIssue = !source ? '请重新选择记录范围。' : direction !== 'tx' && source.rebuilding ? '所选来源正在准备历史。'
             : !rxCount && !txCount ? '所选缓冲区没有可导出的记录。' : '';
         exportView.sync({ busy: exporting, available: !rawIssue });
         el('export-source').disabled = exporting;
-        el('wrap-export-source').hidden = direction === 'tx';
+        el('wrap-export-source').hidden = direction === 'tx' && !serialSources.size;
         const buffers = source ? [direction !== 'tx' && source.frames, direction !== 'rx' && tx].filter(Boolean) : [];
         const byteCount = buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, 0);
         el('export-range-summary').textContent = source ? 'RX ' + rxCount + '，TX ' + txCount + ' 帧，原始字节 ' + byteCount.toLocaleString() + ' B。\n' +
@@ -375,13 +489,13 @@ async function startSerialPlotterApplication() {
     }
     async function exportData() {
         if (exporting || disposed) return false;
-        const options = exportView.read(), source = rawExportSource(), tx = service.txFrames;
+        const options = exportView.read(), capture = rawExportCapture(), source = rawExportSource(), tx = capture.txFrames;
         if (!source || options.direction !== 'tx' && source.rebuilding) return false;
         const sources = [options.direction !== 'tx' && source.frames, options.direction !== 'rx' && tx].filter(Boolean);
         if (!sources.some(buffer => buffer.length)) return false;
         const generation = source.generation;
-        const check = exportCheck(sources, () => exportFormat === options.format && (options.direction === 'tx' ||
-            rawExportSource() === source && source.generation === generation && service.sources.has(source)));
+        const check = exportCheck(sources, () => exportFormat === options.format && rawExportCapture() === capture && (options.direction === 'tx' ||
+            rawExportSource() === source && source.generation === generation && capture.sources.has(source)));
         return writeExport(exportView, options, sources, check, S.captureExportChunks(source.frames, tx, options));
     }
     async function exportWidgetData() {
@@ -414,6 +528,7 @@ async function startSerialPlotterApplication() {
     function syncConnection() {
         el('config-serial').hidden = globals.connType !== 'serial'; el('config-net').hidden = globals.connType === 'serial';
         el('wrap-local-port').hidden = globals.connType !== 'udp';
+        el('serial-source-add').hidden = globals.connType !== 'serial';
         for (const id of ['config-serial', 'config-net', 'wrap-local-port']) el(id).style.display = el(id).hidden ? 'none' : '';
         for (const id of Object.values(connectionIds)) el(id).disabled = connecting || Boolean(activeEngine);
         el('connection-indicator').classList.toggle('connected', Boolean(activeEngine));
@@ -437,14 +552,24 @@ async function startSerialPlotterApplication() {
         ['captureMemoryMiB', 'capture-memory-mib']]) listen(el(id), 'change', () => {
         const candidate = getConfig(); candidate.global[key] = key === 'maxPoints' ? el(id).value : Number(el(id).value);
         try {
-            const validated = S.WidgetConfig.validateWorkspaceConfig(candidate); Object.assign(globals, validated.global);
-            if (key === 'maxPoints') { service.setCapacity(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints)); }
+            const validated = S.WidgetConfig.validateWorkspaceConfig(candidate);
+            if (key === 'captureMemoryMiB' && serialSources.size)
+                S.preflightDataEngine(validated.dataEngine, validated.global, { memoryLimitBytes: captureQuota(validated.global, serialSources.size) });
+            Object.assign(globals, validated.global);
+            if (key === 'maxPoints') {
+                service.setCapacity(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints));
+                for (const { capture } of serialSources.values()) capture.setCapacity(Number(globals.maxPoints));
+            }
             else if (key === 'maxRawFrameBytes') {
                 void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+                for (const { capture } of serialSources.values()) {
+                    capture.rebuildHistory = globals.rebuildHistory;
+                    void capture.setMaxRawFrameBytes(globals.maxRawFrameBytes);
+                }
                 widgets.syncByteRecordRule();
                 status('engine-raw-limit-status', '');
             }
-            else service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
+            else applyCaptureQuotas();
             updateMemoryStatus();
             tools.invalidate(); saveSoon(); status('cfg-save-status', '');
         } catch (error) {
@@ -510,7 +635,7 @@ async function startSerialPlotterApplication() {
     listen(el('send-mode'), 'change', syncProtocolSend);
     for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) listen(el(id), 'change', saveSoon);
     for (const adapter of [serialAdapter, netAdapter]) {
-        adapter.onData(bytes => service.receive(bytes));
+        adapter.onData((bytes, stamp) => service.receive(bytes, stamp));
         adapter.onStatusChange((connected, error) => {
             if (disposed) return;
             if (connected) activeEngine = adapter;
@@ -538,6 +663,7 @@ async function startSerialPlotterApplication() {
     });
     function setPaused(paused) {
         service.pause(paused);
+        for (const { capture } of serialSources.values()) capture.pause(paused);
         if (service.paused) tools.invalidate(); else tools.resetNavigation();
         widgets.setPaused(service.paused); tools.syncPaused();
         for (const widget of widgets.widgets.values()) { widget.view.draw?.(); widget.view.render?.(); }
@@ -553,14 +679,22 @@ async function startSerialPlotterApplication() {
         setPaused(!service.paused);
     });
     listen(el('btn-clear'), 'click', () => {
-        service.clear(); tools.invalidate(); rates.clear(); draws.clear();
+        service.clear();
+        for (const { capture } of serialSources.values()) capture.clear();
+        tools.invalidate(); rates.clear(); draws.clear();
         for (const widget of widgets.widgets.values()) widget.view.clear();
         previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: service.epoch };
         for (const row of progressRows.values()) row.remove(); progressRows.clear();
         el('history-rebuild-progress').hidden = true; tools.syncPaused(); updateStats(); syncExportAvailability();
     });
-    function updateMemoryStatus(state = service.memoryUsage()) {
-        const used = (state.usedBytes / 1048576).toFixed(1), limit = Math.round(state.limitBytes / 1048576);
+    function updateMemoryStatus() {
+        const state = service.memoryUsage();
+        for (const { capture } of serialSources.values()) {
+            const other = capture.memoryUsage();
+            state.usedBytes += other.usedBytes; state.evictedFrames += other.evictedFrames;
+            state.blockedReason ||= other.blockedReason;
+        }
+        const used = (state.usedBytes / 1048576).toFixed(1), limit = Number(globals.captureMemoryMiB);
         let message = `采集估算：${used} / ${limit} MiB`;
         if (state.evictedFrames) message += `；已按预算淘汰 ${state.evictedFrames.toLocaleString()} 条来源记录`;
         if (state.blockedReason) message += '；' + state.blockedReason;
@@ -568,7 +702,9 @@ async function startSerialPlotterApplication() {
     }
     function updateStats() {
         if (disposed) return;
-        service.memory.enforce(); updateMemoryStatus();
+        service.memory.enforce();
+        for (const source of serialSources.values()) { source.capture.memory.enforce(); serialSourceView.refresh(source); }
+        updateMemoryStatus();
         const now = performance.now(), elapsed = Math.max(0.001, (now - previousStats.time) / 1000);
         const sameEpoch = previousStats.epoch === service.epoch;
         const rxRate = sameEpoch ? Math.max(0, service.stats.rxBytes - previousStats.rx) / elapsed : 0;
@@ -617,13 +753,15 @@ async function startSerialPlotterApplication() {
         saveExportProfile(); saveWidgetExportProfile();
         return { version: 3, global: { ...globals, channelNames: [...globals.channelNames], channelRecords: widgets.getChannelRegistry().toJSON() }, widgets: widgets.serialize(),
             workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
-            dataEngine: dataEngine.serialize(),
+            dataEngine: dataEngine.serialize(), serialSources: { nextNumber: nextSerialSourceNumber,
+                entries: [...serialSources.values()].map(source => ({ ...source.settings })) },
             tools: { ...tools.serialize(), exportSourceId: exportRecordSourceId, exportRecordSourceId, exportFormat, widgetExport,
                 exportProfiles: JSON.parse(JSON.stringify(exportProfiles)) },
             send: { mode: el('send-mode').value, interval: el('send-interval').value, unit: el('send-interval-unit').value,
                 tab: sendTab, protocol: regularProtocolView.getDraft(), commands: commandLibrary.serialize() } };
     }
     function installWidgets(config) {
+        installSerialSources(config.serialSources, config.dataEngine.rawIdleTimeouts.Raw_Data);
         exportProfiles = config.tools.exportProfiles; boundExportSourceId = null;
         exportFormat = bufferFormat(config.tools.exportFormat);
         exportRecordSourceId = bufferSourceId(config.tools.exportRecordSourceId); exportRecordSource = null;
@@ -640,18 +778,18 @@ async function startSerialPlotterApplication() {
         commandLibrary.replace(config.send.commands); commandView.selectedId = null; commandView.render();
         commandView.error.hidden = true; commandView.status.textContent = '拖动排序，名称直接修改';
         setSendTab(config.send.tab, false);
-        widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout);
+        widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout); syncExportSources();
     }
     function applyConfig(input) {
         const config = S.WidgetConfig.migrateWorkspaceConfig(input);
-        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: config.global.captureMemoryMiB * 1048576 });
+        S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes: captureQuota(config.global, config.serialSources.entries.length) });
         const wasRestoring = restoring, revision = ++importRevision; restoring = true;
         try {
             tools.invalidate();
             sendController.stop(); commandRunner.stop();
             for (const id of [...widgets.widgets.keys()]) widgets.remove(id);
             Object.assign(globals, config.global); service.rebuildHistory = globals.rebuildHistory;
-            service.setMemoryLimit(Number(globals.captureMemoryMiB) * 1048576);
+            service.setMemoryLimit(captureQuota(globals, config.serialSources.entries.length));
             // Install validated definitions against the incoming raw count atomically.
             service.channelDefinitions = globals.channelDefinitions; service.channelNames = globals.channelNames; widgets.channelRegistry = null;
             service.setCapacity(Number(globals.maxPoints)); void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
@@ -861,7 +999,9 @@ async function startSerialPlotterApplication() {
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
         clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose(); widgetExportView.dispose();
-        engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose(); service.dispose();
+        engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose();
+        for (const source of serialSources.values()) dropSerialSource(source);
+        service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
         for (const adapter of [serialAdapter, netAdapter]) {
             adapter.onData(null); adapter.onStatusChange(null);
@@ -871,7 +1011,7 @@ async function startSerialPlotterApplication() {
     }
     installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
     const statsTimer = setInterval(updateStats, 1000);
-    S.application = { service, widgets, workspace, tools, serialAdapter, netAdapter, sendController,
+    S.application = { service, widgets, workspace, tools, serialAdapter, serialSources, netAdapter, sendController,
         protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, exportWidgetData, updateStats,
         dataEngine, engineView, workspaceStorage, saveNow, saveSoon, flushConfig };
     listen(window, 'pagehide', dispose);

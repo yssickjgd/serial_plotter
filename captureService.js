@@ -27,6 +27,8 @@ class CaptureService {
         this.onMemoryPressure = options.onMemoryPressure ?? (() => {});
         this.history = new CaptureHistory();
         this.workerPool = options.workerPool ?? new HistoryWorkerPool(options.workerOptions);
+        this.ownsWorkerPool = options.ownsWorkerPool !== false;
+        this.rawIdleGapSeconds = options.rawIdleGapSeconds;
         this.sources = new Set();
         this.sourceKeys = new Map();
         this.textStats = new Map();
@@ -44,7 +46,7 @@ class CaptureService {
         numeric.isLittleEndian ??= numeric.endianness !== 'big';
         this.catalogCount = Math.max(Number(numeric.channelsCount), Number(options.catalogCount ?? numeric.catalogCount ?? numeric.channelsCount));
         numeric.catalogCount = this.catalogCount;
-        this.numericSource = this._createSource(numeric, true, 'numeric', 0);
+        this.numericSource = options.rawOnly ? null : this._createSource(numeric, true, 'numeric', 0);
         const baseFormat = this._rawFormat({ captureMode: 'hex' });
         const baseKey = this._sourceKey(baseFormat, true);
         this.baseSource = this._createSource(baseFormat, true, baseKey, 0);
@@ -621,7 +623,7 @@ class CaptureService {
         this.txFrames.clear();
         this.stats.rxBytes = 0; this.stats.txBytes = 0;
         this.sourceKeys.clear();
-        this.workerPool.clearFftCache?.();
+        if (this.ownsWorkerPool) this.workerPool.clearFftCache?.();
         this.memory.reset();
         this.dataEngine?.clear();
         for (const source of this.sources) {
@@ -643,7 +645,7 @@ class CaptureService {
         }
         this.history.clear(); this.txFrames.clear();
         this.sources.clear(); this.sourceKeys.clear(); this.textStats.clear();
-        this.workerPool.dispose();
+        if (this.ownsWorkerPool) this.workerPool.dispose();
     }
 }
 

@@ -143,3 +143,54 @@ test('disconnect before any connection does not prevent a later connection from 
     assert.equal(closed, 1);
     assert.equal(engine.port, null);
 });
+
+test('independent connections isolate bytes and disconnect events and reject a duplicate physical port', async () => {
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    function createPort() {
+        let finishRead;
+        const port = {
+            options: null, closed: 0,
+            open: async options => { port.options = options; },
+            close: async () => { port.closed++; },
+            readable: { getReader() {
+                let currentRead;
+                return {
+                    read: () => new Promise(resolve => { finishRead = currentRead = resolve; }),
+                    releaseLock() {}, cancel: async () => { currentRead?.({ done: true }); }
+                };
+            } },
+            receive: byte => finishRead({ value: Uint8Array.of(byte), done: false })
+        };
+        return port;
+    }
+    const a = createPort(), b = createPort(), requests = [a, a, b];
+    const handlers = new Set();
+    const serial = { requestPort: async () => requests.shift(),
+        addEventListener: (_type, callback) => handlers.add(callback),
+        removeEventListener: (_type, callback) => handlers.delete(callback) };
+    const Engine = vm.runInNewContext(`${source}\nSerialEngine`, {
+        navigator: { serial }, performance: { now: () => 10.25 }
+    });
+    const first = new Engine(), second = new Engine(), received = [[], []];
+    try {
+        first.onData((bytes, stamp) => received[0].push([bytes[0], stamp?.arrival]));
+        second.onData((bytes, stamp) => received[1].push([bytes[0], stamp?.arrival]));
+        await first.connect({ baudRate: 2_000_000 });
+        await assert.rejects(second.connect({}), /串口已被另一数据来源打开/);
+        await second.connect({ baudRate: 115200 });
+        a.receive(11); b.receive(22);
+        await new Promise(resolve => setImmediate(resolve));
+        for (const callback of handlers) callback({ target: a });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(first.port, null);
+        assert.equal(second.port, b);
+        b.receive(33);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(received, [[[11, 10.25]], [[22, 10.25], [33, 10.25]]]);
+        assert.equal(a.options.baudRate, 2_000_000);
+        assert.equal(b.options.baudRate, 115200);
+        assert.equal(a.closed, 1);
+        assert.equal(b.closed, 0);
+    } finally { await Promise.all([first.dispose(), second.dispose()]); }
+    assert.equal(handlers.size, 0);
+});

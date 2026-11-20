@@ -11,6 +11,8 @@
  *    4. 数据传输（send、readLoop）
  * ═══════════════════════════════════════════════════════════════ */
 
+const serialPortOwners = new WeakMap();
+
 class SerialEngine {
     /** 初始化端口/读取器状态、回调指针，注册浏览器串口断开事件 */
     constructor() {
@@ -20,23 +22,28 @@ class SerialEngine {
         this.readTask = null;
         this._closing = null;
         this._connected = false;
+        this._opening = false;
+        this._serial = null;
         this._generation = 0;
         this._disposed = false;
         this.onDataCallback = null;
         this.onConnectStatusChange = null;
         this._onSerialDisconnect = (event) => {
-            if (!this.port) return;
-            if (this.port && event && event.port && event.port !== this.port) return;
-            void this._handlePortDisconnect();
+            if (this.port && (event?.port ?? event?.target) === this.port) void this._handlePortDisconnect();
         };
-        if (typeof navigator !== 'undefined' && navigator.serial && navigator.serial.addEventListener) {
-            navigator.serial.addEventListener('disconnect', this._onSerialDisconnect);
-        }
+        this._listenToSerial(globalThis.navigator?.serial);
+    }
+
+    _listenToSerial(serial) {
+        if (serial === this._serial) return;
+        this._serial?.removeEventListener?.('disconnect', this._onSerialDisconnect);
+        this._serial = serial;
+        serial?.addEventListener?.('disconnect', this._onSerialDisconnect);
     }
 
     /* ── 回调注册 ── */
 
-    /** 注册数据到达回调 callback(Uint8Array) */
+    /** 注册数据到达回调 callback(Uint8Array, { arrival, timestamp }) */
     onData(callback) { this.onDataCallback = callback; }
 
     /** 注册连接状态变化回调 callback(connected: boolean, error?: Error) */
@@ -47,16 +54,22 @@ class SerialEngine {
     /** 请求用户选择串口并打开，成功后启动 readLoop 持续读取 */
     async connect(config) {
         if (this._disposed) throw new Error('串口适配器已销毁');
-        if (!('serial' in navigator)) {
-            throw new Error('当前浏览器不支持 Web Serial API');
-        }
+        const serial = globalThis.navigator?.serial;
+        if (!serial) throw new Error('当前浏览器不支持 Web Serial API');
+        if (this._opening || this._closing || this.port) throw new Error('此数据来源已有串口正在连接或已连接');
+        this._listenToSerial(serial);
+        this._opening = true;
         const generation = ++this._generation;
         const cancelled = () => {
             const error = new Error('串口连接已取消'); error.name = 'AbortError'; return error;
         };
+        let reservedPort;
         try {
-            const port = await navigator.serial.requestPort();
+            const port = await serial.requestPort();
             if (generation !== this._generation || this._disposed) throw cancelled();
+            if (serialPortOwners.has(port)) throw new Error('该串口已被另一数据来源打开或正在连接');
+            serialPortOwners.set(port, this);
+            reservedPort = port;
             await port.open({
                 baudRate: config.baudRate || 115200,
                 dataBits: config.dataBits || 8,
@@ -67,7 +80,7 @@ class SerialEngine {
                 bufferSize: 64 * 1024
             });
             if (generation !== this._generation || this._disposed) {
-                try { await port.close(); } catch { /* The cancelled port must never become active. */ }
+                await this._closePort(port);
                 throw cancelled();
             }
             this.port = port;
@@ -76,10 +89,17 @@ class SerialEngine {
             this._connected = true;
             if (this.onConnectStatusChange) this.onConnectStatusChange(true);
             return true;
-        } catch (error) {
-            if (generation === this._generation) this.port = null;
-            throw error;
+        } finally {
+            if (reservedPort && this.port !== reservedPort && serialPortOwners.get(reservedPort) === this)
+                serialPortOwners.delete(reservedPort);
+            this._opening = false;
         }
+    }
+
+    async _closePort(port) {
+        if (!port) return;
+        try { await port.close(); } catch { /* A disconnected physical port can already be closed. */ }
+        finally { if (serialPortOwners.get(port) === this) serialPortOwners.delete(port); }
     }
 
     /** 安全断开串口：取消读取 → 释放读取器 → 关闭端口 → 通知状态 */
@@ -90,7 +110,7 @@ class SerialEngine {
             this.keepReading = false;
             try { if (this.reader) await this.reader.cancel(); } catch (_) {}
             try { if (this.readTask) await this.readTask; } catch (_) {}
-            try { if (this.port) await this.port.close(); } catch (_) {}
+            await this._closePort(this.port);
             this.port = null;
             this.readTask = null;
             if (this._connected) {
@@ -105,7 +125,7 @@ class SerialEngine {
 
     async dispose() {
         this._disposed = true;
-        navigator.serial?.removeEventListener?.('disconnect', this._onSerialDisconnect);
+        this._listenToSerial(null);
         this.onDataCallback = null;
         this.onConnectStatusChange = null;
         await this.disconnect();
@@ -154,7 +174,10 @@ class SerialEngine {
                         }
                         break;
                     }
-                    if (value && this.onDataCallback) this.onDataCallback(value);
+                    if (value && this.onDataCallback) {
+                        const timestamp = Date.now(), arrival = globalThis.performance?.now() ?? timestamp;
+                        this.onDataCallback(value, { timestamp, arrival });
+                    }
                 }
             } catch (error) {
                 if (this.keepReading) {
@@ -168,7 +191,7 @@ class SerialEngine {
             }
         }
         if (failed) {
-            try { if (this.port) await this.port.close(); } catch (_) {}
+            await this._closePort(this.port);
             this.port = null;
             if (this._connected) {
                 this._connected = false;

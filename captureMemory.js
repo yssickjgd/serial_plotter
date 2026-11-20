@@ -16,8 +16,10 @@ class CaptureMemoryBudget {
         if (!Number.isSafeInteger(bytes) || bytes < 1) throw new RangeError('内存预算必须为正整数字节数');
         this.limitBytes = bytes;
         this.blockedReason = '';
-        this.service.workerPool.setWorkerLimit?.(Math.max(1, Math.floor(bytes / (32 * 1048576))));
-        this.service.workerPool.setFftCacheLimit?.(Math.min(64 * 1048576, Math.floor(bytes / 8)));
+        if (this.service.ownsWorkerPool !== false) {
+            this.service.workerPool.setWorkerLimit?.(Math.max(1, Math.floor(bytes / (32 * 1048576))));
+            this.service.workerPool.setFftCacheLimit?.(Math.min(64 * 1048576, Math.floor(bytes / 8)));
+        }
         if (this.service.dataEngine?.recordsSource) this.service.dataEngine.recordsSource.parser.maxDecodedFields =
             Math.max(1, Math.min(32768, Math.floor(bytes / 2048)));
         if (trim) this.enforce();
@@ -41,10 +43,10 @@ class CaptureMemoryBudget {
             // Replay errors and worker input/output coexist with the original retained buffers.
             if (source.replayStorage) usedBytes += source.replayStorage.errorMemoryBytes;
         }
-        usedBytes += (service.workerPool.workerCount ?? 0) * 4 * 1048576;
-        usedBytes += service.workerPool.fftCacheBytes ?? 0;
+        const ownsPool = service.ownsWorkerPool !== false;
+        if (ownsPool) usedBytes += (service.workerPool.workerCount ?? 0) * 4 * 1048576 + (service.workerPool.fftCacheBytes ?? 0);
         usedBytes += service.dataEngine?.estimatedMemoryBytes ?? 0;
-        for (const job of service.workerPool.jobs ?? []) {
+        for (const job of (ownsPool ? service.workerPool.jobs : null) ?? []) {
             const task = job.task;
             usedBytes += (task?.values?.byteLength ?? task?.bytes?.byteLength ?? 0) * 4;
             for (const part of task?.parts ?? []) usedBytes += part.byteLength * 2;
@@ -142,7 +144,7 @@ class CaptureMemoryBudget {
         this.trimming = true;
         try {
             let state = this.measure(), removed = 0;
-            if (state.usedBytes + extra > this.limitBytes && this.service.workerPool.fftCacheBytes) {
+            if (state.usedBytes + extra > this.limitBytes && this.service.ownsWorkerPool !== false && this.service.workerPool.fftCacheBytes) {
                 this.service.workerPool.clearFftCache(); state = this.measure();
             }
             if (state.usedBytes + extra > this.limitBytes && this.service.dataEngine?.cache.size) {
@@ -171,7 +173,7 @@ class CaptureMemoryBudget {
             }
             if (removed) {
                 this.evictions++; this.evictedFrames += removed;
-                this.service.workerPool.clearFftCache?.();
+                if (this.service.ownsWorkerPool !== false) this.service.workerPool.clearFftCache?.();
                 this.service._safeNotify(this.service.onChange, null);
                 state = this.measure();
                 this.service._safeNotify(this.service.onMemoryPressure, state);
