@@ -11,6 +11,27 @@ test('unsupported Web Serial is reported to the caller without showing UI in the
     await assert.rejects(new SerialEngine().connect({}), /不支持 Web Serial/);
 });
 
+test('high-speed serial opens with enough receive space for a delayed browser read', async () => {
+    let options;
+    const port = {
+        open: async config => { options = config; },
+        close: async () => {},
+        readable: { getReader: () => ({
+            read: async () => ({ done: true }), releaseLock() {}, cancel: async () => {}
+        }) }
+    };
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const SerialEngine = vm.runInNewContext(`${source}\nSerialEngine`, {
+        navigator: { serial: { requestPort: async () => port } }
+    });
+    const engine = new SerialEngine();
+    await engine.connect({ baudRate: 2_000_000, dataBits: 8, stopBits: 1, parity: 'none' });
+    assert.equal(options.baudRate, 2_000_000);
+    assert.ok(options.bufferSize >= 2_000_000 / 10 * 0.25,
+        'the browser buffer can hold at least 250 ms of 8N1 traffic at 2 Mbaud');
+    await engine.disconnect();
+});
+
 test('disconnect cancels and releases the reader before closing the port', async () => {
     const calls = [];
     let finishRead;

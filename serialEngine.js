@@ -61,7 +61,10 @@ class SerialEngine {
                 baudRate: config.baudRate || 115200,
                 dataBits: config.dataBits || 8,
                 stopBits: config.stopBits || 1,
-                parity:   config.parity   || 'none'
+                parity:   config.parity   || 'none',
+                // At 2 Mbaud (8N1), the default 255 bytes cover only 1.3 ms.
+                // Leave room for reads delayed by rendering and page scheduling.
+                bufferSize: 64 * 1024
             });
             if (generation !== this._generation || this._disposed) {
                 try { await port.close(); } catch { /* The cancelled port must never become active. */ }
