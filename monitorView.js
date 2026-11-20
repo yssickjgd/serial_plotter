@@ -358,7 +358,6 @@ class MonitorRecordIndex {
 class MonitorView {
     constructor(container, frames, options = {}) {
         this._listeners = [];
-        this._rowListeners = [];
         this._yieldTasks = new Map();
         this._disposed = false;
         this.isVisible = true;
@@ -375,6 +374,10 @@ class MonitorView {
         this.container = container;
         this.document = container.ownerDocument ?? document;
         this._selectingText = false;
+        this._selectionOrigin = null;
+        this._selectionPointer = null;
+        this._selectionAnchor = null;
+        this._selectionFocus = null;
         this._selectionHold = false;
         this._renderDeferred = false;
         this.frames = frames;
@@ -394,6 +397,7 @@ class MonitorView {
         this.lastOffsets = [0];
         this.rowPositions = [];
         this._paintedRowTops = new WeakMap();
+        this._paintedSlices = new WeakMap();
         this.mode = 'hex';
         this.displayOptions = monitorDisplayUtils.normalizeDisplayOptions();
         this.expandedRows = new Set();
@@ -432,7 +436,14 @@ class MonitorView {
         this._listen(container, 'scroll', () => {
             if (this._settingScroll ||
                 Math.abs(container.scrollTop - this._renderedScrollTop) <= 1) return;
-            if (this._logSelection()) this._holdSelectionView();
+            if (this._selectingText || this._logSelection()) this._holdSelectionView();
+            if (this._selectingText && this._usesLargeLayout()) {
+                const top = container.scrollTop;
+                const delta = this._selectionScrollDelta(top - this._renderedScrollTop);
+                this._setScrollTop(this._renderedScrollTop);
+                if (this._scrollVirtualBy(delta)) return;
+                this._setScrollTop(top);
+            }
             const bottom = Math.max(0, container.scrollHeight - container.clientHeight);
             this._beginScrollSession();
             const geometry = this._scrollSession?.geometry ?? this._scrollGeometry;
@@ -458,8 +469,7 @@ class MonitorView {
                     within: container.scrollTop - geometry.offsets[index]
                 };
             }
-            if (!this._selectingText && this._logSelection()) this._releaseTextSelection();
-            this.render({ userAction: true });
+            this.render({ userAction: true, preserveSelection: true });
             if (this.followTail && !this._scrollPointerDown) this._finishScrollSession();
             else if (!this._scrollPointerDown && !('onscrollend' in container)) {
                 clearTimeout(this._scrollFinishTimer);
@@ -475,31 +485,52 @@ class MonitorView {
         });
         this._listen(container, 'wheel', event => {
             if (!this._scrollPointerDown) this._finishScrollSession();
-            if (event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY || this.mode === 'number' ||
-                !this._usesLargeLayout() || this._logSelection()) return;
+            if (event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
+            const selection = this._logSelection();
+            if (!this._selectingText && (!this._usesLargeLayout() || this.mode === 'number' && !selection)) return;
             const delta = event.deltaY * (event.deltaMode === 1 ? this.rowHeight : event.deltaMode === 2 ? container.clientHeight : 1);
-            if (this._scrollVirtualBy(delta)) event.preventDefault();
+            if (this._selectingText || selection) this._holdSelectionView();
+            if (this._scrollVirtualBy(this._selectionScrollDelta(delta))) event.preventDefault();
         }, { passive: false });
         this._listen(container, 'pointerdown', event => {
-            if (event.button === 0 && event.target?.closest?.('.monitor-prefix, .monitor-data'))
+            const text = event.target?.closest?.('.monitor-prefix, .monitor-data');
+            if (event.button === 0 && text) {
                 this._selectingText = true;
-            else if (event.button === 0 && this._isScrollbarPointer(event)) {
+                this._selectionOrigin = this._selectionRow(text);
+                if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+                    this._selectionPointer = { x: event.clientX, y: event.clientY };
+                    this._selectionAnchor = this._selectionCaret(event.clientX, event.clientY);
+                }
+            } else if (event.button === 0 && this._isScrollbarPointer(event)) {
                 this._beginScrollSession();
                 this._scrollPointerDown = true;
             }
         });
         const finishSelection = () => {
+            this._extendSelectionToPointer();
             this._selectingText = false;
+            this._selectionOrigin = null;
+            this._selectionPointer = null;
+            this._selectionAnchor = null;
+            this._selectionFocus = null;
             if (this._scrollPointerDown) {
                 this._scrollPointerDown = false;
                 this._finishScrollSession();
             }
             this._resumeDeferredRender();
         };
+        this._listen(this.document, 'pointermove', event => {
+            if (!this._selectingText) return;
+            this._selectionPointer = { x: event.clientX, y: event.clientY };
+            this._extendSelectionToPointer();
+        });
         this._listen(this.document, 'pointerup', finishSelection);
         this._listen(this.document, 'pointercancel', finishSelection);
         this._listen(this.document.defaultView, 'blur', finishSelection);
-        this._listen(this.document, 'selectionchange', () => this._resumeDeferredRender());
+        this._listen(this.document, 'selectionchange', () => {
+            this._extendSelectionToPointer();
+            this._resumeDeferredRender();
+        });
         if (typeof ResizeObserver !== 'undefined') {
             this.resizeObserver = new ResizeObserver(() => this.render({ userAction: true }));
             this.resizeObserver.observe(container);
@@ -514,14 +545,10 @@ class MonitorView {
         }
     }
 
-    _listen(target, name, listener, options, rows = false) {
+    _listen(target, name, listener, options) {
         if (!target?.addEventListener) return;
         target.addEventListener(name, listener, options);
-        (rows ? this._rowListeners : this._listeners).push(() => target.removeEventListener?.(name, listener, options));
-    }
-
-    _clearRowListeners() {
-        for (const remove of this._rowListeners.splice(0)) remove();
+        this._listeners.push(() => target.removeEventListener?.(name, listener, options));
     }
 
     _yieldControl() {
@@ -566,7 +593,7 @@ class MonitorView {
         this._cancelScheduledRender();
         this._cancelTextPreparation();
         for (const remove of this._listeners.splice(0)) remove();
-        this._clearRowListeners();
+        this.spacer.replaceChildren();
         this.resizeObserver?.disconnect();
         this.intersectionObserver?.disconnect();
         this.preparedText = null;
@@ -587,8 +614,58 @@ class MonitorView {
             ? selection : null;
     }
 
+    _selectionRow(node) {
+        for (let current = node; current && current !== this.spacer; current = current.parentNode)
+            if (this._paintedSlices.has(current)) return current;
+        return null;
+    }
+
+    _selectionScrollDelta(delta) {
+        // Keep successive painted windows overlapping while the pointer extends a range.
+        const limit = Math.max(1, this.container.clientHeight / 2);
+        return this._selectingText ? Math.max(-limit, Math.min(limit, delta)) : delta;
+    }
+
+    _selectionCaret(x, y) {
+        const caret = this.document.caretPositionFromPoint?.(x, y);
+        const range = caret ? null : this.document.caretRangeFromPoint?.(x, y);
+        const node = caret?.offsetNode ?? range?.startContainer;
+        const offset = caret?.offset ?? range?.startOffset;
+        return this._selectionRow(node) && Number.isInteger(offset) ? { node, offset } : null;
+    }
+
+    _extendSelectionToPointer({ scrolled = false } = {}) {
+        if (!this._selectingText || !this._selectionPointer || !this._selectionAnchor) return;
+        const { x, y } = this._selectionPointer;
+        const rect = this.container.getBoundingClientRect?.();
+        const selection = this.document.getSelection?.();
+        if (!rect || !selection?.setBaseAndExtent) return;
+        const scale = rect.height / (this.container.offsetHeight || this.container.clientHeight) || 1;
+        const left = rect.left + this.container.clientLeft * scale;
+        const top = rect.top + this.container.clientTop * scale;
+        const right = left + this.container.clientWidth * scale;
+        const bottom = top + this.container.clientHeight * scale;
+        if (!scrolled && x >= left && x < right && y >= top && y < bottom) {
+            if (this._selectionRow(selection.focusNode)) this._selectionFocus = selection.focusNode;
+            return;
+        }
+        // Chrome can move the focus into the surrounding UI while auto-scrolling.
+        // Keep the drag end at the nearest painted point inside this monitor.
+        const focus = this._selectionCaret(Math.max(left + 1, Math.min(right - 2, x)),
+            Math.max(top + 1, Math.min(bottom - 2, y)));
+        if (!focus) return;
+        this._selectionFocus = focus.node;
+        const anchor = this._selectionAnchor;
+        if (selection.anchorNode === anchor.node && selection.anchorOffset === anchor.offset &&
+            selection.focusNode === focus.node && selection.focusOffset === focus.offset) return;
+        selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+    }
+
     _resumeDeferredRender() {
         if (this._logSelection()) this._holdSelectionView();
+        else if (!this._selectingText && this._selectionHold)
+            for (const node of Array.from(this.spacer.children))
+                if (node.style.clipPath) this.spacer.removeChild(node);
         if (this._renderDeferred && !this._selectionHold && !this._selectingText) this.schedule();
     }
 
@@ -612,6 +689,10 @@ class MonitorView {
 
     _releaseTextSelection() {
         this._selectingText = false;
+        this._selectionOrigin = null;
+        this._selectionPointer = null;
+        this._selectionAnchor = null;
+        this._selectionFocus = null;
         this._logSelection()?.removeAllRanges();
     }
 
@@ -790,7 +871,7 @@ class MonitorView {
     _finishScrollSession() {
         if (!this._scrollSession || this._disposed) return;
         this._resetScrollSession();
-        this.render({ userAction: true });
+        this.render({ userAction: true, preserveSelection: true });
     }
 
     _captureScrollGeometry(records, large) {
@@ -1006,15 +1087,24 @@ class MonitorView {
         let records = this._records();
         const geometry = this._scrollSession?.geometry;
         if (geometry) records = records.between(geometry.firstOrder, geometry.lastOrder);
+        const large = geometry?.large ?? (this._largeRecords(records) || this._scrollGeometry?.large === true);
         const container = this.container;
         if (!records.length || !this.rowPositions.length) return false;
         const target = container.scrollTop + delta;
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const contentHeight = container.clientHeight - (parseFloat(css?.paddingTop) || 0) - (parseFloat(css?.paddingBottom) || 0);
-        const last = this.rowPositions.find(row => row.order === records.orderAt(records.length - 1));
-        if (delta > 0 && !this._selectionHold && last && target >= last.top + last.height - contentHeight) {
-            this.followLatest(); return true;
-        }
+        const lastOrder = records.orderAt(records.length - 1);
+        const last = this.rowPositions.find(row => row.order === lastOrder);
+        const scrollToEnd = () => {
+            if (!this._selectionHold) this.followLatest();
+            else {
+                this.anchor = { order: lastOrder, fraction: 0, center: false };
+                this.render({ userAction: true, preserveSelection: true });
+            }
+            return true;
+        };
+        if (large && delta > 0 && last && target >= last.top + last.height - contentHeight)
+            return scrollToEnd();
         const row = this.rowPositions.find(row => row.top <= container.scrollTop && row.top + row.height > container.scrollTop)
             ?? this.rowPositions.find(row => row.top + row.height > container.scrollTop);
         if (!row) return false;
@@ -1032,13 +1122,12 @@ class MonitorView {
         while (within >= height && index < records.length - 1) {
             within -= height; height = heightAt(++index);
         }
-        if (index === records.length - 1 && delta > 0 && !this._selectionHold && within >= Math.max(0, height - contentHeight)) {
-            this.followLatest(); return true;
-        }
+        if (large && index === records.length - 1 && delta > 0 && within >= Math.max(0, height - contentHeight))
+            return scrollToEnd();
         within = Math.min(within, Math.max(0, height - 1));
         this.followTail = false;
         this.anchor = { order: records.orderAt(index), within, fraction: within / height, center: false };
-        this.render({ userAction: true });
+        this.render({ userAction: true, preserveSelection: true });
         return true;
     }
 
@@ -1671,7 +1760,7 @@ class MonitorView {
         this.pending = this.pendingAnimationFrame ? requestAnimationFrame(update) : setTimeout(update, 0);
     }
 
-    render({ userAction = false } = {}) {
+    render({ userAction = false, preserveSelection = false } = {}) {
         this._cancelScheduledRender();
         if (this._disposed || !this.isVisible || !this._inViewport) return;
         // Replacing virtual rows destroys native selections, including on the click
@@ -1679,14 +1768,14 @@ class MonitorView {
         // explicit navigation can still repaint history without restarting following.
         const selection = this._logSelection();
         if (selection) this._holdSelectionView();
-        if (this._selectingText || selection || (this._selectionHold && !userAction)) {
+        const repaintSelection = preserveSelection && (this._selectingText || selection);
+        if (!repaintSelection && (this._selectingText || selection || (this._selectionHold && !userAction))) {
             this._renderDeferred = true;
             this._updateHeldScrollRange();
             return;
         }
         this._renderDeferred = false;
         this.protocolVisibleSpans = [];
-        this._clearRowListeners();
         if (this.followTail) this.centerPadding = 0;
         let records = this._records();
         let geometry = this._scrollSession?.geometry;
@@ -1701,7 +1790,7 @@ class MonitorView {
             }
         }
         if (geometry ? geometry.large : this._largeRecords(records)) {
-            this._renderLarge(records);
+            this._renderLarge(records, 0, repaintSelection);
             this._captureScrollGeometry(records, true);
             return;
         }
@@ -1716,7 +1805,7 @@ class MonitorView {
             offsets[i + 1] = offsets[i] + layouts[i].lineCount * this.rowHeight;
         const totalHeight = offsets[rows.length] + this.centerPadding;
         if (!geometry && totalHeight > MONITOR_SCROLL_HEIGHT_LIMIT) {
-            this._renderLarge(records, MONITOR_SCROLL_HEIGHT_LIMIT);
+            this._renderLarge(records, MONITOR_SCROLL_HEIGHT_LIMIT, repaintSelection);
             this._captureScrollGeometry(records, true);
             return;
         }
@@ -1745,28 +1834,108 @@ class MonitorView {
             top: offsets[index], height: layouts[index].lineCount * this.rowHeight }));
         const first = rows.length ? Math.max(0, firstRowAt(offsets, this.container.scrollTop) - 3) : 0;
         const bottom = this.container.scrollTop + this.container.clientHeight;
-        const fragment = (this.document ?? document).createDocumentFragment();
+        const visible = [];
         for (let i = first; i < rows.length && (offsets[i] < bottom || i < first + 3); i++) {
-            fragment.appendChild(this._makeRow(rows[i], layouts[i], offsets[i]));
+            visible.push({ row: rows[i], layout: layouts[i], top: offsets[i] });
         }
-        this.spacer.replaceChildren(fragment);
+        this._paintRows(visible, repaintSelection);
         this._captureScrollGeometry(records, false);
     }
 
-    _makeRow(row, layout, top) {
-        if (layout.deferredText) layout = this._foldLayout(row, this._rowLayout(row, layout.columns));
-        if (layout.unprepared) this._prepareMissingText(row);
-        const rowLineCount = layout.lineCount;
-        const fullLineCount = layout.contentLineCount ?? rowLineCount;
+    _paintRows(visible, preserveSelection) {
+        if (!preserveSelection) {
+            const fragment = this.document.createDocumentFragment();
+            for (const { row, layout, top } of visible) fragment.appendChild(this._makeRow(row, layout, top));
+            this.spacer.replaceChildren(fragment);
+            return;
+        }
+        const mounted = Array.from(this.spacer.children);
+        const selection = this._logSelection();
+        const anchor = mounted.indexOf(this._selectionRow(this._selectionAnchor?.node ?? selection?.anchorNode));
+        const focus = mounted.indexOf(this._selectionRow(this._selectionFocus ?? selection?.focusNode));
+        const endpoints = [anchor, focus].filter(index => index >= 0);
+        const selected = endpoints.length ? mounted.slice(Math.min(...endpoints), Math.max(...endpoints) + 1) : [];
+        if (this._selectionOrigin && !selected.includes(this._selectionOrigin)) selected.push(this._selectionOrigin);
+        const retainedByOrder = new Map();
+        for (const node of selected) {
+            const { order } = this._paintedSlices.get(node);
+            if (!retainedByOrder.has(order)) retainedByOrder.set(order, []);
+            retainedByOrder.get(order).push(node);
+            // Keep offscreen text in the native range so Ctrl+C can still copy it.
+            node.style.clipPath = 'inset(100%)';
+            node.style.pointerEvents = 'none';
+        }
+        const next = selected.slice();
+        for (const { row, layout: pending, top } of visible) {
+            const layout = pending.deferredText ? this._foldLayout(row, this._rowLayout(row, pending.columns)) : pending;
+            const { firstLine, lastLine } = this._visibleLineRange(layout, top);
+            const retained = retainedByOrder.get(row.order) ?? [];
+            let line = firstLine;
+            const add = (start, end) => {
+                if (start >= end) return;
+                const node = this._makeRow(row, layout, top, { firstLine: start, lastLine: end });
+                this._placeSelectionSlice(node, top);
+                next.push(node);
+            };
+            for (const node of retained.sort((a, b) => this._paintedSlices.get(a).firstLine - this._paintedSlices.get(b).firstLine)) {
+                const slice = this._paintedSlices.get(node);
+                if (slice.lastLine <= firstLine || slice.firstLine >= lastLine) continue;
+                add(line, slice.firstLine);
+                this._placeSelectionSlice(node, top);
+                line = Math.max(line, slice.lastLine);
+            }
+            add(line, lastLine);
+        }
+        const compare = (a, b) => {
+            const left = this._paintedSlices.get(a), right = this._paintedSlices.get(b);
+            return left.order - right.order || left.firstLine - right.firstLine;
+        };
+        next.sort(compare);
+        const keep = new Set(next);
+        for (const node of mounted) if (!keep.has(node)) this.spacer.removeChild(node);
+        let index = 0;
+        for (const node of next) {
+            // Insert new rows around the original text nodes. Reparenting either
+            // endpoint would collapse the browser's Range.
+            if (this.spacer.children[index] !== node)
+                this.spacer.insertBefore(node, this.spacer.children[index] ?? null);
+            index++;
+        }
+        this._extendSelectionToPointer({ scrolled: true });
+    }
+
+    _placeSelectionSlice(node, rowTop) {
+        const { firstLine, lastLine, lineCount } = this._paintedSlices.get(node);
+        const top = rowTop + firstLine * this.rowHeight;
+        const height = (firstLine === 0 ? Math.min(lastLine, lineCount) : lastLine - firstLine) * this.rowHeight;
+        node.style.top = `${top}px`;
+        node.style.height = `${height}px`;
+        node.style.clipPath = '';
+        node.style.pointerEvents = '';
+        this._paintedRowTops.set(node, top);
+        if (firstLine) node.children[1].style.marginTop = '';
+    }
+
+    _visibleLineRange(layout, top) {
+        const fullLineCount = layout.contentLineCount ?? layout.lineCount;
         let firstLine = 0, lastLine = fullLineCount;
         if (fullLineCount > 64 && layout.byteMode !== 'number' && this.container && !layout.folded) {
             firstLine = Math.min(fullLineCount, Math.max(0,
                 Math.floor((this.container.scrollTop - top) / this.rowHeight) - 3));
             lastLine = Math.min(fullLineCount, Math.max(firstLine,
                 Math.ceil((this.container.scrollTop + this.container.clientHeight - top) / this.rowHeight) + 3));
-            layout = { ...layout, firstLine, lastLine };
         }
-        if (layout.folded) layout = { ...layout, firstLine: 0, lastLine: fullLineCount };
+        return { firstLine, lastLine };
+    }
+
+    _makeRow(row, layout, top, lineRange) {
+        if (layout.deferredText) layout = this._foldLayout(row, this._rowLayout(row, layout.columns));
+        if (layout.unprepared) this._prepareMissingText(row);
+        const rowLineCount = layout.lineCount;
+        const fullLineCount = layout.contentLineCount ?? rowLineCount;
+        const { firstLine, lastLine } = lineRange ?? this._visibleLineRange(layout, top);
+        if (layout.folded || firstLine !== 0 || lastLine !== fullLineCount)
+            layout = { ...layout, firstLine, lastLine };
         if (layout.data) layout = { ...layout, parts:
             compactVisibleParts(layout.data, layout.lineStarts, firstLine, lastLine) };
         else if (layout.byteMode === 'text' && !layout.unprepared)
@@ -1797,12 +1966,14 @@ class MonitorView {
         div.style.color = this._displayOptions()[colorKey];
         if (Number.isFinite(row.timestamp)) div.title = new Date(row.timestamp).toLocaleString();
         if (row.order === this.cursorOrder) div.className += ' monitor-cursor';
-        this._listen(div, 'click', () => {
+        div.onclick = () => {
+            if (this._disposed) return;
             this.cursorOrder = row.order;
             this.render({ userAction: true });
-        }, undefined, true);
+        };
         div.style.top = `${top}px`;
         this._paintedRowTops.set(div, top);
+        this._paintedSlices.set(div, { order: row.order, firstLine, lastLine, lineCount: rowLineCount });
         div.style.height = `${rowLineCount * this.rowHeight}px`;
         const prefix = (this.document ?? document).createElement('span');
         prefix.className = 'monitor-prefix';
@@ -1823,7 +1994,7 @@ class MonitorView {
             this._appendHighlightedBody(body, row, layout, ranges ?? []);
         else body.textContent = monitorBodyText(row, layout);
         div.append(prefix, body);
-        if (layout.foldControl) {
+        if (layout.foldControl && firstLine === 0) {
             const toggle = (this.document ?? document).createElement('button');
             toggle.className = 'monitor-fold-toggle';
             toggle.textContent = layout.folded ? `展开（共 ${layout.fullLineCount} 行）` : '收起长帧';
@@ -1833,6 +2004,7 @@ class MonitorView {
             const columns = Math.max(2, Math.floor((this.container.clientWidth - padding) / this.charWidth));
             toggle.style.maxWidth = `${this._foldColumns(columns) * this.charWidth}px`;
             toggle.onclick = event => {
+                if (this._disposed) return;
                 event.stopPropagation?.();
                 if (this.expandedRows.has(row.order)) this.expandedRows.delete(row.order);
                 else {
@@ -1843,7 +2015,6 @@ class MonitorView {
                 this.anchor = { order: row.order, within: 0 };
                 this.render({ userAction: true });
             };
-            this._rowListeners?.push(() => { toggle.onclick = null; });
             div.appendChild(toggle);
         }
         return div;
@@ -2093,7 +2264,7 @@ class MonitorView {
         }
     }
 
-    _renderLarge(records = this._records(), minimumScrollHeight = 0) {
+    _renderLarge(records = this._records(), minimumScrollHeight = 0, preserveSelection = false) {
         const { frames, container } = this;
         const css = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null;
         const padding = css ? parseFloat(css.paddingLeft) + parseFloat(css.paddingRight) : 20;
@@ -2126,7 +2297,8 @@ class MonitorView {
         position ??= Math.max(0, Math.min(records.length - 1, container.scrollTop /
             Math.max(1, maxScroll) * (records.length - 1)));
         const anchorIndex = Math.floor(position);
-        const visible = Math.ceil(contentHeight / this.rowHeight) + 12;
+        const viewportRows = Math.ceil(contentHeight / this.rowHeight);
+        const visible = preserveSelection ? viewportRows * 2 + 8 : viewportRows + 12;
         const first = this.followTail ? Math.max(0, records.length - visible)
             : Math.min(Math.max(0, records.length - visible),
                 Math.max(0, anchorIndex - Math.floor(visible / 2)));
@@ -2163,18 +2335,18 @@ class MonitorView {
         }
         if (!this.followTail && !this.anchor?.center && first === 0)
             top = position === 0 ? container.scrollTop : Math.min(top, container.scrollTop);
-        const fragment = (this.document ?? document).createDocumentFragment();
+        const painted = [];
         this.rowPositions = [];
         for (let i = 0; i < rows.length; i++) {
             const height = layouts[i].lineCount * this.rowHeight;
             this.rowPositions.push({ frameIndex: rows[i].frameIndex, order: rows[i].order, top, height });
             if (top < container.scrollTop + contentHeight && top + height > container.scrollTop)
-                fragment.appendChild(this._makeRow(rows[i], layouts[i], top));
+                painted.push({ row: rows[i], layout: layouts[i], top });
             top += height;
         }
         this.lastRows = rows;
         this.lastOffsets = [];
-        this.spacer.replaceChildren(fragment);
+        this._paintRows(painted, preserveSelection);
     }
 }
 

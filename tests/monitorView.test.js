@@ -281,13 +281,76 @@ test('selection-held history updates scroll geometry without replacing text when
         const expected = frames.orderAt(Math.floor((frames.length - 1) * .4));
         view.container.listeners.scroll();
         assert.equal(view.anchor.order, expected, 'scrolling maps the updated track to all retained records');
-        assert.equal(selection.isCollapsed, true, 'explicit navigation ends the selection so history can be rendered');
+        assert.equal(selection.isCollapsed, false, 'scrolling history preserves the native selection');
+        assert.ok(view.spacer.children.includes(selectedRow), 'the selected text remains mounted outside the viewport');
         assert.ok(view.spacer.children.length);
         assert.equal(view.followTail, false);
         assert.equal(view._selectionHold, true);
         view.container.listeners.scrollend();
         assert.equal(view.anchor.order, expected);
         assert.equal(frames.length, 2500); assert.equal(frames.retainedByteLength, 2500 * 288);
+        view.dispose();
+    } finally { global.document = oldDocument; }
+});
+
+test('scrolling during a text drag paints new adjacent records without removing the selected text', () => {
+    const oldDocument = global.document;
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null,
+        removeAllRanges() { this.isCollapsed = true; } };
+    global.document = { ...monitorDocument(), getSelection: () => selection };
+    try {
+        for (const count of [50, 2200]) {
+            const frames = new FrameBuffer(1, count, { raw: true });
+            for (let i = 0; i < count; i++)
+                frames.appendRaw(Uint8Array.of(i & 255), `row-${i}`, i + 1);
+            const view = monitorFixture(frames, 600, 100);
+            view.render();
+            const { container } = view, row = view.spacer.children.at(-1), body = row.children[1];
+            container.contains = node => view.spacer.children.some(child => child.contains(node));
+            container.listeners.pointerdown({ button: 0, target: body });
+            Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+            const before = view.spacer.children.slice();
+            container.scrollTop -= 80; container.listeners.scroll();
+            assert.ok(view.spacer.children.some(child => !before.includes(child)), 'dragging reveals newly visible history');
+            assert.ok(view.spacer.children.includes(row), 'the original selection endpoint stays mounted');
+            assert.equal(selection.isCollapsed, false);
+            assert.equal(view.followTail, false);
+            let wheelHandled = false;
+            container.listeners.wheel({ deltaY: -120, deltaMode: 0, preventDefault() { wheelHandled = true; } });
+            assert.equal(wheelHandled, true);
+            assert.ok(view.spacer.children.includes(row), 'wheeling during the drag keeps the origin in the range');
+            view.dispose();
+            selection.isCollapsed = true;
+        }
+    } finally { global.document = oldDocument; }
+});
+
+test('a long selected record keeps its old text slice separate from the lines revealed by scrolling', () => {
+    const oldDocument = global.document, listeners = {};
+    const selection = { isCollapsed: true, anchorNode: null, focusNode: null };
+    global.document = { ...monitorDocument(), getSelection: () => selection,
+        addEventListener(name, callback) { listeners[name] = callback; } };
+    try {
+        const frames = new FrameBuffer(1, 10, { raw: true });
+        frames.appendRaw(new Uint8Array(16384).fill(65), 't', 1);
+        const view = monitorFixture(frames, 600, 100);
+        view.setDisplayOptions({ hexBytesPerLine: 16 });
+        const { container, spacer } = view;
+        container.scrollTop = 2000; container.listeners.scroll();
+        const row = spacer.children[0], body = row.children[1];
+        container.contains = node => spacer.contains(node);
+        Object.assign(selection, { isCollapsed: false, anchorNode: body, focusNode: body });
+        listeners.selectionchange();
+        container.scrollTop += 600; container.listeners.scroll();
+        assert.equal(spacer.children[0], row);
+        assert.ok(row.style.clipPath, 'offscreen selected text stays in the native range');
+        const oldSlice = view._paintedSlices.get(row);
+        const newSlice = view._paintedSlices.get(spacer.children.at(-1));
+        assert.ok(newSlice.firstLine >= oldSlice.lastLine);
+        assert.equal(spacer.children.at(-1).style.clipPath, '');
+        selection.isCollapsed = true; listeners.selectionchange();
+        assert.ok(!spacer.children.includes(row), 'clearing selection releases only its offscreen slices');
+        assert.equal(view.followTail, false);
         view.dispose();
     } finally { global.document = oldDocument; }
 });
@@ -646,10 +709,23 @@ test('a selection outside the monitor does not stop its rendering or get cleared
 function monitorDocument() {
     return {
         createElement: () => ({ style: {}, children: [],
-            append(...children) { this.children.push(...children); },
-            appendChild(child) { this.children.push(child); },
+            append(...children) { children.forEach(child => this.appendChild(child)); },
+            appendChild(child) { this.insertBefore(child, null); },
+            insertBefore(child, next) {
+                child.parentNode = this;
+                const index = next ? this.children.indexOf(next) : this.children.length;
+                this.children.splice(index, 0, child);
+            },
+            removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; },
+            contains(node) { return node === this || this.children.some(child => child.contains?.(node)); },
+            closest(selectors) {
+                const classes = (this.className ?? '').split(' ');
+                return selectors.split(',').some(selector => classes.includes(selector.trim().slice(1)))
+                    ? this : this.parentNode?.closest?.(selectors) ?? null;
+            },
             replaceChildren(...children) {
                 this.children = children.flatMap(child => child.children || [child]);
+                this.children.forEach(child => { child.parentNode = this; });
             } }),
         createDocumentFragment: () => ({ children: [], appendChild(child) { this.children.push(child); } })
     };
