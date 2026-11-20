@@ -296,8 +296,8 @@ test('Hex has an independent boundary setting and text still shares its viewing 
     await f.tick(50);
     assert.equal(text.source.frames.length, 1);
     assert.deepEqual([...text.source.frames.rawBytesAt(0)], [...payload]);
-    f.change('export-format', 'text');
-    assert.equal(f.get('export-text-boundary').value, 'records');
+    f.app.widgets.activate(text.id); f.change('widget-export-format', 'text');
+    assert.equal(f.get('btn-widget-export').disabled, false);
     const saved = f.app.getConfig();
     assert.equal(saved.global.textBoundary, 'idle-basic');
     const loaded = bootApplication(saved);
@@ -442,22 +442,20 @@ test('regular structured sends and grouped commands use the applied protocol and
     const saved = f.app.getConfig(); assert.equal(saved.send.mode, 'protocol'); assert.equal(saved.send.protocol.messageId, 'x');
 });
 
-test('structured exports select the protocol record source and retain exact field values', async t => {
+test('structured widget exports follow field selection and skip invalid frames', async t => {
     const f = fixture(t), settings = f.app.dataEngine.serialize();
     Object.assign(settings, { mode: 'Self_Defined_Frame', protocols: [protocol()], protocolId: 'position',
         mappings: [{ channel: 0, messageId: 'x', path: 'value' }] });
     await f.app.dataEngine.apply(settings, { rebuild: false }); f.app.widgets.rebindEngineSources();
+    const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine', protocolFieldPaths: ['value'] } });
+    f.app.widgets.activate(byte.id);
     f.app.service.receive(Uint8Array.of(170, 1, 7, 0));
-    f.change('export-format', 'csv'); f.change('export-source', 'engine:records');
-    assert.equal(f.get('wrap-export-numeric-parsing').hidden, true);
-    assert.equal(f.get('export-channels-wrap').hidden, true);
-    const pending = f.app.exportData(); for (let index = 0; index < 30; index++) await f.tick(10);
+    f.change('widget-export-format', 'csv');
+    const pending = f.app.exportWidgetData(); for (let index = 0; index < 30; index++) await f.tick(10);
     assert.equal(await pending, true);
     const csv = await f.blobs.at(-1).text(); assert.match(csv, /MessageId/); assert.match(csv, /位置/); assert.match(csv, /,7\r\n/);
-    f.change('export-source', 'engine:message:x');
-    assert.equal(await f.app.exportData(), true);
-    assert.match(await f.blobs.at(-1).text(), /0,7\r\n/);
-    f.change('export-format', 'binary');
-    assert.ok(!f.get('export-source').options.some(option => option.value === 'engine:message:x'));
+    f.change('widget-export-format', 'engine-text');
+    assert.equal(await f.app.exportWidgetData(), true);
+    assert.match(await f.blobs.at(-1).text(), /value=7/);
     assert.ok(!f.get('export-source').options.some(option => option.value === 'numeric'));
 });

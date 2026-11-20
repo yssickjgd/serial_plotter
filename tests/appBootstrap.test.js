@@ -538,37 +538,37 @@ test('configuration import validates atomically and saves a complete versioned w
     assert.equal(Object.keys(stored.workspace.rects).length, 2);
 });
 
-test('export source is independent from activation and missing byte sources require reselection', async t => {
+test('raw export keeps its own source while parsed exports follow activation', async t => {
     const f = boot(t, config([wave('w1'), wave('w2'), bytes('b1', { captureMode: 'text', textBoundary: 'lf' })]));
     f.app.serialAdapter.onDataCallback(Uint8Array.of(4)); f.app.service.pause(true); await f.tick();
-    f.change('export-format', 'csv');
-    assert.equal(f.get('btn-export').disabled, false);
+    assert.equal(f.get('btn-widget-export').disabled, true);
     f.app.widgets.activate('w1');
-    f.app.widgets.activate('w2');
-    assert.equal(f.get('export-source').value, 'numeric');
+    f.app.widgets.setChannelVisible(0, true);
+    assert.equal(f.get('btn-widget-export').disabled, false);
+    f.app.widgets.activate('b1');
+    assert.equal(f.get('btn-widget-export').disabled, true);
+    assert.match(f.get('widget-export-source-status').textContent, /请选择/);
     f.change('export-format', 'binary'); f.change('export-source', 'b1'); f.app.widgets.remove('b1');
     assert.equal(f.get('export-source').value, '');
     assert.equal(f.get('btn-export').disabled, true);
-    f.app.widgets.activate('w1');
+    f.app.widgets.activate('w2');
     assert.equal(f.get('btn-export').disabled, true);
-    f.change('export-source', 'numeric');
-    f.change('export-format', 'hex-text');
-    assert.equal(f.get('export-source').value, 'numeric');
-    assert.equal(f.get('export-format').options.find(option => option.value === 'csv').disabled, false);
+    f.change('export-source', 'base');
+    assert.equal(f.get('btn-export').disabled, false);
 });
 
-test('CSV exports use shared values regardless of active wave calibration and include UTF8 BOM', async t => {
-    const f = boot(t, config([wave('w1'), wave('w2')]));
-    const widget = f.app.widgets.widgets.get('w1');
-    Object.assign(widget.settings.channels[0], { gainEnabled: true, gain: 2, offsetEnabled: true, offset: 3 });
-    f.app.widgets.applySettings(widget);
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(4));
-    f.app.widgets.activate('w2');
-    assert.equal(await f.app.exportData(), true);
+test('widget CSV exports original values from the visible channels and includes UTF8 BOM', async t => {
+    const initial = config([wave('w1'), wave('w2')]); initial.global.channelsCount = '2';
+    const f = boot(t, initial);
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(4, 8));
     f.app.widgets.activate('w1');
-    assert.equal(await f.app.exportData(), true);
-    assert.match(await f.blobs[0].text(), /0,4/);
-    assert.match(await f.blobs[1].text(), /0,4/);
+    f.app.widgets.setChannelVisible(0, true); f.app.widgets.setChannelVisible(1, false);
+    assert.equal(await f.app.exportWidgetData(), true);
+    f.app.widgets.activate('w2');
+    f.app.widgets.setChannelVisible(0, false); f.app.widgets.setChannelVisible(1, true);
+    assert.equal(await f.app.exportWidgetData(), true);
+    assert.match(await f.blobs[0].text(), /CH00001\r\n0,4/);
+    assert.match(await f.blobs[1].text(), /CH00002\r\n0,8/);
     assert.deepEqual([...new Uint8Array(await f.blobs[0].arrayBuffer()).subarray(0, 3)], [239, 187, 191]);
 });
 
@@ -645,11 +645,10 @@ test('byte buffer export combines chronological RX and shared TX without changin
     f.change('export-format', 'binary'); f.change('export-source', 'base'); f.change('export-direction', 'both');
     assert.equal(await f.app.exportData(), true);
     assert.deepEqual([...new Uint8Array(await f.blobs[0].arrayBuffer())], [65, 66, 67]);
-    f.change('export-format', 'text'); f.change('export-encoding', 'ascii');
-    f.change('export-direction', 'both');
-    f.change('export-timestamps', false); f.change('export-markers', false);
+    f.change('export-format', 'hex-text');
+    assert.equal(f.get('export-direction').value, 'both');
     assert.equal(await f.app.exportData(), true);
-    assert.equal(await f.blobs[1].text(), 'ABC');
+    assert.match(await f.blobs[1].text(), /41 42\r\n43\r\n/);
 });
 
 test('changing one byte parser rebuilds that source while other views continue receiving', async t => {
@@ -710,13 +709,14 @@ test('large streaming export aborts when the selected source changes while writi
     const f = boot(t, initial);
     f.app.serialAdapter.onDataCallback(new Uint8Array(50001).fill(7));
     f.app.widgets.activate('w1');
+    f.app.widgets.setChannelVisible(0, true);
     let writes = 0, aborts = 0, closes = 0;
     f.window.showSaveFilePicker = async () => ({ async createWritable() { return {
         async write() { writes++; f.app.service.clear(); }, async abort() { aborts++; }, async close() { closes++; }
     }; } });
-    assert.equal(await f.app.exportData(), false);
+    assert.equal(await f.app.exportWidgetData(), false);
     assert.equal(writes, 1); assert.equal(aborts, 1); assert.equal(closes, 0);
-    assert.match(f.get('export-source-status').textContent, /导出失败/);
+    assert.match(f.get('widget-export-source-status').textContent, /导出失败/);
 });
 
 test('invalid saved settings show an error without overwriting storage or creating partial widgets', async t => {
@@ -755,25 +755,18 @@ test('wave sampling frequency survives idle periods, pause, and rebuilding basel
     f.click('btn-clear'); assert.equal(widget.view.sampleRateHz, 0);
 });
 
-test('per-buffer text options and CSV channel selection survive a configuration reload', t => {
-    const initial = config([bytes('b1'), wave('w1')]); initial.global.channelsCount = '2';
-    const f = boot(t, initial);
-    f.change('export-format', 'text'); f.change('export-source', 'base');
-    f.change('export-direction', 'both'); f.change('export-encoding', 'gb18030');
-    f.get('export-timestamps').checked = false; f.get('export-markers').checked = true;
+test('widget file encoding and metadata survive a configuration reload independently of raw exports', t => {
+    const f = boot(t, config([bytes('b1'), wave('w1')]));
+    f.change('export-format', 'binary'); f.change('export-direction', 'tx');
+    f.change('widget-export-format', 'engine-text');
+    f.change('widget-export-output-encoding', 'gb18030');
+    f.change('widget-export-markers', true);
     const restored = boot(t, f.app.getConfig());
-    assert.equal(restored.get('export-source').value, 'base');
-    assert.equal(restored.get('export-format').value, 'text');
-    assert.equal(restored.get('export-direction').value, 'both');
-    assert.equal(restored.get('export-encoding').value, 'gb18030');
-    assert.equal(restored.get('export-timestamps').checked, false);
-    assert.equal(restored.get('export-markers').checked, true);
-    f.change('export-source', 'numeric'); f.change('export-format', 'csv');
-    const checkbox = f.get('export-channel-list').children[0].children[0];
-    checkbox.checked = false; checkbox.dispatchEvent({ type: 'change' });
-    const csv = boot(t, f.app.getConfig());
-    assert.equal(csv.get('export-source').value, 'numeric');
-    assert.deepEqual(Array.from(csv.app.getConfig().tools.exportProfiles.numeric.formats.csv.channelIndices), [1]);
+    assert.equal(restored.get('export-format').value, 'binary');
+    assert.equal(restored.get('export-direction').value, 'tx');
+    assert.equal(restored.get('widget-export-format').value, 'engine-text');
+    assert.equal(restored.get('widget-export-output-encoding').value, 'gb18030');
+    assert.equal(restored.get('widget-export-markers').checked, true);
 });
 
 test('network mode reveals its controls and connects with the requested remote and local ports', async t => {
@@ -1002,21 +995,23 @@ test('a large export cancelled by source deletion at the file picker never opens
     assert.equal(f.get('export-source').value, '');
 });
 
-test('activating another wave does not cancel export of an independently selected buffer', async t => {
+test('activating another wave does not cancel a snapshot export from the first widget', async t => {
     const initial = config([wave('w1'), wave('w2')]); initial.global.maxPoints = '60000';
     const f = boot(t, initial);
     f.app.serialAdapter.onDataCallback(new Uint8Array(50001).fill(7));
+    f.app.widgets.activate('w2'); f.app.widgets.setChannelVisible(0, true);
     f.app.widgets.activate('w1');
+    f.app.widgets.setChannelVisible(0, true);
     let writes = 0, aborts = 0, closes = 0;
     f.window.showSaveFilePicker = async () => ({ async createWritable() { return {
         async write() { writes++; f.app.widgets.activate('w2'); },
         async abort() { aborts++; }, async close() { closes++; }
     }; } });
-    const pending = f.app.exportData();
+    const pending = f.app.exportWidgetData();
     for (let i = 0; i < 100; i++) await f.tick(1);
     assert.equal(await pending, true);
     assert.ok(writes > 1); assert.equal(aborts, 0); assert.equal(closes, 1);
-    assert.equal(f.get('export-source').value, 'numeric');
-    assert.equal(f.get('btn-export').disabled, false);
-    assert.equal(f.app.getConfig().tools.exportProfiles.numeric.format, 'csv');
+    assert.equal(f.get('widget-export-format').value, 'csv');
+    assert.equal(f.get('btn-widget-export').disabled, false);
+    assert.equal(f.app.getConfig().tools.widgetExport.format, 'csv');
 });

@@ -253,9 +253,6 @@ test('moving derived channels preserves dependencies, history and widget selecti
     f.app.widgets.setChannelVisible(first - 1, true);
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
     f.app.widgets.setChannelVisible(first - 1, false); f.app.widgets.activate(wave.id);
-    f.click('btn-export-channels-all-off');
-    const checkbox = f.get('export-channel-list').children[first - 1].children[0];
-    checkbox.checked = true; checkbox.dispatchEvent({ type: 'change' });
     f.app.tools.selectedChannels = new Set([first - 1]);
     f.app.service.receive(Uint8Array.from({ length: 12 }, (_, i) => i < 2 ? i + 1 : 0));
     const frames = wave.source.frames, bytes = Array.from(frames.frameAt(0).bytes);
@@ -268,7 +265,7 @@ test('moving derived channels preserves dependencies, history and widget selecti
     assert.equal(wave.view.getChannelMeta()[13].color, '#112233');
     assert.equal(wave.view.getChannelMeta()[13].visible, true);
     assert.ok(byte.settings.monitorDisplay.numericHiddenChannels.includes(13));
-    assert.deepEqual(Array.from(f.app.getConfig().tools.exportProfiles.numeric.formats.csv.channelIndices), [13]);
+    assert.ok(require('../engineExport').widgetExportSelection(wave).channelIndices.includes(13));
     assert.deepEqual([...f.app.tools.selectedChannels], [13]);
     f.app.service.receive(Uint8Array.from({ length: 12 }, (_, i) => i === 0 ? 1 : i === 1 ? 3 : 0));
     assert.equal(frames.getValue(12, 1), 7); assert.equal(frames.getValue(13, 1), 4);
@@ -361,9 +358,6 @@ test('deleting CH00024 shifts later definitions references metadata and retained
     f.change('plot-content', 'response'); f.change('plot-content', 'samples');
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
     f.app.widgets.setChannelVisible(kept - 1, false); f.app.widgets.activate(wave.id);
-    f.click('btn-export-channels-all-off');
-    const choice = f.get('export-channel-list').children[kept - 1].children[0];
-    choice.checked = true; choice.dispatchEvent({ type: 'change' });
     f.app.tools.selectedChannels = new Set([kept - 1]);
     for (const value of [1, 2]) f.app.service.receive(Uint8Array.from({ length: 23 }, (_, i) => i ? 0 : value));
     const frames = wave.source.frames;
@@ -377,7 +371,7 @@ test('deleting CH00024 shifts later definitions references metadata and retained
     assert.equal(wave.view.getChannelMeta()[23].color, '#112233');
     assert.equal(wave.view.getChannelMeta()[23].visible, true);
     assert.ok(byte.settings.monitorDisplay.numericHiddenChannels.includes(23));
-    assert.deepEqual(Array.from(f.app.getConfig().tools.exportProfiles.numeric.formats.csv.channelIndices), [23]);
+    assert.ok(require('../engineExport').widgetExportSelection(wave).channelIndices.includes(23));
     assert.deepEqual([...f.app.tools.selectedChannels], [23]);
     f.app.service.receive(Uint8Array.from({ length: 23 }, (_, i) => i ? 0 : 3));
     assert.deepEqual(Array.from(frames.channelSlice(23)), [1, 3, 6]);
@@ -524,9 +518,8 @@ test('computed numeric values flow into FFT search and CSV without synthetic raw
     f.change('monitor-search-query', '3'); f.change('monitor-search-tolerance', '0');
     await f.app.tools.requestSearch('nearest');
     assert.ok(f.app.tools.matches.some(match => match.channel === number - 1 && match.startFrame === 2));
-    f.change('export-format', 'csv'); assert.equal(await f.app.exportData(), true);
-    assert.match(await f.blobs.at(-1).text(), /半幅/);
-    assert.match(await f.blobs.at(-1).text(), /2,6,3/);
+    f.change('widget-export-format', 'csv'); assert.equal(await f.app.exportWidgetData(), true);
+    assert.equal(await f.blobs.at(-1).text(), 'Index,半幅\r\n0,1\r\n1,2\r\n2,3\r\n3,4\r\n');
     assert.deepEqual(Array.from(wave.source.frames.rawBytesAt(2)), [6]);
 });
 

@@ -9,7 +9,7 @@ async function startSerialPlotterApplication() {
     const CONFIG_KEY = 'serialplot_v3_config', WORKSPACE_KEY = 'serialplot_v3_workspace';
     const cleanups = [], progressRows = new Map(), rates = new Map(), draws = new Map();
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
-    let boundExportSourceId = null, boundExportFormat = null, boundExportSource = null, bindingExport = false;
+    let boundExportSourceId = null, boundExportFormat = null, bindingExport = false;
     let activeEngine = null, connecting = false, widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
     let previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: 0 };
     const listen = (target, name, fn) => { target?.addEventListener(name, fn); cleanups.push(() => target?.removeEventListener(name, fn)); };
@@ -51,10 +51,11 @@ async function startSerialPlotterApplication() {
     }
     const globals = { ...initial.global, channelNames: [...initial.global.channelNames] };
     const uiLayout = { ...initial.uiLayout };
-    let exportSourceId = initial.tools.exportSourceId, exportProfiles = initial.tools.exportProfiles;
-    let exportFormat = initial.tools.exportFormat, exportRecordSourceId = initial.tools.exportRecordSourceId;
-    let exportRecordSource = null;
-    let exportCsvSourceId = initial.tools.exportCsvSourceId;
+    const bufferFormat = value => value === 'binary' ? 'binary' : 'hex-text';
+    const bufferSourceId = value => value === 'numeric' || value?.startsWith('engine:') ? 'base' : value;
+    let exportProfiles = initial.tools.exportProfiles, exportFormat = bufferFormat(initial.tools.exportFormat);
+    let exportRecordSourceId = bufferSourceId(initial.tools.exportRecordSourceId), exportRecordSource = null;
+    let widgetExport = initial.tools.widgetExport, widgetExportSelection = null;
     async function saveNow() {
         if (disposed || restoring || storageBlocked) return null;
         if (saveTimer !== null) clearTimeout(saveTimer);
@@ -172,278 +173,242 @@ async function startSerialPlotterApplication() {
         getActiveWidget: () => widgets.active,
         getChannelNames: () => globals.channelNames, onStateChange: saveSoon });
     exportView = new S.ExportSettingsView(document, { onChange: exportSettingsChanged });
-    const baseExportSync = exportView.sync.bind(exportView);
-    function exportSources() {
-        const items = [
-            { id: 'base', title: '基础原始记录', source: service.baseSource, aliases: ['base'], associated: [] },
-            { id: 'numeric', title: dataEngine.mode === 'Self_Defined_Frame' ? '同步采样表' : '成功解析的数值帧', source: service.numericSource, aliases: ['numeric'], associated: [] }
-        ];
-        for (const source of dataEngine.outputs.values()) if (source !== service.numericSource && source !== dataEngine.emptySource) {
-            const name = dataEngine.choices().find(item => 'engine:' + item.id === source.id)?.name;
-            items.push({ id: source.id, title: source.kind === 'protocol' ? '结构化消息记录' : name ?? source.id, source, aliases: [source.id], associated: [] });
+    const widgetExportView = new S.ExportSettingsView(document, { widget: true, onChange(key) {
+        saveWidgetExportProfile();
+        if (key === 'format') {
+            widgetExport.format = el('widget-export-format').value;
+            restoreWidgetExportProfile();
         }
+        syncExportAvailability(); saveSoon();
+    } });
+
+    function exportSources() {
+        const items = [{ id: 'base', title: '基础原始记录', source: service.baseSource, aliases: ['base'], associated: [] }];
         for (const widget of widgets.widgets.values()) {
-            let item = items.find(item => item.source === widget.source);
-            if (!item && widget.type === 'byte') {
-                item = { id: widget.id, title: `指定字节流的记录 · ${widget.title}`, source: widget.source,
+            if (widget.type !== 'byte' || widget.source.kind !== 'raw') continue;
+            let item = items.find(entry => entry.source === widget.source);
+            if (!item) {
+                item = { id: widget.id, title: '指定字节流的记录 · ' + widget.title, source: widget.source,
                     aliases: [], associated: [] };
                 items.push(item);
             }
-            if (item) {
-                item.associated.push(widget.title);
-                if (widget.type === 'byte') item.aliases.push(widget.id);
-            }
+            item.aliases.push(widget.id); item.associated.push(widget.title);
         }
-        return items.filter(item => exportFormat === 'csv' || item.source.kind !== 'numeric' ||
-            dataEngine.mode === 'Data_Array' && item.source === service.numericSource)
-            .map(item => ({ ...item, numeric: item.source.kind === 'numeric' }));
+        return items;
     }
-    const exportFormats = () => ['binary', 'hex-text', 'text', 'csv'];
-    exportView.sync = options => {
-        const structured = exportSources().find(item => item.id === exportSourceId)?.source.kind === 'protocol';
-        baseExportSync({ ...options, numericAvailable: true,
-            allowedFormats: exportFormats(), directionAvailable: true, busy: exporting });
-        el('export-source').disabled = exporting;
-        if (structured && exportFormat === 'csv') {
-            el('wrap-export-numeric-parsing').hidden = true; el('export-channels-wrap').hidden = true;
-            exportView.parseError = ''; el('export-parse-status').hidden = true;
-        }
-        el('engine-export-options').hidden = exportFormat !== 'csv' || (!structured && !service.numericSource.frames.provenanceAt);
-        el('export-field-paths-wrap').hidden = !structured;
-        el('export-sync-states-wrap').hidden = structured;
-        syncExportAvailability();
-    };
-    function exportSource() {
-        const csv = exportFormat === 'csv', txOnly = !csv && el('export-direction').value === 'tx';
-        const selected = exportSources().find(item => item.id === exportSourceId);
-        // TX is global; a deleted RX range must not prevent exporting TX.
-        const effective = txOnly ? { id: exportSourceId, source: service.baseSource } : selected;
-        return !effective || !exportFormats().includes(exportFormat) ? null
-            : { ...effective, channels: exportChannels() };
-    }
-    function exportChannels() {
-        const configured = Number(el('export-channels-count').value), original = Number(globals.channelsCount);
-        const count = exportView.numericFormatEdited ? configured : original;
-        if (!Number.isInteger(count) || count < 1 || count > 65535) return [];
-        const same = count === original;
-        return Array.from({ length: same ? service.numericSource.frames.channelCount : count }, (_, index) => ({
-            name: index < original || same ? globals.channelNames[index] ?? S.formatChannelId(index) : S.formatChannelId(index),
-            signal: !same || service.numericSource.frames.isSignal(index)
-        }));
+    function rawExportSource() {
+        if (el('export-direction').value === 'tx') return service.baseSource;
+        return exportRecordSource?.source ?? null;
     }
     function saveExportProfile() {
-        if (!exportView || bindingExport || !boundExportSourceId || !exportProfiles[boundExportSourceId]) return true;
-        let profile;
-        try { profile = exportView.readProfile(); }
-        catch (error) { status('export-parse-status', error.message); return false; }
-        const settings = exportProfiles[boundExportSourceId];
-        if (boundExportFormat === 'csv') profile.direction = 'rx';
-        settings.formats[boundExportFormat] = profile;
-        return true;
+        if (!exportView || bindingExport || !boundExportSourceId) return;
+        Object.assign(exportProfiles[boundExportSourceId].formats[boundExportFormat], exportView.readProfile());
     }
-    function exportSettingsChanged(kind) {
+    function saveWidgetExportProfile() {
+        Object.assign(widgetExport.formats[widgetExport.format], widgetExportView.readProfile());
+    }
+    function restoreWidgetExportProfile() {
+        el('widget-export-format').value = widgetExport.format;
+        widgetExportView.applyProfile(widgetExport.formats[widgetExport.format]);
+    }
+    function exportSettingsChanged(key) {
         if (bindingExport || exporting) return;
-        if (!saveExportProfile() && kind !== 'format') { syncExportAvailability(); return; }
-        if (kind === 'format') {
-            exportFormat = el('export-format').value;
-            exportSourceId = exportFormat === 'csv' ? exportCsvSourceId : exportRecordSourceId;
-            boundExportSourceId = null;
-            syncExportSources();
-        } else if (kind === 'numeric') syncExportSources();
+        saveExportProfile();
+        if (key === 'format') { exportFormat = el('export-format').value; boundExportSourceId = null; syncExportSources(); }
         else syncExportAvailability();
         saveSoon();
     }
     function syncExportSources() {
         if (!exportView || !widgets) return;
-        if (!saveExportProfile()) return;
+        saveExportProfile();
         bindingExport = true;
         try {
             const items = exportSources();
-            const record = items.find(item => item.aliases.includes(exportRecordSourceId)) ??
-                items.find(item => item.source === exportRecordSource);
-            if (record) {
-                if (record.id !== exportRecordSourceId && exportProfiles[exportRecordSourceId])
-                    exportProfiles[record.id] = exportProfiles[exportRecordSourceId];
-                exportRecordSourceId = record.id; exportRecordSource = record.source;
-                if (exportFormat !== 'csv') exportSourceId = record.id;
+            const selected = items.find(item => item.aliases.includes(exportRecordSourceId)) ??
+                items.find(item => item.source === exportRecordSource?.source);
+            if (selected && selected.id !== exportRecordSourceId) {
+                if (exportProfiles[exportRecordSourceId]) exportProfiles[selected.id] = exportProfiles[exportRecordSourceId];
+                exportRecordSourceId = selected.id;
             }
-            const selected = items.find(item => item.aliases.includes(exportSourceId)) ??
-                (boundExportSourceId === exportSourceId ? items.find(item => item.source === boundExportSource) : null);
-            if (selected && selected.id !== exportSourceId) {
-                if (exportProfiles[exportSourceId]) exportProfiles[selected.id] = exportProfiles[exportSourceId];
-                exportSourceId = selected.id;
-                if (exportFormat !== 'csv') exportRecordSourceId = selected.id;
-                else exportCsvSourceId = selected.id;
-            }
-            const option = (value, title) => { const node = document.createElement('option'); node.value = value; node.textContent = title; return node; };
-            el('export-source').replaceChildren(...items.map(item => option(item.id, item.title)));
+            exportRecordSource = selected ?? null;
+            const option = item => {
+                const node = document.createElement('option'); node.value = item.id; node.textContent = item.title; return node;
+            };
+            el('export-source').replaceChildren(...items.map(option));
             el('export-source').value = selected?.id ?? '';
-            boundExportSourceId = exportSourceId ?? 'base'; boundExportFormat = exportFormat;
-            boundExportSource = selected?.source ?? null;
+            boundExportSourceId = selected?.id ?? (Object.hasOwn(exportProfiles, exportRecordSourceId) ? exportRecordSourceId : 'base');
+            boundExportFormat = exportFormat;
             exportProfiles[boundExportSourceId] ??= S.WidgetConfig.normalizeBufferExportSettings(null);
             const settings = exportProfiles[boundExportSourceId];
             settings.format = exportFormat; el('export-format').value = exportFormat;
-            const active = widgets.active;
-            const textBoundary = active?.type === 'byte' ? active.settings.textBoundary : globals.textBoundary;
-            exportView.setParsingDefaults(globals, { encoding: active?.type === 'byte' ? active.settings.textEncoding : globals.textEncoding,
-                boundary: ['idle', 'idle-basic'].includes(textBoundary) ? 'records' : textBoundary });
-            exportView.numericFormatEdited = Boolean(settings.formats[exportFormat].numericFormat);
-            if (exportView.numericFormatEdited) el('export-channels-count').value = settings.formats[exportFormat].numericFormat.channelsCount;
-            const channels = exportFormat === 'csv' ? exportSource().channels : [];
-            const profile = settings.formats[exportFormat];
-            exportView.applyProfile(profile, channels, exportView.textDefaults.encoding ?? profile.encoding);
-            exportView.sync();
+            exportView.applyProfile(settings.formats[exportFormat]);
+            widgetExportSelection = S.widgetExportSelection(widgets.active, globals.channelNames, dataEngine.mode);
+            syncExportAvailability();
         } finally { bindingExport = false; }
     }
-    function syncExportAvailability() {
-        if (!exportView || disposed) return;
-        const selected = exportSource(), csv = el('export-format').value === 'csv';
-        const direction = csv ? 'rx' : el('export-direction').value;
-        const count = selected ? (direction !== 'tx' ? selected.source.frames.length : 0) + (direction !== 'rx' ? service.txFrames.length : 0) : 0;
-        el('btn-export').disabled = exporting || !selected || !count || csv && selected.source.kind !== 'protocol' && !exportView.selectedChannels().length ||
-            direction !== 'tx' && selected.source.rebuilding || csv && selected.source.frames.rebuilding || Boolean(exportView.parseError);
-        el('wrap-export-source').hidden = !csv && direction === 'tx';
-        const rx = selected?.source.frames.length ?? 0, tx = service.txFrames.length;
-        const buffers = selected ? [direction !== 'tx' && selected.source.frames, direction !== 'rx' && service.txFrames].filter(Boolean) : [];
-        const byteCount = buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, 0);
-        const timestamps = buffers.filter(buffer => buffer.length).flatMap(buffer =>
+    function widgetSelectionForFormat(format, selected = widgetExportSelection) {
+        if (format !== 'text') return selected;
+        const widget = widgets.active;
+        return widget?.type === 'byte' && widget.settings.captureMode === 'text' && widget.source.kind === 'raw'
+            ? { widget, source: widget.source, encoding: widget.settings.textEncoding } : null;
+    }
+    function widgetExportIssue(format, selected) {
+        if (!selected) return format === 'text' ? '请选择显示「文本」的字节流控件。'
+            : '请选择有解析数据的波形、位姿或显示「数据引擎」的字节流控件。';
+        if (selected.source.rebuilding || selected.source.frames.rebuilding) return '当前控件正在重建历史。';
+        if (!selected.source.frames.length) return '当前控件没有可导出的记录。';
+        if ((format === 'csv' || format === 'engine-text' || selected.source.frames.provenanceAt) &&
+            selected.source.kind === 'numeric' && !selected.channelIndices.length)
+            return '请在当前控件中选择至少一个可导出的通道。';
+        return '';
+    }
+    function exportTimeRange(buffers) {
+        const times = buffers.filter(buffer => buffer.length).flatMap(buffer =>
             [buffer.timestampAt(0), buffer.timestampAt(buffer.length - 1)]).filter(Number.isFinite);
-        const formatTime = value => {
+        const format = value => {
             const date = new Date(value), pad = (n, width = 2) => String(n).padStart(width, '0');
-            return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
+            return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' +
+                pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds()) + '.' + pad(date.getMilliseconds(), 3);
         };
-        const timeRange = timestamps.length ? `${formatTime(Math.min(...timestamps))} ～ ${formatTime(Math.max(...timestamps))}` : '暂无记录';
-        const countLabel = csv || el('export-format').value === 'text' ? `本次读取 ${count} 条记录` : `本次导出 ${count} 帧`;
-        el('export-range-summary').textContent = selected ? `完整保留缓冲区：${direction === 'tx' ? `TX ${tx}` : direction === 'rx' ? `RX ${rx}` : `RX ${rx}，TX ${tx}`} 帧；${countLabel}，原始字节 ${byteCount.toLocaleString()} B。\n时间范围：${timeRange}` : '';
-        const item = exportSources().find(item => item.id === exportSourceId);
-        const scope = csv ? '按独立导出参数读取所选记录的原始字节，不修改采集规则或历史；数值源不包含采集时已丢弃的无效字节。'
-            : direction === 'tx' ? '导出全局共用的成功发送记录，与 RX 记录范围无关。'
-                : item?.numeric ? '仅包含成功解析的数值帧对应的原始字节，排除无法匹配的字节。'
-                    : '导出当前保留的原始记录，包含未成功解析的字节。';
-        el('export-scope-hint').textContent = scope + (direction !== 'tx' && item?.associated.length ?
-            ` 关联控件（共用缓冲区）：${item.associated.join('、')}。` : '');
-        status('export-source-status', !selected ? '请重新选择记录范围；不会自动切换到其他缓冲区。' : !count ? '所选缓冲区没有可导出的记录。'
-            : direction !== 'tx' && selected.source.rebuilding ? '所选来源正在准备历史。' : '');
+        return times.length ? '时间范围：' + format(Math.min(...times)) + ' ～ ' + format(Math.max(...times)) : '';
+    }
+    function syncExportAvailability() {
+        if (!exportView || !widgets || disposed) return;
+        const source = rawExportSource(), direction = el('export-direction').value, tx = service.txFrames;
+        const rxCount = direction !== 'tx' ? source?.frames.length ?? 0 : 0, txCount = direction !== 'rx' ? tx.length : 0;
+        const rawIssue = !source ? '请重新选择记录范围。' : direction !== 'tx' && source.rebuilding ? '所选来源正在准备历史。'
+            : !rxCount && !txCount ? '所选缓冲区没有可导出的记录。' : '';
+        exportView.sync({ busy: exporting, available: !rawIssue });
+        el('export-source').disabled = exporting;
+        el('wrap-export-source').hidden = direction === 'tx';
+        const buffers = source ? [direction !== 'tx' && source.frames, direction !== 'rx' && tx].filter(Boolean) : [];
+        const byteCount = buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, 0);
+        el('export-range-summary').textContent = source ? 'RX ' + rxCount + '，TX ' + txCount + ' 帧，原始字节 ' + byteCount.toLocaleString() + ' B。\n' +
+            exportTimeRange(buffers) : '';
+        const associated = exportRecordSource?.associated ?? [];
+        el('export-scope-hint').textContent = direction === 'tx' ? '导出成功发送的 TX 记录。'
+            : '导出保留的原始记录，包含未成功解析的字节。' +
+                (associated.length ? ' 关联控件（共用缓冲区）：' + associated.join('、') + '。' : '');
+        status('export-source-status', rawIssue);
+
+        const format = widgetExport.format, selected = widgetSelectionForFormat(format), issue = widgetExportIssue(format, selected);
+        widgetExportView.sync({ busy: exporting, available: !issue, syncAvailable: Boolean(selected?.source.frames.provenanceAt) });
+        const title = widgets.active?.title;
+        el('widget-export-scope-hint').textContent = title ? '当前控件：' + title : '';
+        const hint = format === 'binary' || format === 'hex-text' ? '导出成功解析的原始帧。'
+            : format === 'text' ? '按控件的字符集和记录边界导出。' : '导出该控件采用的通道或字段。';
+        el('widget-export-range-summary').textContent = selected ? hint + '\n' + exportTimeRange([selected.source.frames]) : '';
+        status('widget-export-source-status', issue);
     }
     listen(el('export-source'), 'change', () => {
         if (exporting) return;
-        if (!saveExportProfile()) { el('export-source').value = exportSourceId ?? ''; return; }
-        exportSourceId = el('export-source').value || null;
-        if (exportFormat === 'csv') exportCsvSourceId = exportSourceId;
-        else { exportRecordSourceId = exportSourceId; exportRecordSource = null; }
+        saveExportProfile();
+        exportRecordSourceId = el('export-source').value || null; exportRecordSource = null;
         boundExportSourceId = null;
         syncExportSources(); saveSoon();
     });
-    for (const id of ['export-direction', 'export-encoding', 'export-timestamps', 'export-markers', 'export-output-encoding', 'export-text-boundary'])
-        listen(el(id), 'change', () => exportSettingsChanged('profile'));
+
     function download(parts, filename, type) {
         const blob = new Blob(parts, { type }), anchor = document.createElement('a');
         anchor.href = URL.createObjectURL(blob); anchor.download = filename; anchor.click(); URL.revokeObjectURL(anchor.href);
     }
-    async function exportData() {
-        if (exporting || disposed) return false;
-        const selected = exportSource();
-        if (!selected) { syncExportAvailability(); return false; }
-        const options = exportView.read(), csv = options.format === 'csv', source = selected.source;
-        const txOnly = !csv && options.direction === 'tx';
-        const frames = source.frames, tx = service.txFrames;
-        const sources = csv || options.direction === 'rx' ? [frames] : options.direction === 'tx' ? [tx] : [frames, tx];
-        const count = sources.reduce((sum, buffer) => sum + buffer.length, 0);
-        if (!count || !txOnly && source.rebuilding || csv && (frames.rebuilding || source.kind !== 'protocol' && !options.channelIndices.length)) return false;
-        const epoch = service.epoch, generation = source.generation, computedGeneration = frames.generation;
-        const firstOrders = sources.map(buffer => buffer.orderAt(0));
-        const check = () => {
-            if (disposed || service.epoch !== epoch || exportFormat !== options.format ||
-                !txOnly && (source.generation !== generation || !service.sources.has(source) ||
-                    exportSource()?.source !== source) ||
-                csv && frames.generation !== computedGeneration ||
-                sources.some((buffer, index) => buffer.orderAt(0) !== firstOrders[index]))
-                throw new Error('导出期间来源或保留窗口已变化，请重新选择并导出');
-        };
-        let large = count > 50000, retainedBytes = 0;
-        if (!large) for (const buffer of sources) {
-            for (let i = 0; i < buffer.length && retainedBytes <= 32 * 1024 * 1024; i++) retainedBytes += buffer.rawBytesAt(i).length;
-            if (retainedBytes > 32 * 1024 * 1024) { large = true; break; }
-        }
-        const extension = csv ? 'csv' : options.format === 'binary' ? 'bin' : options.format === 'hex-text' ? 'hex' : 'txt';
+    async function writeExport(view, options, buffers, check, chunks, metadataSize = 0) {
+        const csv = options.format === 'csv', binary = options.format === 'binary';
+        const text = options.format === 'text' || options.format === 'engine-text';
+        const extension = csv ? 'csv' : binary ? 'bin' : text ? 'txt' : 'hex';
         const filename = 'Scientific_Plot_Export_' + Date.now() + '.' + extension;
-        exporting = true; exportView.sync({ busy: true });
+        const large = buffers.reduce((sum, buffer) => sum + buffer.length, 0) > 50000 ||
+            buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, metadataSize) > 32 * 1024 * 1024;
+        const statusId = view.prefix + '-source-status';
+        exporting = true; syncExportAvailability();
         let writable, failure = '';
         try {
-            const structuredCsv = csv && source.kind === 'protocol';
-            const syncCsv = csv && typeof frames.provenanceAt === 'function';
-            const engineCsv = structuredCsv || syncCsv;
-            const customCsv = !engineCsv && csv && (source.kind !== 'numeric' || exportView.numericFormatEdited && S.EXPORT_NUMERIC_FIELDS.some(key =>
-                String(options.numericFormat[key]) !== String(globals[key])));
-            const customText = options.format === 'text';
-            const encodedText = options.format === 'text';
-            if (engineCsv || customCsv || customText || encodedText) {
-                el('btn-export').textContent = '准备导出…';
-                const encoder = await S.createExportTextEncoder(encodedText ? options.outputEncoding : 'utf-8');
-                check();
-                const context = { check, onProgress(done, total) {
-                    check(); el('btn-export').textContent = `正在解析 ${total ? Math.round(done / total * 100) : 100}%`;
-                }, definitions: Number(options.numericFormat?.channelsCount) === Number(globals.channelsCount) ? globals.channelDefinitions : [] };
-                const selectedPaths = el('export-field-paths').value.split(/[\n,]/).map(path => path.trim()).filter(Boolean);
-                const chunks = structuredCsv ? S.structuredCsvChunksAsync(frames, source.decodeRecord, { check, timestamps: options.timestamps, fieldPaths: selectedPaths.length ? selectedPaths : null })
-                    : syncCsv ? S.synchronizedCsvChunks(frames, selected.channels, { ...options, check, syncStates: el('export-sync-states').checked })
-                    : customCsv ? S.reparsedCsvChunks(frames, options.numericFormat, selected.channels, options, context)
-                    : customText ? S.reparsedTextChunks(frames, tx, options, context) : S.captureExportChunks(frames, tx, options);
-                const parts = [];
-                if (large) {
-                    if (typeof window.showSaveFilePicker !== 'function') throw new Error('大容量导出需要支持文件系统保存的 Chrome 或 Edge');
-                    const handle = await window.showSaveFilePicker({ suggestedName: filename }); check();
-                    writable = await handle.createWritable(); check();
-                }
-                const write = async text => {
-                    let encodedWork = 0;
-                    for (let start = 0; start < text.length;) {
-                        let end = Math.min(text.length, start + 16384);
-                        if (end < text.length && (text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff ||
-                            /[\u0304\u030c]/.test(text[end]) && /[\u00ca\u00ea]/.test(text[end - 1]))) end++;
-                        check(); const bytes = encoder.encode(text.slice(start, end)); start = end;
-                        if (writable) { await writable.write(bytes); check(); } else parts.push(bytes);
-                        if ((encodedWork += bytes.length) >= 65536) {
-                            encodedWork = 0; await new Promise(resolve => setTimeout(resolve, 0)); check();
-                        }
-                    }
-                };
-                if (csv) await write('\uFEFF');
-                let work = 0;
-                for await (const chunk of chunks) {
-                    await write(chunk);
-                    if ((work += chunk.length) > 262144) { work = 0; await new Promise(resolve => setTimeout(resolve, 0)); check(); }
-                }
-                if (writable) { await writable.close(); writable = null; }
-                else { check(); download(parts, filename, csv ? 'text/csv;charset=utf-8' : 'text/plain;charset=' + options.outputEncoding); }
-                return true;
-            }
             if (large) {
                 if (typeof window.showSaveFilePicker !== 'function') throw new Error('大容量导出需要支持文件系统保存的 Chrome 或 Edge');
                 const handle = await window.showSaveFilePicker({ suggestedName: filename }); check();
                 writable = await handle.createWritable(); check();
-                const guarded = { async write(chunk) { check(); await writable.write(chunk); check(); } };
-                const progress = done => { check(); el('btn-export').textContent = '正在导出 ' + Math.min(100, Math.round(done / count * 100)) + '%'; };
-                if (csv) await S.writeFrameCsv(frames, selected.channels, guarded, progress, options);
-                else await S.writeCaptureExport(frames, tx, options, guarded, progress);
-                check(); await writable.close(); writable = null;
-            } else {
-                check();
-                const parts = csv ? ['\uFEFF' + S.exportFrameCsv(frames, selected.channels, options)] : [...S.captureExportChunks(frames, tx, options)];
-                check(); download(parts, filename, csv ? 'text/csv;charset=utf-8'
-                    : options.format === 'binary' ? 'application/octet-stream' : 'text/plain;charset=utf-8');
             }
+            const encoder = binary ? null : await S.createExportTextEncoder(text ? options.outputEncoding : 'utf-8');
+            check();
+            const parts = [];
+            const writeBytes = async bytes => {
+                check();
+                if (writable) { await writable.write(bytes); check(); } else parts.push(bytes);
+            };
+            if (csv) await writeBytes(encoder.encode('\uFEFF'));
+            let written = false, work = 0;
+            for await (const chunk of chunks) {
+                if (typeof chunk !== 'string') {
+                    if (chunk.length) { written = true; await writeBytes(chunk); work += chunk.length; }
+                } else for (let start = 0; start < chunk.length;) {
+                    let end = Math.min(chunk.length, start + 16384);
+                    if (end < chunk.length && (chunk.charCodeAt(end - 1) >= 0xd800 && chunk.charCodeAt(end - 1) <= 0xdbff ||
+                        /[\u0304\u030c]/.test(chunk[end]) && /[\u00ca\u00ea]/.test(chunk[end - 1]))) end++;
+                    const bytes = encoder.encode(chunk.slice(start, end));
+                    written = true; await writeBytes(bytes); work += bytes.length; start = end;
+                    if (work >= 262144) { work = 0; await new Promise(resolve => setTimeout(resolve, 0)); check(); }
+                }
+                if (work >= 262144) { work = 0; await new Promise(resolve => setTimeout(resolve, 0)); check(); }
+            }
+            if (!written) throw new Error('暂无符合条件的记录');
+            check();
+            if (writable) { await writable.close(); writable = null; }
+            else download(parts, filename, binary ? 'application/octet-stream' : csv ? 'text/csv;charset=utf-8' :
+                'text/plain;charset=' + (text ? options.outputEncoding : 'utf-8'));
             return true;
         } catch (error) {
             if (writable) try { await writable.abort(); } catch { /* Preserve the original failure. */ }
             if (error.name !== 'AbortError') failure = '导出失败：' + error.message;
             return false;
         } finally {
-            exporting = false; el('btn-export').textContent = '导出数据'; syncExportSources();
-            if (failure) status('export-source-status', failure);
+            exporting = false; syncExportSources();
+            if (failure) status(statusId, failure);
         }
     }
+    function exportCheck(buffers, valid) {
+        const epoch = service.epoch, orders = buffers.map(buffer => buffer.orderAt(0));
+        return () => {
+            if (disposed || service.epoch !== epoch || !valid() ||
+                buffers.some((buffer, index) => buffer.orderAt(0) !== orders[index]))
+                throw new Error('导出期间来源或保留窗口已变化，请重新导出');
+        };
+    }
+    async function exportData() {
+        if (exporting || disposed) return false;
+        const options = exportView.read(), source = rawExportSource(), tx = service.txFrames;
+        if (!source || options.direction !== 'tx' && source.rebuilding) return false;
+        const sources = [options.direction !== 'tx' && source.frames, options.direction !== 'rx' && tx].filter(Boolean);
+        if (!sources.some(buffer => buffer.length)) return false;
+        const generation = source.generation;
+        const check = exportCheck(sources, () => exportFormat === options.format && (options.direction === 'tx' ||
+            rawExportSource() === source && source.generation === generation && service.sources.has(source)));
+        return writeExport(exportView, options, sources, check, S.captureExportChunks(source.frames, tx, options));
+    }
+    async function exportWidgetData() {
+        if (exporting || disposed) return false;
+        const options = widgetExportView.read(), format = options.format;
+        const selected = widgetSelectionForFormat(format, S.widgetExportSelection(widgets.active, globals.channelNames, dataEngine.mode));
+        if (widgetExportIssue(format, selected)) return false;
+        const { widget, source, channels, channelIndices, fieldPaths } = selected, { frames } = source;
+        const wire = format === 'binary' || format === 'hex-text';
+        const protocolSource = wire && source.kind === 'numeric' && dataEngine.mode === 'Self_Defined_Frame'
+            ? dataEngine.recordsSource : null;
+        const buffers = protocolSource ? [frames, protocolSource.frames] : [frames];
+        const generation = source.generation, frameGeneration = frames.generation, protocolGeneration = protocolSource?.generation;
+        const check = exportCheck(buffers, () => widgets.widgets.get(widget.id) === widget && widget.source === source &&
+            source.generation === generation && frames.generation === frameGeneration &&
+            (!protocolSource || dataEngine.recordsSource === protocolSource && protocolSource.generation === protocolGeneration));
+        const settings = { ...options, check, fieldPaths, channelIndices, successfulOnly: true };
+        const chunks = wire ? S.parsedByteChunks(selected, protocolSource, settings)
+            : format === 'text' ? S.captureExportChunks(frames, service.txFrames, { ...settings, encoding: selected.encoding })
+            : format === 'engine-text' ? S.parsedTextChunks(selected, settings)
+            : source.kind === 'protocol' ? S.structuredCsvChunksAsync(frames, source.decodeRecord, settings)
+            : typeof frames.provenanceAt === 'function' ? S.synchronizedCsvChunks(frames, channels, settings)
+            : S.frameCsvChunks(frames, channels, 1024, settings);
+        return writeExport(widgetExportView, options, buffers, check, chunks, !wire ? frames.length * (channelIndices?.length ?? 0) * 16 : 0);
+    }
     listen(el('btn-export'), 'click', () => { void exportData(); });
+    listen(el('btn-widget-export'), 'click', () => { void exportWidgetData(); });
     const connectionIds = { connType: 'conn-type', serialBaud: 'serial-baud', serialData: 'serial-data',
         serialStop: 'serial-stop', serialParity: 'serial-parity', netHost: 'net-host', netPort: 'net-port', netLocalPort: 'net-local' };
     function syncConnection() {
@@ -649,21 +614,20 @@ async function startSerialPlotterApplication() {
         previousStats = { time: now, rx: service.stats.rxBytes, tx: service.stats.txBytes, epoch: service.epoch }; syncExportAvailability();
     }
     function getConfig() {
-        saveExportProfile();
+        saveExportProfile(); saveWidgetExportProfile();
         return { version: 3, global: { ...globals, channelNames: [...globals.channelNames], channelRecords: widgets.getChannelRegistry().toJSON() }, widgets: widgets.serialize(),
             workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
             dataEngine: dataEngine.serialize(),
-            tools: { ...tools.serialize(), exportSourceId, exportRecordSourceId, exportCsvSourceId, exportFormat,
+            tools: { ...tools.serialize(), exportSourceId: exportRecordSourceId, exportRecordSourceId, exportFormat, widgetExport,
                 exportProfiles: JSON.parse(JSON.stringify(exportProfiles)) },
             send: { mode: el('send-mode').value, interval: el('send-interval').value, unit: el('send-interval-unit').value,
                 tab: sendTab, protocol: regularProtocolView.getDraft(), commands: commandLibrary.serialize() } };
     }
     function installWidgets(config) {
-        exportSourceId = config.tools.exportSourceId;
-        exportProfiles = config.tools.exportProfiles; boundExportSourceId = null; boundExportSource = null;
-        exportFormat = config.tools.exportFormat; exportRecordSourceId = config.tools.exportRecordSourceId;
-        exportRecordSource = null;
-        exportCsvSourceId = config.tools.exportCsvSourceId;
+        exportProfiles = config.tools.exportProfiles; boundExportSourceId = null;
+        exportFormat = bufferFormat(config.tools.exportFormat);
+        exportRecordSourceId = bufferSourceId(config.tools.exportRecordSourceId); exportRecordSource = null;
+        widgetExport = config.tools.widgetExport; restoreWidgetExportProfile();
         workspace.setZoom(config.workspace.zoom);
         workspace.setStep(config.workspace.step);
         for (const widget of config.widgets) widgets.create(widget);
@@ -896,7 +860,7 @@ async function startSerialPlotterApplication() {
         if (saveTimer !== null) saveNow();
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
-        clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose?.();
+        clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose(); widgetExportView.dispose();
         engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose(); service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
         for (const adapter of [serialAdapter, netAdapter]) {
@@ -908,7 +872,7 @@ async function startSerialPlotterApplication() {
     installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
     const statsTimer = setInterval(updateStats, 1000);
     S.application = { service, widgets, workspace, tools, serialAdapter, netAdapter, sendController,
-        protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, updateStats,
+        protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, exportWidgetData, updateStats,
         dataEngine, engineView, workspaceStorage, saveNow, saveSoon, flushConfig };
     listen(window, 'pagehide', dispose);
     return S.application;

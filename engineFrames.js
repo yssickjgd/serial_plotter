@@ -103,9 +103,9 @@
         statusAt(channel, index) {
             return this.provenanceInfoAt(channel, index).status;
         }
-        provenanceAt(channel, index) {
+        provenanceAt(channel, index, { allOrigins = false } = {}) {
             if (channel < this.rawChannelCount) return this._event(channel, this.timestampAt(index))?.origin ?? null;
-            const info = this.provenanceInfoAt(channel, index);
+            const info = this.provenanceInfoAt(channel, index, { allOrigins });
             return info.origin ? { ...info.origin, origins: info.origins, ...(info.truncated ? { truncated: true } : {}) } : null;
         }
         _samplePeriod(index) {
@@ -164,9 +164,10 @@
             this.provenancePlans.set(number, references); return references;
         }
         /** Trace only actual signal references; query work and optional origin lists are bounded. */
-        provenanceInfoAt(channel, index) {
+        provenanceInfoAt(channel, index, { allOrigins = false } = {}) {
             const key = `${this.version}:${channel}:${this.head + index}`;
-            if (this.provenanceResults.has(key)) return this.provenanceResults.get(key);
+            if (!allOrigins && this.provenanceResults.has(key)) return this.provenanceResults.get(key);
+            const originCapacity = allOrigins ? Infinity : 64;
             const period = this._samplePeriod(index), value = this.getValue(channel, index), origins = [], originKeys = new Set();
             let representative = null, representativeTime = -Infinity, newestInputTime = -Infinity, expired = false, hasInputs = false, work = 0, originLimit = false;
             const pending = [{ number: channel + 1, index }], visited = new Map();
@@ -202,7 +203,7 @@
                 newestInputTime = Math.max(newestInputTime, event.timestamp);
                 const origin = event.origin; if (!origin) continue;
                 const originKey = `${origin.order}:${origin.byteOffset}:${origin.endByte}`;
-                if (!originKeys.has(originKey) && origins.length < 64) { originKeys.add(originKey); origins.push(origin); }
+                if (!originKeys.has(originKey) && origins.length < originCapacity) { originKeys.add(originKey); origins.push(origin); }
                 else if (!originKeys.has(originKey)) originLimit = true;
                 if (event.timestamp > representativeTime || event.timestamp === representativeTime && (origin.order ?? 0) > (representative?.order ?? 0)) {
                     representative = origin; representativeTime = event.timestamp;
@@ -211,11 +212,15 @@
             const status = !period || !Number.isFinite(value) ? expired ? 'expired' : 'missing'
                 : this._newInPeriod(newestInputTime, period) ? 'new' : 'held';
             if (representative && !origins.includes(representative)) {
-                if (origins.length === 64) origins[63] = representative; else origins.push(representative);
+                if (origins.length === originCapacity) origins[originCapacity - 1] = representative;
+                else origins.push(representative);
             }
             const result = { status, origin: representative, origins, hasInputs: hasInputs || pending.length > 0, truncated: originLimit || pending.length > 0 };
-            if (this.provenanceResults.size >= 64) this.provenanceResults.delete(this.provenanceResults.keys().next().value);
-            this.provenanceResults.set(key, result); return result;
+            if (!allOrigins) {
+                if (this.provenanceResults.size >= 64) this.provenanceResults.delete(this.provenanceResults.keys().next().value);
+                this.provenanceResults.set(key, result);
+            }
+            return result;
         }
         getValue(channel, index) {
             if (index < 0 || index >= this.length || channel < 0 || channel >= this.channelCount) return NaN;

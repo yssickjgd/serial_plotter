@@ -65,4 +65,5 @@ async function writeFrameCsv(frames, channels, writable, onProgress = () => {}, 
 if (typeof module !== 'undefined') module.exports = { exportFrameCsv, frameCsvChunks, writeFrameCsv };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.exportFrameCsv = exportFrameCsv;
+globalThis.SerialPlotter.frameCsvChunks = frameCsvChunks;
 globalThis.SerialPlotter.writeFrameCsv = writeFrameCsv;

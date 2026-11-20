@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { migrateWorkspaceConfig, validateWorkspaceConfig } = require('../widgetConfig');
+const { migrateWorkspaceConfig, normalizeBufferExportSettings, validateWorkspaceConfig } = require('../widgetConfig');
 
 test('interface layout defaults migrate and custom panel preferences roundtrip with strict validation', () => {
     const config = migrateWorkspaceConfig(null);
@@ -192,6 +192,18 @@ test('buffer export settings roundtrip independently and malformed profiles are 
         assert.throws(() => validateWorkspaceConfig({ ...config, tools: { ...config.tools,
             exportProfiles: { ...config.tools.exportProfiles, numeric: profile } } }));
     }
+});
+
+test('Hex text includes RX and TX by default and preserves saved direction choices', () => {
+    const { formats } = normalizeBufferExportSettings(null);
+    assert.equal(formats['hex-text'].direction, 'both');
+    assert.equal(formats.binary.direction, 'rx');
+    assert.equal(formats.text.direction, 'rx');
+    assert.equal(formats.csv.direction, 'rx');
+    for (const direction of ['rx', 'tx'])
+        assert.equal(normalizeBufferExportSettings({
+            format: 'hex-text', formats: { 'hex-text': { direction } }
+        }).formats['hex-text'].direction, direction);
 });
 
 

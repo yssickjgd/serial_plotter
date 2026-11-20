@@ -596,6 +596,7 @@ class WidgetController {
         const wave = widget.type === 'wave';
         const valid = new Set(widget.type === 'pose' ? ['tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-config', 'tab-waveform-channels']
             : ['tab-monitor-config', ...(widget.settings.captureMode === 'engine' && ['numeric', 'protocol'].includes(widget.source.kind) ? ['tab-monitor-channels'] : [])]);
+        valid.add('tab-widget-export');
         if (!valid.has(tab)) tab = widget.type === 'pose' ? 'tab-pose-display' : wave ? 'tab-waveform-config' : 'tab-monitor-config';
         widget.lastTab = tab;
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn')) {

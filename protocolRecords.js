@@ -72,6 +72,10 @@ function protocolRecordStatus(value) {
     return record.warnings?.length ? 'warning' : 'ok';
 }
 
+function protocolRecordIsSuccessful(value) {
+    return value != null && ['ok', 'warning'].includes(protocolRecordStatus(value));
+}
+
 function protocolRecordSummary(value) {
     const record = unwrapProtocolRecord(value), status = protocolRecordStatus(record);
     const labels = { ok: '正常', warning: '警告', error: '错误', unknown: '未知消息' };
@@ -144,7 +148,7 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
     if (typeof decodeRecord !== 'function') throw new TypeError('结构化导出需要协议解码器');
     const rowsPerChunk = options.rowsPerChunk ?? 1024;
     if (!Number.isInteger(rowsPerChunk) || rowsPerChunk < 1) throw new RangeError('每块记录数必须为正整数');
-    const count = frames.length, firstOrder = frames.orderAt(0);
+    const count = options.recordCount ?? frames.length, firstOrder = frames.orderAt(0);
     const guard = () => {
         if (frames.orderAt(0) !== firstOrder) throw new Error('导出期间最早帧已被覆盖，请暂停采集后重试');
     };
@@ -155,7 +159,9 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
     const paths = options.columnPaths ? [...options.columnPaths] : [], seen = new Set(paths);
     for (let index = 0; !options.columnPaths && index < count; index++) {
         guard();
-        const record = unwrapProtocolRecord(decodeRecord(index));
+        const decoded = decodeRecord(index);
+        if (options.successfulOnly && !protocolRecordIsSuccessful(decoded)) continue;
+        const record = unwrapProtocolRecord(decoded);
         for (const field of protocolCsvFields(record, options)) if (!seen.has(field.path)) {
             seen.add(field.path); paths.push(field.path);
         }
@@ -166,7 +172,9 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
         guard(); const lines = [];
         for (let index = start; index < Math.min(count, start + rowsPerChunk); index++) {
             guard();
-            const record = unwrapProtocolRecord(decodeRecord(index));
+            const decoded = decodeRecord(index);
+            if (options.successfulOnly && !protocolRecordIsSuccessful(decoded)) continue;
+            const record = unwrapProtocolRecord(decoded);
             const fields = new Map(protocolCsvFields(record, options).map(field => [field.path, field.value]));
             const timestamp = frames.timestampAt?.(index), values = [index];
             if (options.timestamps) values.push(Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '');
@@ -174,13 +182,14 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
                 (record.warnings ?? []).map(item => item.message ?? item.code ?? String(item)).join('; '), ...paths.map(path => fields.get(path)));
             lines.push(values.map(csv).join(','));
         }
-        yield lines.join('\r\n') + '\r\n';
+        if (lines.length) yield lines.join('\r\n') + '\r\n';
     }
 }
 
 /** Discover columns in bounded slices before streaming rows, keeping the UI responsive. */
 async function* structuredCsvChunksAsync(frames, decodeRecord, options = {}) {
     const count = frames.length, firstOrder = frames.orderAt(0), paths = new Set();
+    let accepted = 0;
     const yieldControl = options.yieldControl ?? (() => new Promise(resolve => setTimeout(resolve, 0)));
     const guard = () => {
         options.check?.();
@@ -188,15 +197,20 @@ async function* structuredCsvChunksAsync(frames, decodeRecord, options = {}) {
     };
     for (let index = 0; index < count; index++) {
         guard();
-        for (const field of protocolCsvFields(decodeRecord(index), options)) paths.add(field.path);
+        const record = decodeRecord(index);
+        if (!options.successfulOnly || protocolRecordIsSuccessful(record)) {
+            accepted++;
+            for (const field of protocolCsvFields(record, options)) paths.add(field.path);
+        }
         if (index % 256 === 255) { await yieldControl(); guard(); }
     }
-    for (const chunk of structuredCsvChunks(frames, decodeRecord, { ...options, columnPaths: [...paths] })) {
+    if (!accepted) return;
+    for (const chunk of structuredCsvChunks(frames, decodeRecord, { ...options, columnPaths: [...paths], recordCount: count })) {
         guard(); yield chunk; await yieldControl(); guard();
     }
 }
 
-const ProtocolRecordsApi = { protocolNumberBase, parseProtocolInteger, protocolBytesText, parseProtocolBytes, unwrapProtocolRecord, protocolJsonValue, protocolValueText, protocolRecordStatus,
+const ProtocolRecordsApi = { protocolNumberBase, parseProtocolInteger, protocolBytesText, parseProtocolBytes, unwrapProtocolRecord, protocolJsonValue, protocolValueText, protocolRecordStatus, protocolRecordIsSuccessful,
     protocolRecordSummary, protocolPathContains, protocolVisibleFields, protocolCsvFields, structuredCsvChunks, structuredCsvChunksAsync };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, ProtocolRecordsApi);

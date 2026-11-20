@@ -85,8 +85,24 @@ function normalizeBufferExportSettings(input, defaultFormat = 'hex-text') {
         Object.keys(input.formats).some(format => !allowed.includes(format))) throw new Error('缓冲区导出配置无效');
     return { format: input.format, formats: Object.fromEntries(allowed.map(format => {
         const profile = normalizeExportProfile(input.formats[format]);
+        if (format === 'hex-text' && input.formats[format]?.direction === undefined) profile.direction = 'both';
         if (format === 'csv') profile.direction = 'rx';
         return [format, profile];
+    })) };
+}
+
+function normalizeWidgetExportPreferences(input, legacyFormat, legacyProfiles = {}) {
+    const formats = ['binary', 'hex-text', 'text', 'engine-text', 'csv'];
+    if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input) ||
+        !formats.includes(input.format) || !input.formats || typeof input.formats !== 'object' ||
+        Array.isArray(input.formats) || Object.keys(input.formats).some(key => !formats.includes(key))))
+        throw new Error('控件导出配置无效');
+    const format = input?.format ?? (legacyFormat === 'text' ? 'text' : 'csv');
+    return { format, formats: Object.fromEntries(formats.map(key => {
+        const options = input?.formats[key] ?? legacyProfiles[key === 'engine-text' ? 'text' : key] ?? {};
+        if (options.syncStates !== undefined && typeof options.syncStates !== 'boolean') throw new Error('导出采样状态配置无效');
+        const { timestamps, markers, outputEncoding } = normalizeExportProfile(options);
+        return [key, { timestamps, markers, outputEncoding, syncStates: options.syncStates ?? false }];
     })) };
 }
 
@@ -256,6 +272,8 @@ function validateWorkspaceConfig(config) {
     if (tools.exportRecordSourceId === undefined)
         tools.exportRecordSourceId = tools.exportFormat === 'csv' ? 'base' : tools.exportSourceId;
     tools.exportCsvSourceId ??= 'numeric';
+    tools.widgetExport = normalizeWidgetExportPreferences(tools.widgetExport, tools.exportFormat,
+        profiles[tools.exportFormat === 'csv' ? tools.exportCsvSourceId : tools.exportRecordSourceId]?.formats);
     const nextNumber = config.nextNumber ?? widgets.length + 1;
     if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) throw new Error('控件序号无效');
     if (config.send !== undefined && (!config.send || typeof config.send !== 'object' || Array.isArray(config.send)))

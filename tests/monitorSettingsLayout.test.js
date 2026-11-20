@@ -33,7 +33,7 @@ test('monitor properties stay on the right while export is a peer left sidebar c
     assert.ok(!wave.includes('id="channels-list-panel"'));
     assert.ok(panel('tab-waveform-channels').includes('id="channels-list-panel"'));
     assert.ok(panel('tab-monitor-channels').includes('id="monitor-channel-list"'));
-    assert.ok(bytes.includes('id="capture-mode"'));
+    assert.match(bytes, /<select id="capture-mode">[^]*?<option value="engine">数据引擎<\/option>[^]*?<\/select>/);
     assert.ok(bytes.includes('id="frame-text-settings"'));
     assert.doesNotMatch(panel('monitor-settings-tabs'), /tab-(?:byte|waveform|pose)-frame/);
     assert.ok(panel('engine-parsing').includes('id="rebuild-history"'));
@@ -50,7 +50,7 @@ test('monitor properties stay on the right while export is a peer left sidebar c
     assert.ok(exportPanel.includes('id="export-panel"'));
     assert.ok(panel('sidebar-top').includes('data-tab="tab-export"'));
     assert.ok(panel('sidebar-top').includes('id="export-panel"'));
-    assert.doesNotMatch(panel('monitor-settings-tabs'), /tab-export|export-panel/);
+    assert.match(panel('monitor-settings-tabs'), /data-tab="tab-widget-export">导出数据/);
     assert.ok(!html.includes('id="tab-channel-config"'));
 });
 
@@ -64,15 +64,16 @@ test('export and shared parsing settings make their scope visible without changi
 
 test('sidebar export settings use peer cards with conditional format settings and compact controls', () => {
     const exportPanel = panel('export-panel');
-    for (const id of ['wrap-export-text-parsing', 'wrap-export-numeric-parsing', 'export-channels-wrap']) {
-        assert.match(exportPanel, new RegExp(`<div id="${id}" class="control-group(?: [^"]+)?"`));
-    }
+    const widgetExport = panel('tab-widget-export');
+    assert.deepEqual([...exportPanel.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]).slice(0, 2),
+        ['binary', 'hex-text']);
+    assert.match(widgetExport, /value="engine-text">数据引擎文本/);
+    assert.match(widgetExport, /value="csv" selected>数据引擎 CSV/);
+    assert.doesNotMatch(exportPanel + widgetExport, /wrap-export-text-parsing|wrap-export-numeric-parsing|export-channel-list|export-field-paths/);
     assert.match(exportPanel, /id="export-scope-panel"[^>]*>[\s\S]*?class="section-title">格式与范围/);
-    assert.match(exportPanel, /class="section-title">文本帧解析/);
-    assert.match(exportPanel, /class="section-title">数值帧解析/);
     assert.match(exportPanel, /id="export-confirm-panel"[^>]*>[\s\S]*?class="section-title">导出文件/);
     assert.match(panel('export-confirm-panel'), /id="export-text-metadata"/);
-    assert.match(panel('export-confirm-panel'), /id="export-parse-status"/);
+    assert.match(widgetExport, /id="widget-export-output-encoding"/);
     assert.match(panel('frame-text-settings'), /id="frame-text-settings"[^>]*class="sidebar-stack"/);
     assert.match(panel('wrap-response-options'), /id="wrap-response-options"[^>]*class="sidebar-stack"/);
     assert.match(panel('config-serial'), /id="config-serial"[^>]*class="sidebar-stack"/);
