@@ -10,11 +10,22 @@ function addSerial(f, fields = {}) {
     saveSerialConfig(f);
 }
 
+async function waitForConnectionButton(f, id) {
+    const button = f.get(id);
+    for (let attempt = 0; button.disabled && attempt < 10; attempt++) await f.tick(1);
+    assert.equal(button.disabled, false, id + ' becomes available');
+}
+
+async function chooseSerial(f, prefix = 'serial-primary') {
+    f.click(prefix + '-bind');
+    await waitForConnectionButton(f, prefix + '-connect');
+}
+
 function makePort() {
     let read;
     const port = {
-        opened: null, closed: 0,
-        open: async options => { port.opened = options; },
+        opened: null, closed: 0, openCount: 0,
+        open: async options => { port.opened = options; port.openCount++; },
         close: async () => { port.closed++; },
         readable: { getReader: () => ({
             read: () => new Promise(resolve => { read = resolve; }),
@@ -32,11 +43,9 @@ test('additional serial connections keep independent raw histories and can expor
     f.context.navigator.serial = { requestPort: async () => ports.shift() };
     f.click('serial-manager-open');
     f.selectConnection('primary'); f.change('serial-baud', '2000000'); saveSerialConfig(f);
-    f.click('serial-primary-bind'); await f.tick(1);
-    f.click('serial-primary-connect'); await f.tick(1);
+    await chooseSerial(f);
     addSerial(f, { 'serial-config-name': '第二路', 'serial-baud': '460800' });
-    f.click('serial-2-bind'); await f.tick(1);
-    f.click('serial-2-connect'); await f.tick(1);
+    await chooseSerial(f, 'serial-2');
     assert.equal(primary.opened.baudRate, 2000000);
     assert.equal(secondary.opened.baudRate, 460800);
     f.selectConnection('primary');
@@ -372,7 +381,7 @@ test('serial and multiple network sources connect, receive and send independentl
     };
 
     f.click('serial-manager-open');
-    f.click('serial-primary-bind'); await f.tick(1);
+    await chooseSerial(f);
     addSerial(f, { 'serial-config-name': 'TCP source', 'conn-type': 'tcp-client', 'net-port': '9001' });
     addSerial(f, { 'serial-config-name': 'UDP source', 'conn-type': 'udp', 'net-port': '9002', 'net-local': '9003' });
     assert.equal(f.get('serial-2-bind').hidden, true);
@@ -454,10 +463,8 @@ test('regular sends target the selected physical connection and retain its own T
     });
     f.context.navigator.serial = { requestPort: async () => ports.shift() };
     f.click('serial-manager-open');
-    f.click('serial-primary-bind'); await f.tick(1);
-    f.click('serial-primary-connect'); await f.tick(1);
-    addSerial(f); f.click('serial-2-bind'); await f.tick(1);
-    f.click('serial-2-connect'); await f.tick(1);
+    await chooseSerial(f);
+    addSerial(f); await chooseSerial(f, 'serial-2');
     f.change('send-connection-source', 'serial-2'); f.change('send-input', 'AB CD');
     f.change('send-interval', '1');
     f.click('btn-send'); await f.tick(1);
@@ -557,8 +564,7 @@ test('serial configuration is a draft until saved and connected ports keep their
     assert.equal(selections, 0);
     assert.match(f.get('serial-2-summary').textContent, /1,250,000.*8N1/);
 
-    f.click('serial-2-bind'); await f.tick(1);
-    f.click('serial-2-connect'); await f.tick(1);
+    await chooseSerial(f, 'serial-2');
     assert.equal(port.opened.baudRate, 1250000);
     f.selectConnection('serial-2');
     assert.equal(f.get('serial-baud').disabled, true);
@@ -601,19 +607,23 @@ test('bulk connect opens bound serial ports without showing a picker and can dis
     addSerial(f, { 'serial-baud': '1250000' });
     assert.equal(f.get('serial-config-dialog').open, true);
     assert.equal(f.get('serial-config-form').hidden, false);
-    f.click('serial-primary-bind'); await f.tick(1);
-    f.click('serial-2-bind'); await f.tick(1);
+    await chooseSerial(f);
+    assert.equal(f.app.serialAdapter.port, ports[0]);
+    assert.equal(ports[1].opened, null);
+    await chooseSerial(f, 'serial-2');
+    assert.equal(f.app.serialSources.get('serial-2').adapter.port, ports[1]);
     assert.equal(selections, 2);
-    assert.equal(ports[0].opened, null);
-    f.click('serial-manager-close');
-    f.click('btn-connect'); await f.tick(1);
-    assert.equal(selections, 2);
+    assert.deepEqual(ports.map(port => port.openCount), [1, 1]);
     assert.equal(ports[0].opened.baudRate, 115200);
     assert.equal(ports[1].opened.baudRate, 1250000);
     assert.match(f.get('connection-status').textContent, /2\s*\/\s*2/);
 
-    f.click('serial-disconnect-all'); await f.tick(1);
+    f.click('serial-manager-close');
+    f.click('serial-disconnect-all'); await waitForConnectionButton(f, 'btn-connect');
     assert.deepEqual(ports.map(port => port.closed), [1, 1]);
+    f.click('btn-connect'); await waitForConnectionButton(f, 'serial-disconnect-all');
+    assert.equal(selections, 2);
+    assert.deepEqual(ports.map(port => port.openCount), [2, 2]);
     const config = f.app.getConfig();
     const restored = bootApplication(config); t.after(() => restored.app.dispose());
     restored.context.navigator.serial = { getPorts: async () => ports, requestPort() { throw new Error('unexpected picker'); } };
@@ -623,20 +633,57 @@ test('bulk connect opens bound serial ports without showing a picker and can dis
     assert.equal(restored.app.serialSources.get('serial-2').adapter.port, ports[1]);
 });
 
+test('cancelling the chooser or failing to open leaves the source ready for another attempt', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const port = makePort(), open = port.open;
+    port.getInfo = () => ({ usbVendorId: 1, usbProductId: 2 });
+    let selections = 0, granted = false, opens = 0;
+    f.context.navigator.serial = {
+        async requestPort() {
+            if (++selections === 1) throw Object.assign(new Error('picker cancelled'), { name: 'NotFoundError' });
+            return port;
+        },
+        getPorts: async () => granted ? [port] : []
+    };
+    port.open = async options => {
+        if (++opens === 1) throw Object.assign(new Error('端口已拔出'), { name: 'NotFoundError' });
+        await open(options);
+    };
+
+    f.click('serial-manager-open');
+    await chooseSerial(f);
+    assert.equal(opens, 0);
+    assert.deepEqual(Array.from(f.app.getConfig().serialSources.bindings), []);
+    assert.doesNotMatch(f.get('serial-primary-status').textContent, /失败/);
+    assert.equal(f.get('serial-primary-bind').disabled, false);
+
+    await chooseSerial(f);
+    assert.equal(opens, 1, 'connect uses the handle returned by the picker even before the grant list catches up');
+    assert.equal(f.app.serialAdapter.port, null);
+    assert.match(f.get('serial-primary-status').textContent, /连接失败.*端口已拔出/);
+    assert.equal(f.app.getConfig().serialSources.bindings[0].usbProductId, 2);
+    assert.equal(f.get('serial-primary-connect').disabled, false);
+    granted = true;
+    f.click('serial-primary-connect'); await f.tick(1);
+    assert.equal(f.app.serialAdapter.port, port);
+    assert.equal(opens, 2);
+    assert.equal(selections, 2);
+});
+
 test('after reload a same-model serial binding never matches another source by list order', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const ports = [makePort(), makePort()], requests = ports.slice();
     for (const port of ports) port.getInfo = () => ({ usbVendorId: 0x1a86, usbProductId: 0x55da });
     f.context.navigator.serial = { getPorts: async () => ports, requestPort: async () => requests.shift() };
     f.click('serial-manager-open'); addSerial(f);
-    f.click('serial-primary-bind'); await f.tick(1);
-    f.click('serial-2-bind'); await f.tick(1);
+    await chooseSerial(f);
+    await chooseSerial(f, 'serial-2');
     const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
     restored.context.navigator.serial = { getPorts: async () => [ports[1]], requestPort() { throw new Error('unexpected picker'); } };
     restored.click('btn-connect'); await restored.tick(1);
     assert.equal(restored.app.serialAdapter.port, null);
     assert.equal(restored.app.serialSources.get('serial-2').adapter.port, null);
-    assert.equal(ports[1].opened, null);
+    assert.equal(ports[1].openCount, 1, 'reload must leave the same-model port at its original open count');
     restored.click('serial-manager-open');
     assert.match(restored.get('serial-2-binding').textContent, /确认/);
 });
@@ -673,8 +720,7 @@ test('renaming the primary serial port updates the bound source labels and survi
     addSerial(f);
     const port = makePort();
     f.context.navigator.serial = { requestPort: async () => port, getPorts: async () => [port] };
-    f.click('serial-primary-bind'); await f.tick(1);
-    f.click('serial-primary-connect'); await f.tick(1);
+    await chooseSerial(f);
     f.selectConnection('primary');
     assert.equal(f.get('serial-config-name').value, '主串口');
     assert.equal(f.get('serial-config-name').disabled, false);

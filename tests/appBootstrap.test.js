@@ -873,10 +873,9 @@ test('primary network mode is configured in the dialog and connects with the req
 test('connection failures reenable controls and send repetition stops after disconnection', async t => {
     const f = boot(t, config([]));
     f.context.navigator.serial = { requestPort: async () => ({}) };
+    f.app.serialAdapter.connect = async () => { throw new Error('permission denied'); };
     f.click('serial-manager-open'); f.click('serial-primary-bind'); await f.tick();
     f.click('serial-manager-close');
-    f.app.serialAdapter.connect = async () => { throw new Error('permission denied'); };
-    f.click('btn-connect'); await f.tick();
     assert.match(f.get('connection-status').textContent, /permission denied/);
     assert.equal(f.get('btn-connect').disabled, false);
     f.app.serialAdapter.send = async () => {};

@@ -657,9 +657,13 @@ async function startSerialPlotterApplication() {
         return !disposed && revision === importRevision &&
             (source === primarySource || connectionSources.get(source.settings.id) === source);
     }
+    function openBoundSerialPort(adapter, { baudRate, dataBits, stopBits, parity }, port) {
+        return adapter.connect({ baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits), parity }, port);
+    }
     async function bindSerialPort(source) {
         if (connectionBusy || source.settings.mode !== 'serial' || source.connected || source.pending || disposed) return;
         const revision = importRevision, id = source.settings.id;
+        let bound = false;
         connectionBusy = source.pending = true;
         source.error = ''; syncConnection();
         try {
@@ -669,13 +673,15 @@ async function startSerialPlotterApplication() {
             if (!isCurrentConnection(source, revision)) return;
             portBindings.bind(id, port, grants);
             source.bindingMessage = '已绑定端口';
+            bound = true;
             saveSoon();
+            await openBoundSerialPort(source.adapter, source.settings, port);
         } catch (error) {
-            if (isCurrentConnection(source, revision) && error.name !== 'NotFoundError' && error.name !== 'AbortError')
-                source.error = '绑定失败：' + error.message;
+            if (isCurrentConnection(source, revision) && error.name !== 'AbortError' && (bound || error.name !== 'NotFoundError'))
+                source.error = (bound ? '连接失败：' : '绑定失败：') + error.message;
         } finally {
             connectionBusy = source.pending = false;
-            if (!disposed) syncConnection();
+            if (!disposed) { syncConnection(); scheduleSourceUi(); }
         }
     }
     function networkOptions({ mode, host, port, localPort }) {
@@ -712,12 +718,11 @@ async function startSerialPlotterApplication() {
                     }
                     const authorized = await grants;
                     if (!isCurrentConnection(source, revision)) return;
-                    const { id, baudRate, dataBits, stopBits, parity } = settings;
+                    const { id } = settings;
                     const match = portBindings.resolve(id, authorized);
                     source.bindingMessage = match.issue ?? '已绑定端口';
                     if (!match.port) return;
-                    await adapter.connect({ baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits), parity },
-                        match.port);
+                    await openBoundSerialPort(adapter, settings, match.port);
                     if (isCurrentConnection(source, revision)) portBindings.ports.set(id, match.port);
                 } catch (error) {
                     if (error.name !== 'AbortError' && isCurrentConnection(source, revision))
