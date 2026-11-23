@@ -120,6 +120,7 @@ class ChannelConfigView {
                     }
                 };
                 listenRow(name, 'change', commitName);
+                listenRow(row, 'pointerleave', () => { if (name.value !== channel.name) commitName(); });
                 listenRow(name, 'keydown', event => {
                     if (event.isComposing || event.keyCode === 229) return;
                     if (event.key === 'Enter') { event.preventDefault(); commitName(); }

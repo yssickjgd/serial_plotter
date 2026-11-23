@@ -1,9 +1,9 @@
 /** Connection overview rows and the shared configuration dialog. */
 class SerialSourceView {
-    constructor(root, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect, onDialogChange = () => {} }) {
+    constructor(root, { dialog, onConnect, onBind, onRemove, onEngine, onSelect, onDialogChange = () => {} }) {
         this.root = root;
         const document = root.ownerDocument, get = id => document.getElementById(id);
-        Object.assign(this, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect, onDialogChange });
+        Object.assign(this, { dialog, onConnect, onBind, onRemove, onEngine, onSelect, onDialogChange });
         this.rows = new Map();
         this.formDrafts = new Map();
         this.manager = get('serial-manager-panel');
@@ -29,18 +29,13 @@ class SerialSourceView {
         this.lockedNote = get('serial-config-locked');
         this.error = get('serial-config-error');
         this.formStatus = get('serial-config-status');
-        this.reset = get('serial-config-reset');
         this.fields = { mode: get('conn-type'), name: get('serial-config-name'),
             baudRate: get('serial-baud'), dataBits: get('serial-data'), stopBits: get('serial-stop'), parity: get('serial-parity'),
             host: get('net-host'), port: get('net-port'), localPort: get('net-local') };
         this.handlers = [
-            [this.form, 'submit', event => this.submit(event)],
             [this.fields.mode, 'change', () => this.syncDialog()],
-            [this.form, 'input', () => { this.formStatus.textContent = '离开编辑区或按 Enter 应用。'; }],
-            [this.reset, 'click', () => {
-                this.formDrafts.delete(this.selectedId);
-                this.loadForm();
-            }],
+            [this.form, 'input', () => { this.formStatus.textContent = '连接参数待应用'; }],
+            [this.form, 'change', () => { this.formStatus.textContent = '连接参数待应用'; }],
             [this.compact, 'change', () => {
                 if (!this.dialog.open || this.protocolPage) return;
                 const { tab } = this.enginePosition();
@@ -61,7 +56,6 @@ class SerialSourceView {
                 if (!this.dialog.open) { this.onDialogChange(false); this.showList(); }
             }]
         ];
-        globalThis.SerialPlotter.bindAutoApply(this.form, () => this.submit(), (...binding) => this.handlers.push(binding));
         for (const [node, event, listener] of this.handlers) node?.addEventListener?.(event, listener);
     }
 
@@ -256,7 +250,7 @@ class SerialSourceView {
         this.formBaseline = Object.fromEntries(Object.keys(this.fields).map(key => [key, String(source.settings[key] ?? '')]));
         for (const [key, field] of Object.entries(this.fields)) field.value = changes?.[key] ?? this.formBaseline[key];
         this.error.hidden = true; this.error.textContent = '';
-        this.formStatus.textContent = '离开编辑区或按 Enter 应用。';
+        this.formStatus.textContent = changes ? '连接参数待应用' : '点击「应用设置」生效。';
         this.syncDialog();
     }
 
@@ -281,27 +275,22 @@ class SerialSourceView {
         this.lockedNote.hidden = !locked;
     }
 
-    submit(event) {
-        event?.preventDefault();
-        const source = this.selectedSource;
-        if (!source || !this.dialog.open || this.sourceDetails.hidden) return;
+    connectionDraft() {
         this.syncDialog();
-        const settings = Object.fromEntries(Object.entries(this.fields).filter(([, field]) => !field.disabled)
-            .map(([key, field]) => [key, field.value]));
-        if (Object.entries(settings).every(([key, value]) => value === this.formBaseline[key])) {
-            this.error.hidden = true; this.error.textContent = '';
+        return Object.fromEntries(Object.entries(this.fields).filter(([key, field]) =>
+            !field.disabled && field.value !== this.formBaseline[key]).map(([key, field]) => [key, field.value]));
+    }
+
+    finishConnectionSettings(id, error = '') {
+        if (error) {
+            this.error.textContent = error;
+            this.error.hidden = false;
             return;
         }
-        try {
-            this.onSave(source, settings);
-            this.formDrafts.delete(this.selectedId);
-            this.loadForm();
-            this.formStatus.textContent = '配置已更新';
-            this.handleTab('engine-communication');
-        } catch (error) {
-            this.error.textContent = error.message;
-            this.error.hidden = false;
-        }
+        this.formDrafts.delete(id);
+        if (id !== this.selectedId) return;
+        this.loadForm();
+        this.formStatus.textContent = '配置已更新';
     }
 
     dismiss() {

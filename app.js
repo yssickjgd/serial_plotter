@@ -336,50 +336,81 @@ async function startSerialPlotterApplication() {
     function hasCaptureSource(source) {
         return service.sources.has(source) || [...connectionSources.values()].some(item => item.capture.sources.has(source));
     }
-    const sidebarAlignmentSource = el('sidebar-alignment-source');
-    const alignmentPanel = (container, prefix, offset, source) => ({
-        container: el(container), source, offset: el(offset),
-        mode: el(prefix + '-timebase-mode'), rate: el(prefix + '-timebase-rate'), fixed: el(prefix + '-timebase-fixed'),
-        method: el(prefix + '-grid-method'), errorId: prefix + '-alignment-status', statusId: prefix + '-timebase-state',
-        fixedResync: el(prefix + '-resync-fixed'),
-        resync: el(prefix + '-resync-enabled'), delay: el(prefix + '-resync-delay'), batches: el(prefix + '-resync-batches'),
+    const timebaseControls = (prefix, offset) => ({
+        offset: el(offset), mode: el(prefix + '-timebase-mode'),
+        rate: el(prefix + '-timebase-rate'), fixed: el(prefix + '-timebase-fixed')
+    });
+    const samplingControls = prefix => ({
+        method: el(prefix + '-grid-method'), statusId: prefix + '-timebase-state',
+        fixed: el(prefix + '-resync-fixed'), resync: el(prefix + '-resync-enabled'),
+        delay: el(prefix + '-resync-delay'), batches: el(prefix + '-resync-batches'),
         confirmation: el(prefix + '-resync-confirmation')
     });
-    const dialogAlignment = alignmentPanel('serial-config-alignment', 'channel', 'serial-config-offset', () => connectionView.selectedSource);
-    const sidebarAlignment = alignmentPanel('sidebar-source-alignment', 'sidebar', 'sidebar-config-offset',
-        () => sidebarAlignmentSource.value === 'primary' ? primarySource : connectionSources.get(sidebarAlignmentSource.value));
-    const alignmentPanels = [dialogAlignment, sidebarAlignment];
+    const dialogAlignment = {
+        container: el('serial-config-alignment'), source: () => connectionView.selectedSource,
+        timebase: timebaseControls('channel', 'serial-config-offset'), sampling: samplingControls('channel'),
+        feedbackId: 'channel-alignment-status', drafts: new Map()
+    };
+    function sidebarTimingPanel(group, controls) {
+        const picker = el('sidebar-' + group + '-source');
+        return { ...controls, picker, feedbackId: 'sidebar-' + group + '-status',
+            container: el(group === 'alignment' ? 'sidebar-time-alignment-group' : 'sidebar-sampling-group'),
+            source: () => picker.value === 'primary' ? primarySource : connectionSources.get(picker.value) };
+    }
+    const sidebarPanels = [
+        sidebarTimingPanel('alignment', { timebase: timebaseControls('sidebar', 'sidebar-config-offset') }),
+        sidebarTimingPanel('sampling', { sampling: samplingControls('sidebar') })
+    ];
+    const alignmentPanels = [dialogAlignment, ...sidebarPanels];
 
-    function showTimebaseFields(panel) {
-        panel.fixed.hidden = panel.fixedResync.hidden = panel.mode.value !== 'fixed';
-        panel.delay.disabled = panel.batches.disabled = panel.confirmation.disabled = !panel.resync.checked;
+    function showTimebaseFields(panel, source = panel.source()) {
+        const { timebase, sampling } = panel;
+        const mode = timebase?.mode.value ?? workspaceChannels.timebases[source?.settings.id]?.mode;
+        if (timebase) timebase.fixed.hidden = mode !== 'fixed';
+        if (sampling) {
+            sampling.fixed.hidden = mode !== 'fixed';
+            sampling.delay.disabled = sampling.batches.disabled = sampling.confirmation.disabled = !sampling.resync.checked;
+        }
     }
     function renderAlignmentTimebaseStatus() {
-        for (const panel of alignmentPanels) {
-            const source = panel.source();
+        for (const { source: selectedSource, sampling } of alignmentPanels) {
+            if (!sampling) continue;
+            const { statusId } = sampling, source = selectedSource();
             const id = source?.settings.id;
-            if (!id || workspaceChannels.timebases[id]?.mode !== 'fixed') { status(panel.statusId, ''); continue; }
+            if (!id || workspaceChannels.timebases[id]?.mode !== 'fixed') { status(statusId, ''); continue; }
             const live = workspaceChannels.cursors.get(id);
             const mapped = workspaceChannels.mappings.some(entry => entry.sourceId === id);
-            status(panel.statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay ? ''
+            status(statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay ? ''
                 : !live ? '等待可解析的帧。' : live.invalidLatest ? '最近的帧缺少有效的时基值，已保留原始记录。'
                     : live.lastResync ? '最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。' : '');
         }
     }
-    function renderAlignmentTimebase(panel, source = panel.source()) {
+    function setTimingFeedback(panel, message = '', error = false) {
+        el(panel.feedbackId).classList.toggle('is-error', error);
+        status(panel.feedbackId, message);
+    }
+    function renderAlignmentTimebase(panel, source = panel.source(), changed = panel) {
         panel.currentSource = source;
-        panel.offset.disabled = !source || source === primarySource;
-        panel.offset.value = String(source?.settings.timeOffsetMs ?? 0);
+        const { timebase, sampling } = panel;
         const timing = S.normalizeSourceTimebase(source && workspaceChannels.timebases[source.settings.id]);
-        panel.mode.value = timing.mode;
-        panel.rate.value = String(timing.sampleRate);
-        panel.resync.checked = timing.resyncEnabled;
-        panel.delay.value = String(timing.resyncDelayMs);
-        panel.batches.value = String(timing.resyncBatches);
-        panel.confirmation.value = String(timing.resyncConfirmationMs);
-        panel.method.value = workspaceChannels.methods[source?.settings.id] ?? 'hold';
-        status(panel.errorId, '');
-        showTimebaseFields(panel); renderAlignmentTimebaseStatus();
+        if (timebase && changed.timebase) {
+            timebase.offset.disabled = !source || source === primarySource;
+            timebase.offset.value = String(source?.settings.timeOffsetMs ?? 0);
+            timebase.mode.value = timing.mode;
+            timebase.rate.value = String(timing.sampleRate);
+        }
+        if (sampling && changed.sampling) {
+            sampling.resync.checked = timing.resyncEnabled;
+            sampling.delay.value = String(timing.resyncDelayMs);
+            sampling.batches.value = String(timing.resyncBatches);
+            sampling.confirmation.value = String(timing.resyncConfirmationMs);
+            sampling.method.value = workspaceChannels.methods[source?.settings.id] ?? 'hold';
+        }
+        if (timebase && changed.timebase || sampling && changed.sampling) setTimingFeedback(panel);
+        const draft = panel.drafts?.get(source?.settings.id);
+        for (const [id, { property, value }] of Object.entries(draft ?? {}))
+            el(id)[property] = value;
+        showTimebaseFields(panel, source); renderAlignmentTimebaseStatus();
     }
     const sourcePlotTimelines = new WeakMap();
     function updateSourcePlotTimelines(capture, previous, timing) {
@@ -394,26 +425,36 @@ async function startSerialPlotterApplication() {
             sourcePlotTimelines.set(source, timeline);
         }
     }
-    function commitAlignment(panel, source = panel.source()) {
+    function prepareAlignment(panel, source) {
+        const id = source.settings.id, saved = workspaceChannels.timebases[id];
+        const previous = S.normalizeSourceTimebase(saved);
+        const { timebase, sampling } = panel;
+        const mode = timebase?.mode.value ?? previous.mode, fixed = mode === 'fixed';
+        const resyncEnabled = fixed && sampling ? sampling.resync.checked : previous.resyncEnabled;
+        const resyncActive = fixed && resyncEnabled && sampling;
+        const timing = S.normalizeSourceTimebase({ ...previous, mode, resyncEnabled,
+            sampleRate: fixed && timebase ? Number(timebase.rate.value) : previous.sampleRate,
+            resyncDelayMs: resyncActive ? Number(sampling.delay.value.trim() || NaN) : previous.resyncDelayMs,
+            resyncBatches: resyncActive ? Number(sampling.batches.value) : previous.resyncBatches,
+            resyncConfirmationMs: resyncActive ? Number(sampling.confirmation.value.trim() || NaN) : previous.resyncConfirmationMs });
+        const originalSettings = source.settings;
+        const nextSettings = !timebase || source === primarySource ? originalSettings : S.WidgetConfig.normalizeConnectionSource({
+            ...originalSettings, timeOffsetMs: timebase.offset.value
+        });
+        const oldMethod = workspaceChannels.methods[id];
+        const method = sampling?.method.value ?? oldMethod ?? 'hold';
+        return { id, saved, previous, timing, originalSettings, nextSettings, oldMethod, method };
+    }
+    function commitAlignment(panel, source = panel.source(), prepared) {
         if (!source) return true;
         try {
-            const id = source.settings.id, saved = workspaceChannels.timebases[id];
-            const previous = S.normalizeSourceTimebase(saved);
-            const fixed = panel.mode.value === 'fixed', resyncEnabled = fixed ? panel.resync.checked : previous.resyncEnabled;
-            const resyncActive = fixed && resyncEnabled;
-            const timing = S.normalizeSourceTimebase({ ...previous, mode: panel.mode.value, resyncEnabled,
-                sampleRate: fixed ? Number(panel.rate.value) : previous.sampleRate,
-                resyncDelayMs: resyncActive ? Number(panel.delay.value.trim() || NaN) : previous.resyncDelayMs,
-                resyncBatches: resyncActive ? Number(panel.batches.value) : previous.resyncBatches,
-                resyncConfirmationMs: resyncActive ? Number(panel.confirmation.value.trim() || NaN) : previous.resyncConfirmationMs });
-            const originalSettings = source.settings;
-            const nextSettings = source === primarySource ? originalSettings : S.WidgetConfig.normalizeConnectionSource({
-                ...originalSettings, timeOffsetMs: panel.offset.value
-            });
-            const oldMethod = workspaceChannels.methods[id];
-            const method = panel.method.value;
+            const { id, saved, previous, timing, originalSettings, nextSettings, oldMethod, method } =
+                prepared ?? prepareAlignment(panel, source);
             if (JSON.stringify(previous) === JSON.stringify(timing) && method === (oldMethod ?? 'hold') &&
-                originalSettings.timeOffsetMs === nextSettings.timeOffsetMs) { status(panel.errorId, ''); return true; }
+                originalSettings.timeOffsetMs === nextSettings.timeOffsetMs) {
+                if (el(panel.feedbackId).classList.contains('is-error')) setTimingFeedback(panel);
+                return true;
+            }
             source.settings = nextSettings;
             workspaceChannels.methods[id] = method;
             workspaceChannels.timebases[id] = timing;
@@ -450,34 +491,60 @@ async function startSerialPlotterApplication() {
                 if (widget.type === 'wave' && widget.capture === source.capture) widgets.applySettings(widget);
             }
             if (widgets.active?.type === 'wave' && widgets.active.capture === source.capture) widgets.activate(widgets.active.id);
+            const dialogDraft = dialogAlignment.drafts.get(id);
+            if (dialogDraft) {
+                if (panel.timebase) for (const input of Object.values(dialogAlignment.timebase)) delete dialogDraft[input.id];
+                if (panel.sampling) for (const input of Object.values(dialogAlignment.sampling)) delete dialogDraft[input?.id];
+            }
             for (const view of alignmentPanels) {
-                if (view.source() === source) renderAlignmentTimebase(view, source);
+                if (view.source() === source) renderAlignmentTimebase(view, source, panel);
             }
             connectionView.refresh(source); tools?.invalidate(); saveSoon();
+            if (panel.picker) setTimingFeedback(panel, '设置已应用');
             return true;
-        } catch (error) { status(panel.errorId, error.message); return false; }
+        } catch (error) { setTimingFeedback(panel, error.message, true); return false; }
     }
     for (const panel of alignmentPanels) {
-        listen(panel.mode, 'change', () => showTimebaseFields(panel));
-        listen(panel.resync, 'change', () => showTimebaseFields(panel));
-        S.bindAutoApply(panel.container, () => commitAlignment(panel), listen);
+        if (panel.timebase) listen(panel.timebase.mode, 'change', () => showTimebaseFields(panel));
+        if (panel.sampling) listen(panel.sampling.resync, 'change', () => showTimebaseFields(panel));
     }
-    listen(sidebarAlignmentSource, 'change', () => {
-        const previous = sidebarAlignment.currentSource;
-        if (previous && !commitAlignment(sidebarAlignment, previous)) {
-            sidebarAlignmentSource.value = previous.settings.id;
-            return;
-        }
-        renderAlignmentTimebase(sidebarAlignment);
+    for (const event of ['input', 'change']) listen(dialogAlignment.container, event, ({ target }) => {
+        const id = dialogAlignment.currentSource?.settings.id;
+        if (!id || !['INPUT', 'SELECT'].includes(target.tagName)) return;
+        const property = target.type === 'checkbox' ? 'checked' : 'value';
+        const draft = dialogAlignment.drafts.get(id) ?? {};
+        draft[target.id] = { property, value: target[property] };
+        dialogAlignment.drafts.set(id, draft);
+        setTimingFeedback(dialogAlignment, '时间对齐与同步采样待应用');
     });
+    for (const panel of sidebarPanels) {
+        S.bindAutoApply(panel.container, () => commitAlignment(panel, panel.currentSource), listen);
+        for (const event of ['input', 'change']) listen(panel.container, event, ({ target }) => {
+            if (target !== panel.picker) setTimingFeedback(panel);
+        });
+        // The change handler applies the previous draft while Enter stays available to the picker.
+        listen(panel.picker, 'keydown', event => {
+            if (event.key === 'Enter') event.stopPropagation();
+        });
+        listen(panel.picker, 'change', () => {
+            const previous = panel.currentSource;
+            if (previous && !commitAlignment(panel, previous)) {
+                panel.picker.value = previous.settings.id;
+                return;
+            }
+            renderAlignmentTimebase(panel);
+        });
+    }
     function refreshAlignmentSources() {
-        const saved = sidebarAlignmentSource.value;
-        sidebarAlignmentSource.replaceChildren(...allConnections().map(({ settings }) => {
-            const option = document.createElement('option');
-            option.value = settings.id; option.textContent = settings.name;
-            return option;
-        }));
-        sidebarAlignmentSource.value = connectionSources.has(saved) ? saved : 'primary';
+        for (const { picker } of sidebarPanels) {
+            const saved = picker.value;
+            picker.replaceChildren(...allConnections().map(({ settings }) => {
+                const option = document.createElement('option');
+                option.value = settings.id; option.textContent = settings.name;
+                return option;
+            }));
+            picker.value = connectionSources.has(saved) ? saved : 'primary';
+        }
         for (const panel of alignmentPanels) renderAlignmentTimebase(panel);
     }
     function refreshConnectionChoices() {
@@ -493,6 +560,7 @@ async function startSerialPlotterApplication() {
     const connectionView = new S.SerialSourceView(el('serial-source-list'), {
         dialog: el('serial-config-dialog'),
         onDialogChange(open) {
+            if (open && engineView && connectionView.selectedSource) engineView.setEngine(connectionView.selectedSource.capture.dataEngine);
             const slot = open ? el('dialog-task-slot') : workspaceTaskSlot;
             if (taskProgress.parentElement !== slot) slot.append(taskProgress);
             syncTaskProgressVisibility();
@@ -522,25 +590,87 @@ async function startSerialPlotterApplication() {
                 if (mappings.length !== workspaceChannels.mappings.length) applyWorkspaceMappings(mappings);
             } catch (error) { source.error = error.message; connectionView.refresh(source); return; }
             delete workspaceChannels.methods[source.settings.id];
+            dialogAlignment.drafts.delete(source.settings.id);
             dropConnectionSource(source); applyCaptureQuotas(); refreshConnectionChoices(); syncConnection(); saveSoon();
         },
-        onSelect: source => renderAlignmentTimebase(dialogAlignment, source),
-        onSave(source, draft) {
-            const previous = source.settings;
-            if (source === primarySource) {
-                const normalized = S.WidgetConfig.normalizeConnectionSettings({ ...previous, ...draft });
-                for (const [key, globalKey] of Object.entries(primaryFields))
-                    if (Object.hasOwn(draft, key)) globals[globalKey] = String(normalized[key]);
-                if (draft.mode === 'tcp-server') globals.netLocalPort = '';
-                replaceConnectionSettings(source, primaryConnectionSettings());
-            } else {
-                replaceConnectionSettings(source, S.WidgetConfig.normalizeConnectionSource({ ...previous, ...draft }));
-            }
-            source.error = '';
-            if (previous.name !== source.settings.name) refreshConnectionChoices();
-            syncConnection(); saveSoon();
+        onSelect(source) {
+            renderAlignmentTimebase(dialogAlignment, source);
+            if (connectionView.dialog.open) engineView?.setEngine(source.capture.dataEngine);
         }
     });
+    function saveConnectionSettings(source, settings) {
+        const previous = source.settings;
+        if (source === primarySource) {
+            for (const [key, globalKey] of Object.entries(primaryFields)) globals[globalKey] = String(settings[key]);
+            if (settings.mode === 'tcp-server') globals.netLocalPort = '';
+            replaceConnectionSettings(source, primaryConnectionSettings());
+        } else {
+            replaceConnectionSettings(source, { ...settings, timeOffsetMs: previous.timeOffsetMs });
+        }
+        source.error = '';
+        if (previous.name !== source.settings.name) refreshConnectionChoices();
+        syncConnection();
+    }
+    let applyingSourceSettings = false;
+    async function applySourceSettings(validateOnly) {
+        const source = connectionView.selectedSource, revision = importRevision;
+        if (!source || !connectionView.dialog.open || applyingSourceSettings) return;
+        const id = source.settings.id, engine = source.capture.dataEngine;
+        let settings;
+        try {
+            const draft = connectionView.connectionDraft();
+            if (Object.keys(draft).length) {
+                try {
+                    const normalize = source === primarySource ? S.WidgetConfig.normalizeConnectionSettings : S.WidgetConfig.normalizeConnectionSource;
+                    settings = normalize({ ...source.settings, ...draft });
+                } catch (error) {
+                    connectionView.finishConnectionSettings(id, error.message);
+                    throw error;
+                }
+            }
+            let timing;
+            try { timing = prepareAlignment(dialogAlignment, source); }
+            catch (error) { setTimingFeedback(dialogAlignment, error.message, true); throw error; }
+            const rawLimit = Number(el('max-raw-frame-bytes').value);
+            const invalidLimit = !Number.isSafeInteger(rawLimit) || rawLimit < 64 || rawLimit > 64 * 1024 * 1024;
+            const limitError = invalidLimit ? '原始帧分段上限必须为 64 至 67108864 B 的整数' : '';
+            status('engine-raw-limit-status', limitError);
+            if (invalidLimit) throw new Error(limitError);
+            const rebuild = engineView.rebuildHistoryDraft();
+            const metadata = engineView.channels.prepareMetadata();
+            const parsingChanged = Boolean(engine.config.draft);
+            if (validateOnly) {
+                if (parsingChanged) engineView.validate();
+                engineView.status('草稿校验通过；点击「应用设置」生效');
+                return;
+            }
+            applyingSourceSettings = true;
+            el('engine-validate').disabled = el('engine-apply').disabled = true;
+            if (parsingChanged && !await engineView.apply()) return;
+            if (!isCurrentConnection(source, revision)) return;
+            engineView.commitRebuildHistory(engine, rebuild);
+            if (!commitAlignment(dialogAlignment, source, timing))
+                throw new Error(el(dialogAlignment.feedbackId).textContent);
+            dialogAlignment.drafts.delete(id);
+            if (settings) {
+                saveConnectionSettings(source, settings);
+                connectionView.finishConnectionSettings(id);
+            }
+            if (connectionView.selectedSource === source) renderAlignmentTimebase(dialogAlignment, source);
+            engineView.channels.commitMetadata(source.capture, metadata);
+            if (rawLimit !== globals.maxRawFrameBytes) applyRawFrameLimit(rawLimit);
+            tools?.invalidate();
+            saveSoon();
+            if (connectionView.selectedSource === source) engineView.status('设置已应用');
+        } catch (error) {
+            if (isCurrentConnection(source, revision) && connectionView.selectedSource === source) engineView.status(error.message, true);
+        } finally {
+            if (!validateOnly) {
+                applyingSourceSettings = false;
+                el('engine-validate').disabled = el('engine-apply').disabled = false;
+            }
+        }
+    }
     connectionView.add(primarySource);
     listen(el('serial-manager-open'), 'click', () => { syncConnection(); connectionView.showManager(); });
     function applyCaptureQuotas() {
@@ -866,7 +996,7 @@ async function startSerialPlotterApplication() {
         },
         onRulesChange() { tools?.invalidate(); rates.clear(); syncExportSources(); },
         onChannelMetadataChange(index, patch, capture) {
-            if (engineView?.engine.service === capture) engineView.channels.updateMetadata(index, patch);
+            engineView?.channels.updateMetadata(index, patch, capture);
             if (capture === workspaceChannels) workspaceChannelView?.updateMetadata(index, patch);
         },
         onBeforeChannelRenumber(numberMap, capture) {
@@ -885,6 +1015,7 @@ async function startSerialPlotterApplication() {
     });
     engineView = new S.DataEngineView({ document, engine: dataEngine, controller: widgets, onChange: saveSoon,
         onTabChange: tab => connectionView.handleTab(tab),
+        onSettingsAction: validateOnly => { void applySourceSettings(validateOnly); },
         getSourceName: () => allConnections().find(source => source.capture.dataEngine === engineView.engine)?.settings.name,
         onProtocolOpen() {
             const opener = el('engine-protocol-edit');
@@ -1258,9 +1389,20 @@ async function startSerialPlotterApplication() {
         updateMemoryStatus();
         widgets.syncGlobals(); syncConnection();
     }
-    for (const [key, id] of [['maxPoints', 'max-points'], ['maxRawFrameBytes', 'max-raw-frame-bytes'],
-        ['captureMemoryMiB', 'capture-memory-mib']]) listen(el(id), 'change', () => {
-        const candidate = getConfig(); candidate.global[key] = key === 'maxPoints' ? el(id).value : Number(el(id).value);
+    function applyRawFrameLimit(bytes) {
+        globals.maxRawFrameBytes = bytes;
+        el('max-raw-frame-bytes').value = String(bytes);
+        for (const { capture } of allConnections()) void capture.setMaxRawFrameBytes(bytes).catch(report);
+        widgets.syncByteRecordRule();
+    }
+    for (const event of ['input', 'change']) listen(el('max-raw-frame-bytes'), event, () => {
+        status('engine-raw-limit-status', '');
+        engineView.status('原始帧分段上限待应用');
+    });
+    function applyBufferSetting(key, id) {
+        const value = key === 'maxPoints' ? el(id).value : Number(el(id).value);
+        if (String(globals[key]) === String(value)) return;
+        const candidate = getConfig(); candidate.global[key] = value;
         try {
             const validated = S.WidgetConfig.validateWorkspaceConfig(candidate);
             if (key === 'captureMemoryMiB') preflightWorkspaceEngines(validated);
@@ -1268,24 +1410,16 @@ async function startSerialPlotterApplication() {
             if (key === 'maxPoints') {
                 service.setCapacity(Number(globals.maxPoints)); workspaceChannels.resize(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints));
                 for (const { capture } of connectionSources.values()) capture.setCapacity(Number(globals.maxPoints));
-            }
-            else if (key === 'maxRawFrameBytes') {
-                void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
-                for (const { capture } of connectionSources.values()) {
-                    capture.rebuildHistory = capture.dataEngine.globals.rebuildHistory;
-                    void capture.setMaxRawFrameBytes(globals.maxRawFrameBytes);
-                }
-                widgets.syncByteRecordRule();
-                status('engine-raw-limit-status', '');
-            }
-            else applyCaptureQuotas();
+            } else applyCaptureQuotas();
             updateMemoryStatus();
             tools.invalidate(); saveSoon(); status('cfg-save-status', '');
-        } catch (error) {
-            if (key === 'maxRawFrameBytes') status('engine-raw-limit-status', error.message);
-            else report(error);
-        }
-    });
+        } catch (error) { report(error); }
+    }
+    const bufferFields = [['maxPoints', 'max-points'], ['captureMemoryMiB', 'capture-memory-mib']];
+    for (const [key, id] of bufferFields) listen(el(id), 'change', () => applyBufferSetting(key, id));
+    S.bindAutoApply(el('board-toolbar'), () => {
+        for (const [key, id] of bufferFields) applyBufferSetting(key, id);
+    }, listen);
     let sendConnectionId = initial.send.connectionSource;
     const sendingEngine = () => sendConnectionId === 'primary' ? dataEngine : connectionSources.get(sendConnectionId)?.capture.dataEngine;
     const protocolSession = new S.ProtocolSendSession({ getProtocols: () => sendingEngine()?.config.protocols ?? [],
@@ -1382,7 +1516,7 @@ async function startSerialPlotterApplication() {
         if (protocol) regularProtocolView.refresh();
     }
     listen(el('send-mode'), 'change', syncProtocolSend);
-    for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) listen(el(id), 'change', saveSoon);
+    for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) S.bindSettingField(el(id), saveSoon, listen);
     for (const adapter of [serialAdapter, netAdapter]) watchTransport(primarySource, adapter);
     listen(el('serial-disconnect-all'), 'click', () => { void changeConnections(allConnections(), false); });
     listen(el('btn-connect'), 'click', () => { void changeConnections(allConnections(), true); });
@@ -1537,6 +1671,9 @@ async function startSerialPlotterApplication() {
     }
     function applyValidatedConfig(config) {
         connectionView.close(false);
+        dialogAlignment.drafts.clear();
+        engineView.rebuildDrafts = new WeakMap();
+        engineView.channels.metadataDrafts = new WeakMap();
         connectionView.clearFormDrafts();
         cancelAlignmentReplay();
         const wasRestoring = restoring, revision = ++importRevision; restoring = true;
@@ -1651,11 +1788,11 @@ async function startSerialPlotterApplication() {
     listen(el('workspace-step'), 'change', () => { workspace.setStep(Number(el('workspace-step').value)); saveSoon(); });
     listen(el('workspace-reset'), 'click', () => workspace.reset());
     listen(el('workspace-zoom-reset'), 'click', () => workspace.setZoom(1));
-    listen(el('workspace-zoom-percent'), 'change', () => {
+    S.bindSettingField(el('workspace-zoom-percent'), () => {
         const value = Number(el('workspace-zoom-percent').value);
         if (Number.isInteger(value) && value >= 25 && value <= 500) workspace.setZoom(value / 100);
         el('workspace-zoom-percent').value = String(Math.round(workspace.zoom * 100));
-    });
+    }, listen);
     let panelDrag = null;
     const resizeViews = () => { workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
     syncSidebarLayout();

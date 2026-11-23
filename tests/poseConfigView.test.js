@@ -17,7 +17,9 @@ test('two pose widgets share numeric acquisition while their settings, inspector
     assert.ok(f.get('data-type').closest('#data-engine'));
     assert.equal(f.get('tab-pose-frame'), null);
     assert.equal(f.get('rebuild-history').checked, true);
-    f.change('rebuild-history', false); assert.equal(f.app.getConfig().global.rebuildHistory, false);
+    f.selectConnection('primary', 'engine-parsing');
+    f.change('rebuild-history', false); f.click('engine-apply'); f.click('serial-manager-close');
+    assert.equal(f.app.getConfig().global.rebuildHistory, false);
     f.change('pose-bindings-euler-0', '0'); f.change('pose-bindings-euler-1', '1'); f.change('pose-bindings-euler-2', '2');
     f.change('pose-euler-unit', 'degrees');
     assert.equal(b.settings.euler.unit, 'degrees'); assert.equal(a.settings.euler.unit, 'radians');

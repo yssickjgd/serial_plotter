@@ -3,9 +3,10 @@ const engineChannelHelpers = typeof module !== 'undefined'
     ? { ...require('./channelTransform'), ...require('./channelRegistry'), ...require('./channelAutocomplete'), ...require('./reservedNames'), ...require('./autoApply') } : globalThis.SerialPlotter;
 
 class EngineChannelView {
-    constructor({ document, root, controller, capture, getRegistry, allowDerived = true, onChange = () => {} }) {
+    constructor({ document, root, controller, capture, getRegistry, allowDerived = true, manualMetadata = false, onDraft = () => {}, onChange = () => {} }) {
         this.document = document; this.root = root; this.controller = controller; this.onChange = onChange;
-        this.capture = capture; this.allowDerived = allowDerived;
+        Object.assign(this, { capture, allowDerived, manualMetadata, onDraft });
+        this.metadataDrafts = new WeakMap();
         this.sourceStates = new WeakMap();
         this.getRegistry = getRegistry ?? (() => controller.getChannelRegistry?.(this.capture) ?? new engineChannelHelpers.ChannelRegistry({
             rawCount: Number(controller.globals.channelsCount), definitions: controller.globals.channelDefinitions,
@@ -100,7 +101,15 @@ class EngineChannelView {
     }
 
     keyFor(number) { return this.registry?.get?.(number)?.id ?? number; }
-    updateMetadata(index, patch) {
+    updateMetadata(index, patch, capture = this.capture) {
+        const drafts = this.metadataDrafts.get(capture);
+        const key = drafts?.size ? this.controller.getChannelRegistry?.(capture)?.get(index + 1)?.id ?? index + 1 : null;
+        const draft = drafts?.get(key);
+        if (draft) {
+            for (const field of Object.keys(patch)) delete draft[field];
+            if (!Object.keys(draft).length) drafts.delete(key);
+        }
+        if (capture !== this.capture) return;
         if (patch.name !== undefined) {
             this.registry = this.getRegistry();
             if (this.searchText) {
@@ -119,6 +128,37 @@ class EngineChannelView {
             if (input && input.value !== patch[key]) input.value = patch[key];
             if (key === 'name' && input) input.title = patch[key];
         }
+    }
+    stageMetadata(key, field, value) {
+        const drafts = this.metadataDrafts.get(this.capture) ?? new Map();
+        this.metadataDrafts.set(this.capture, drafts);
+        drafts.set(key, { ...drafts.get(key), [field]: value });
+        this.onDraft();
+    }
+    prepareMetadata() {
+        const drafts = this.metadataDrafts.get(this.capture);
+        if (!drafts?.size) return [];
+        const registry = this.getRegistry();
+        const preview = [...drafts.values()].some(patch => patch.name !== undefined)
+            ? new engineChannelHelpers.ChannelRegistry({ rawCount: registry.rawCount, definitions: registry.getDefinitions(),
+                channels: registry.toJSON() }) : null;
+        return [...drafts].map(([key, patch]) => {
+            const channel = registry.get(key);
+            if (!channel) throw new Error('通道已变更，请重新编辑名称或颜色');
+            const name = patch.name === undefined || patch.name === channel.name ? undefined : preview.rename(key, patch.name).name;
+            return [key, { ...patch, name }];
+        });
+    }
+    commitMetadata(capture, edits) {
+        const registry = this.controller.getChannelRegistry(capture);
+        for (const [key, { name, color }] of edits) {
+            const channel = registry.get(key);
+            if (!channel) continue;
+            if (name !== undefined) this.controller.setChannelName(channel.number - 1, name, capture);
+            if (color !== undefined) this.controller.setChannelColor(channel.number - 1, color, capture);
+            this.metadataDrafts.get(capture)?.delete(key);
+        }
+        if (capture === this.capture && edits.length) this.refresh();
     }
     isExpanded(number) { return this.expanded.has(this.keyFor(number)) || this.expanded.has(number); }
     height(channel) {
@@ -268,23 +308,33 @@ class EngineChannelView {
                 this.refresh();
             }, true);
         }
-        const color = this.element('input', '', 'channel-color'); color.type = 'color'; color.value = channel.color;
+        const metadataDraft = this.metadataDrafts.get(this.capture)?.get(key);
+        const color = this.element('input', 'channel-color', 'channel-color'); color.type = 'color'; color.value = metadataDraft?.color ?? channel.color;
         color.setAttribute('aria-label', `${label.textContent} 颜色`);
-        const name = this.element('input', '', 'channel-name'); name.type = 'text'; name.value = channel.name;
+        const name = this.element('input', 'channel-name', 'channel-name'); name.type = 'text'; name.value = metadataDraft?.name ?? channel.name;
         name.setAttribute('aria-label', `${label.textContent} 名称`);
         const error = this.element('div', 'channel-definition-error', 'channel-error'); error.setAttribute('role', 'status');
         error.channelKey = key;
         error.textContent = this.errors.get(key) ?? this.registry?.nameErrors.get(number) ?? ''; error.hidden = !error.textContent;
-        this.listen(color, 'input', () => this.perform(() => this.controller.setChannelColor(index, color.value, this.capture), error, () => {
-            channel.color = color.value;
-        }), true);
-        this.listen(name, 'change', () => {
-            const validation = this.registry?.validateName(name.value, number);
-            if (validation && !validation.valid) { this.errors.set(key, validation.error); error.textContent = validation.error; error.hidden = false; return; }
-            this.perform(() => this.controller.setChannelName(index, validation?.name ?? name.value, this.capture), error, () => {
-                this.errors.delete(key); this.refresh();
-            });
-        }, true);
+        if (this.manualMetadata) {
+            for (const [field, input] of [['name', name], ['color', color]]) {
+                for (const event of ['input', 'change']) this.listen(input, event, () => this.stageMetadata(key, field, input.value), true);
+            }
+        } else {
+            this.listen(color, 'input', () => this.perform(() => this.controller.setChannelColor(index, color.value, this.capture), error, () => {
+                channel.color = color.value;
+            }), true);
+            const commitName = () => {
+                if (name.value === channel.name) return;
+                const validation = this.registry?.validateName(name.value, number);
+                if (validation && !validation.valid) { this.errors.set(key, validation.error); error.textContent = validation.error; error.hidden = false; return; }
+                this.perform(() => this.controller.setChannelName(index, validation?.name ?? name.value, this.capture), error, () => {
+                    this.errors.delete(key); this.refresh();
+                });
+            };
+            this.listen(name, 'change', commitName, true);
+            engineChannelHelpers.bindAutoApply(name, commitName, (node, event, fn) => this.listen(node, event, fn, true));
+        }
         const moves = this.element('div', 'engine-channel-moves');
         if (definition) {
             const order = this.derivedOrder, at = this.derivedPositions.get(number);

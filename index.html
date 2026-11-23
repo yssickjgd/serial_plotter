@@ -64,10 +64,15 @@
                                 <label for="sidebar-timebase-rate">该来源的帧率（帧/秒）</label>
                                 <input id="sidebar-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                             </div>
-                            <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
+                            <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。移出本栏或按 Enter 即可应用。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
+                            <p id="sidebar-alignment-status" class="hint-text" role="status" hidden></p>
                         </section>
                         <section class="control-group" id="sidebar-sampling-group" aria-labelledby="sidebar-sampling-title">
                             <div class="section-title" id="sidebar-sampling-title">同步采样</div>
+                            <div class="input-group">
+                                <label for="sidebar-sampling-source">数据来源</label>
+                                <select id="sidebar-sampling-source"></select>
+                            </div>
                             <div id="sidebar-resync-fixed" class="sidebar-stack" hidden>
                                 <label class="option-label"><input id="sidebar-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
                                 <div id="sidebar-resync-settings" class="sidebar-stack">
@@ -96,10 +101,10 @@
                                     <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
                                     <option value="spline">局部自然三次样条（4 点）</option>
                                 </select>
-                                <span id="sidebar-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。</span>
+                                <span id="sidebar-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。移出本栏或按 Enter 即可应用。</span>
                             </div>
                             <p id="sidebar-timebase-state" class="hint-text" role="status" hidden></p>
-                            <p id="sidebar-alignment-status" class="hint-text is-error" role="status" hidden></p>
+                            <p id="sidebar-sampling-status" class="hint-text" role="status" hidden></p>
                         </section>
                     </div>
 
@@ -764,7 +769,7 @@
                     <div id="engine-communication" class="tab-content" hidden>
                         <h3 id="engine-communication-heading" class="engine-pane-heading" tabindex="-1">通讯</h3>
                         <div id="serial-source-list" class="serial-source-list"></div>
-                        <form id="serial-config-form" class="control-group serial-inline-config" novalidate hidden>
+                        <div id="serial-config-form" class="control-group serial-inline-config" hidden>
                             <div class="section-title">连接参数</div>
                             <div class="connection-config-fields">
                                 <div class="input-group">
@@ -822,11 +827,8 @@
                                 </div>
                             </div>
                             <p id="serial-config-error" class="serial-config-error" role="alert" hidden></p>
-                            <p id="serial-config-status" class="hint-text" role="status">离开编辑区或按 Enter 应用。</p>
-                            <div class="serial-config-actions">
-                                <button id="serial-config-reset" type="button" class="protocol-editor-button">撤销修改</button>
-                            </div>
-                        </form>
+                            <p id="serial-config-status" class="hint-text" role="status">点击「应用设置」生效。</p>
+                        </div>
                         <div class="sidebar-stack source-timing-settings" id="serial-config-alignment">
                             <section class="control-group" id="channel-time-alignment-group" aria-labelledby="channel-time-alignment-title">
                                 <div class="section-title" id="channel-time-alignment-title">来源时间对齐</div>
@@ -845,7 +847,7 @@
                                     <label for="channel-timebase-rate">该来源的帧率（帧/秒）</label>
                                     <input id="channel-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                                 </div>
-                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
+                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。点击「应用设置」生效。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
                             </section>
                             <section class="control-group" id="channel-sampling-group" aria-labelledby="channel-sampling-title">
                                 <div class="section-title" id="channel-sampling-title">同步采样</div>
@@ -973,7 +975,7 @@
                         <div class="control-group">
                             <div class="section-title">原始帧分段上限 <span class="scope-badge" data-global-scope>全局共用</span></div>
                             <div class="input-group"><label for="max-raw-frame-bytes">每段最大字节数</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /></div>
-                            <span class="hint-text">默认 1024 B，修改后立即应用。已识别的完整帧保留整体。</span>
+                            <span class="hint-text">默认 1024 B，点击「应用设置」生效，并对所有来源生效。已识别的完整帧保留整体。</span>
                             <span id="engine-raw-limit-status" class="hint-text is-error" role="status" hidden></span>
                         </div>
                     </div>

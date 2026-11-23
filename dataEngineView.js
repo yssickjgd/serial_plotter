@@ -1,17 +1,16 @@
 /** Global parsing drafts and channel editing remain available in an empty workspace. */
 (function(root) {
     class DataEngineView {
-        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onTabChange = () => {}, onProtocolOpen, onProtocolClose, onSampleProgress, onSaveProtocolDraft, getSourceName, getProtocolReferences = () => [] }) {
+        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onTabChange = () => {}, onProtocolOpen, onProtocolClose, onSampleProgress, onSaveProtocolDraft, onSettingsAction, getSourceName, getProtocolReferences = () => [] }) {
             Object.assign(this, { document, engine, controller, onChange, onApply, getProtocolReferences });
-            this.listeners = []; this.mappingPage = 0; this.binding = false;
+            this.listeners = []; this.mappingPage = 0; this.binding = false; this.rebuildDrafts = new WeakMap();
             this.arrayIds = { dataType: 'data-type', endianness: 'endianness', channelsCount: 'channels-count',
                 enableHeader: 'chk-header', headerHex: 'frame-header', enableFooter: 'chk-footer', footerHex: 'frame-footer', enableChecksum: 'chk-checksum' };
             this.draft = JSON.parse(JSON.stringify(engine.config.draft ?? engine.serialize())); this.draft.draft = null;
             this.timeoutIds = { idleTimeouts: 'engine-idle-timeout', rawIdleTimeouts: 'engine-raw-idle-timeout' };
             const view = this.el('data-engine'), tabs = [...view.querySelectorAll('.tab-btn')];
-            const tabBar = tabs[0].parentNode, actions = this.el('engine-edit-actions');
+            const tabBar = tabs[0].parentNode;
             const desktop = document.defaultView?.matchMedia?.('(min-width: 1680px)');
-            const hasEditActions = tab => ['engine-parsing', 'engine-raw-records'].includes(tab);
             tabBar.setAttribute('role', 'tablist');
             const selectTab = button => {
                 const overview = Boolean(desktop?.matches);
@@ -24,7 +23,6 @@
                     panel.setAttribute('role', overview ? 'region' : 'tabpanel');
                     panel.setAttribute('aria-labelledby', overview ? `${panel.id}-heading` : tab.id);
                 }
-                actions.hidden = !overview && !hasEditActions(button.dataset.tab);
                 onTabChange(button.dataset.tab);
             };
             for (const [index, button] of tabs.entries()) {
@@ -45,14 +43,14 @@
                 let tab = tabs.find(button => button.classList.contains('active'));
                 if (!desktop.matches) {
                     tab = tabs.find(button => button.dataset.tab === focusedPanel?.id) ?? tab;
-                    if (actions.contains(focused) && !hasEditActions(tab.dataset.tab)) tab = tabs[1];
                 }
                 selectTab(tab);
                 if (desktop.matches && tabBar.contains(focused)) this.el(`${tab.dataset.tab}-heading`).focus({ preventScroll: true });
                 if (!desktop.matches && focused?.classList.contains('engine-pane-heading')) tab.focus({ preventScroll: true });
             });
             this.channels = new root.SerialPlotter.EngineChannelView({ document, root: this.el('engine-channel-panel'), controller,
-                capture: engine.service, onChange: () => this.changedChannels() });
+                capture: engine.service, manualMetadata: true,
+                onDraft: () => this.status('通道设置待应用'), onChange: () => this.changedChannels() });
             this.editor = new root.SerialPlotter.ProtocolEditorView({ document, root: this.el('protocol-editor-host'),
                 embedded: true, onOpen: onProtocolOpen, onClose: onProtocolClose, onSampleProgress,
                 onSaveDraft: onSaveProtocolDraft, getSourceName,
@@ -87,11 +85,11 @@
                     if (id === 'engine-protocol' || id === 'engine-mode') this.renderMappings();
                 } });
             this.listen(this.el('rebuild-history'), 'change', () => {
-                this.engine.globals.rebuildHistory = this.el('rebuild-history').checked;
-                this.engine.service.rebuildHistory = this.engine.globals.rebuildHistory; this.onChange();
+                this.rebuildDrafts.set(this.engine, this.el('rebuild-history').checked);
+                this.status('重建历史设置待应用');
             });
-            this.listen(this.el('engine-validate'), 'click', () => { try { this.validate(); this.status('草稿校验通过；应用后生效'); } catch (e) { this.status(e.message, true); } });
-            this.listen(this.el('engine-apply'), 'click', () => { void this.apply().catch(() => {}); });
+            this.listen(this.el('engine-validate'), 'click', () => onSettingsAction(true));
+            this.listen(this.el('engine-apply'), 'click', () => onSettingsAction(false));
             this.listen(this.el('engine-protocol-edit'), 'click', () => this.editor.open(this.currentProtocol() ?? this.draft.protocols[0]));
             this.render();
         }
@@ -147,7 +145,7 @@
                 const input = this.el(id); if (input.type === 'checkbox') input.checked = this.draft.array[key]; else input.value = this.draft.array[key];
             }
             this.el('engine-sync-rate').value = this.draft.synchronization.sampleRate;
-            this.el('rebuild-history').checked = this.engine.globals.rebuildHistory;
+            this.el('rebuild-history').checked = this.rebuildHistoryDraft();
             this.renderProtocols(); this.syncVisibility(); this.renderMappings(); this.binding = false;
             this.el('engine-applied-mode').textContent = this.engine.mode;
             this.status(this.engine.config.draft ? '草稿待应用' : '当前规则已应用');
@@ -199,19 +197,25 @@
                 { memoryLimitBytes: this.engine.service.memory.limitBytes }).normalized;
         }
         status(text, error = false) { const status = this.el('engine-status'); status.textContent = text; status.classList.toggle('is-error', error); }
+        rebuildHistoryDraft() { return this.rebuildDrafts.get(this.engine) ?? this.engine.globals.rebuildHistory; }
+        commitRebuildHistory(engine, rebuild) {
+            engine.globals.rebuildHistory = engine.service.rebuildHistory = rebuild;
+            if (this.rebuildDrafts.get(engine) === rebuild) this.rebuildDrafts.delete(engine);
+        }
         async apply() {
             const revision = this.applyRevision = (this.applyRevision ?? 0) + 1, draftRevision = this.draftRevision ?? 0;
             try {
                 const { settings, expansion } = this.prepareApply();
                 this.el('engine-apply').disabled = true; this.status('');
-                const engine = this.engine, previous = engine.config;
-                const ready = engine.apply(settings, { channelExpansion: expansion && {
+                const engine = this.engine, previous = engine.config, rebuild = this.rebuildHistoryDraft();
+                const ready = engine.apply(settings, { rebuild, channelExpansion: expansion && {
                     globals: expansion.globals, numberMap: expansion.numberMap,
                     commit: () => this.controller.commitChannelRemap(expansion)
                 } });
                 if (engine.config !== previous) this.controller.rebindEngineSources(engine.service);
                 await ready;
                 if (this.disposed || engine.service.disposed) return false;
+                this.commitRebuildHistory(engine, rebuild);
                 this.controller.rebindEngineSources(engine.service); this.onApply(engine); this.onChange();
                 if (revision !== this.applyRevision) return true;
                 this.channels.refresh();

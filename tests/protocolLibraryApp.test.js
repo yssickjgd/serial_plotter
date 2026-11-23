@@ -49,7 +49,8 @@ test('communications keeps a single window and restores source, engine scroll an
     const dialog = f.get('serial-config-dialog'), editor = view.editor;
     assert.ok(f.get('serial-manager-close').closest('.serial-config-header'));
     assert.ok(f.get('serial-source-add').closest('.serial-source-sidebar'));
-    assert.ok(f.get('serial-config-reset').closest('#engine-communication'));
+    assert.equal(f.get('serial-config-reset'), null);
+    assert.ok(f.get('engine-apply').closest('#serial-config-dialog'));
     assert.equal(dialog.open, true);
     assert.equal(editor.dialog.closest('dialog'), dialog);
     assert.equal(f.get('connection-engine-panel').hidden, true);
@@ -95,7 +96,7 @@ test('protocol actions and source selection remain scoped to the selected second
     const f = fixture(t), view = f.app.engineView;
     f.click('serial-manager-open'); f.click('serial-source-add');
     f.change('serial-config-name', 'UART7');
-    f.get('serial-config-form').dispatchEvent({ type: 'submit' });
+    f.click('engine-apply');
     const source = f.app.serialSources.get('serial-2');
     f.get('data-engine').querySelector('[data-tab="engine-parsing"]').click();
     f.change('engine-mode', 'Self_Defined_Frame');

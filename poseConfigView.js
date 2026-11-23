@@ -46,7 +46,7 @@
             parent.append(wrap);
             this.fields.set(path, { input, caption, options, binding });
             if (path.includes('bindings.')) this._buildChannelPicker(wrap, path, input);
-            this.controller._listen(input, 'change', () => {
+            S.bindSettingField(input, () => {
                 const widget = this.controller.active; if (widget?.type !== 'pose' || this.binding) return;
                 try {
                     const settings = S.PoseConfig.normalize(widget.settings);
@@ -57,7 +57,7 @@
                     widget.settings = S.WidgetConfig.normalizeWidgetSettings('pose', settings, this.controller.globalsFor(widget.capture));
                     this.controller.applySettings(widget); this.render(widget); this.controller.onRulesChange(); this.controller.onChange();
                 } catch (failure) { error.textContent = failure.message.includes('有限数') ? '请输入有效的有限数值' : failure.message; error.hidden = false; }
-            });
+            }, this.controller._listen.bind(this.controller));
             return input;
         }
         _buildChannelPicker(wrap, path, input) {

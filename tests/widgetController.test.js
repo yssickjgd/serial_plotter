@@ -298,8 +298,9 @@ test('byte-only workspaces edit shared channel names in the persistent global en
     const f = bootApplication(); t.after(() => f.app.dispose());
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
     await f.settle(); f.app.service.paused = true; f.app.tools.syncSources({ referenceId: byte.id });
+    f.selectConnection('primary', 'engine-channels');
     const input = f.app.engineView.channels.list.children[0].querySelector('[data-role="channel-name"]');
-    input.value = '温度'; input.dispatchEvent({ type: 'change' });
+    input.value = '温度'; input.dispatchEvent({ type: 'change' }); f.click('engine-apply');
     assert.equal(f.app.getConfig().global.channelNames[0], '温度');
     assert.match(f.get('monitor-search-channel-options').textContent, /温度/);
     const wave = f.app.widgets.create({ type: 'wave' });

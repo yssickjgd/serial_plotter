@@ -6,10 +6,12 @@ test('disposing shared computation cancels its scheduled yield and does not reta
     const f = bootApplication();
     t.after(() => f.app.dispose());
     const controller = f.app.widgets;
-    controller.create({ type: 'wave' }); f.change('rebuild-history', false);
+    controller.create({ type: 'wave' });
+    f.selectConnection();
+    f.change('rebuild-history', false); f.click('engine-apply');
     const number = controller.addChannel('formula');
     f.app.service.receive(Uint8Array.of(0xab, 0, 0, 128, 63));
-    f.change('rebuild-history', true);
+    f.change('rebuild-history', true); f.click('engine-apply');
     const pending = controller.updateChannelDefinition({ number, type: 'formula', expression: 'CH01*2' });
     assert.equal(f.app.service.numericSource.frames.rebuilding, true);
     f.app.dispose();

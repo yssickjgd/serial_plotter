@@ -281,10 +281,11 @@ test('Hex has an independent boundary setting and text still shares its viewing 
     f.change('hex-boundary', 'idle-basic');
     assert.equal(basicHex.source, text.source);
     assert.match(f.get('monitor-record-rule').textContent, /仅基本空闲断帧.*50 ms.*1024 B/);
-    f.change('max-raw-frame-bytes', '2048');
+    f.selectConnection('primary', 'engine-raw-records');
+    f.change('max-raw-frame-bytes', '2048'); f.click('engine-apply');
     assert.match(f.get('monitor-record-rule').textContent, /2048 B/);
-    f.change('max-raw-frame-bytes', '63');
-    assert.equal(f.get('engine-raw-limit-status').hidden, false);
+    f.change('max-raw-frame-bytes', '63'); f.click('engine-apply');
+    assert.match(f.get('engine-status').textContent, /原始帧分段上限/);
     assert.match(f.get('monitor-record-rule').textContent, /2048 B/);
     assert.equal(f.app.getConfig().global.textBoundary, 'idle-basic');
     const payload = Uint8Array.of(0xab, 65, 66, 67, 68, 0xab, 69, 70, 71, 72);
@@ -339,7 +340,7 @@ test('the primary source dialog exposes parsing, raw records and channel managem
     assert.equal(f.get('engine-parsing').hidden, false);
     engine.querySelector('[data-tab="engine-channels"]').click();
     assert.equal(f.get('engine-channel-panel').hidden, false);
-    assert.equal(f.get('engine-edit-actions').hidden, true);
+    assert.equal(f.get('engine-edit-actions').hidden, false);
     engine.querySelector('[data-tab="engine-raw-records"]').click();
     assert.equal(f.get('engine-raw-records').hidden, false);
     assert.equal(f.get('engine-edit-actions').hidden, false);

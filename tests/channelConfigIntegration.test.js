@@ -79,11 +79,14 @@ test('right channel name and color edits share metadata with the engine and all 
     name.value = '加速度'; name.dispatchEvent({ type: 'change' });
     assert.equal(name.getAttribute('aria-invalid'), null);
     assert.equal(f.get('channel-edit-status-byte').hidden, true);
+    f.selectConnection('primary', 'engine-channels');
     const engineName = engineRow().querySelector('[data-role="channel-name"]');
     engineName.value = '新的速度'; engineName.dispatchEvent({ type: 'change' });
-    assert.equal(name.value, '新的速度');
+    assert.equal(name.value, '加速度');
     const engineColor = engineRow().querySelector('[data-role="channel-color"]');
     engineColor.value = '#112233'; engineColor.dispatchEvent({ type: 'input' });
+    f.click('engine-apply');
+    assert.equal(name.value, '新的速度');
     assert.equal(color.value, '#112233');
     f.app.widgets.activate(wave.id);
     const otherRow = f.get('channel-config-list').children.find(row => row.dataset.channelNumber === '1');
@@ -170,7 +173,9 @@ test('continuous channel color previews keep the native picker mounted and save 
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
+    f.selectConnection('primary', 'engine-channels');
     const row = editorRow(f, 1), list = f.app.engineView.channels.list;
+    const initialColor = wave.view.getChannelMeta()[0].color;
     const picker = row.querySelector('[data-role="channel-color"]'); picker.focus();
     for (const color of ['#123456', '#456789', '#abcdef']) {
         picker.value = color; picker.dispatchEvent({ type: 'input', bubbles: true });
@@ -178,13 +183,16 @@ test('continuous channel color previews keep the native picker mounted and save 
             'live input must not replace the element that owns the browser color popup');
         assert.ok(list.contains(picker));
         assert.ok(f.document.activeElement === picker);
-        assert.equal(f.app.getConfig().global.channelColors[0], color);
-        assert.equal(wave.view.getChannelMeta()[0].color, color);
-        assert.equal(byte.view.channelColors[0], color);
+        assert.equal(wave.view.getChannelMeta()[0].color, initialColor);
+        assert.equal(byte.view.channelColors[0], initialColor);
     }
     picker.dispatchEvent({ type: 'change', bubbles: true });
-    await f.tick(200); await f.app.flushConfig();
     assert.ok(list.querySelector('[data-role="channel-color"]') === picker);
+    f.click('engine-apply');
+    await f.tick(200); await f.app.flushConfig();
+    assert.equal(f.app.getConfig().global.channelColors[0], '#abcdef');
+    assert.equal(wave.view.getChannelMeta()[0].color, '#abcdef');
+    assert.equal(byte.view.channelColors[0], '#abcdef');
     const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
     assert.equal(restored.app.engineView.channels.list.querySelector('[data-role="channel-color"]').value, '#abcdef');
 });
@@ -200,8 +208,10 @@ test('engine renames update open widget channel rows without replacing selection
         const row = list.children.find(child => child.dataset.channelNumber === '1');
         const checkbox = row.querySelector('[data-role="channel-visible"]'), checked = checkbox.checked;
         const host = f.get(tabId); host.scrollTop = 96;
+        f.selectConnection('primary', 'engine-channels');
         const editor = editorRow(f, 1).querySelector('[data-role="channel-name"]');
         editor.value = '新温度'; editor.dispatchEvent({ type: 'change', bubbles: true });
+        f.click('engine-apply');
         const updated = list.children.find(child => child.dataset.channelNumber === '1');
         assert.equal(updated.querySelector('.channel-name-editor').value, '新温度');
         assert.ok(updated === row, 'a metadata edit keeps the current row mounted');
@@ -226,9 +236,11 @@ test('renamed off-screen channels retain their new names when virtual inspector 
     host.getBoundingClientRect = () => ({ top: 0 });
     list.getBoundingClientRect = () => ({ top: 100 - host.scrollTop });
     assert.equal(list.children.find(child => child.dataset.channelNumber === '60'), undefined);
+    f.selectConnection('primary', 'engine-channels');
     const view = f.app.engineView.channels; view.scrollToNumber(60);
     const editor = view.list.children.find(child => child.dataset.channelNumber === '60').querySelector('[data-role="channel-name"]');
     editor.value = '末端信号'; editor.dispatchEvent({ type: 'change', bubbles: true });
+    f.click('engine-apply');
     host.scrollTop = 59 * 32 + 100; host.dispatchEvent({ type: 'scroll' });
     assert.equal(list.children.find(child => child.dataset.channelNumber === '60').querySelector('.channel-name-editor').value, '末端信号');
     assert.equal(f.app.widgets.activeId, widget.id);
@@ -239,8 +251,10 @@ test('engine renames refresh the current pose binding labels while preserving ch
     const widget = f.app.widgets.create({ type: 'pose', settings: { bindings: { euler: [0, 0, 0] } } });
     f.app.widgets.selectTab('tab-pose-channels');
     const binding = f.get('pose-bindings-euler-0');
+    f.selectConnection('primary', 'engine-channels');
     const editor = editorRow(f, 1).querySelector('[data-role="channel-name"]');
     editor.value = '航向'; editor.dispatchEvent({ type: 'change', bubbles: true });
+    f.click('engine-apply');
     assert.ok(f.get('pose-bindings-euler-0') === binding);
     assert.match(binding.options.find(option => option.value === '0').textContent, /CH00001.*航向/);
     assert.equal(binding.value, '0');
@@ -465,13 +479,16 @@ test('formula drafts apply when leaving the editor or pressing Enter and update 
     expression.value = 'CH00001*2'; expression.dispatchEvent({ type: 'input' }); expression.dispatchEvent({ type: 'change' });
     assert.equal(f.app.getConfig().global.channelDefinitions[0].expression, 'CH00001');
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3]);
-    f.change('rebuild-history', false); commitFormula(row); await f.settle();
+    f.selectConnection();
+    f.change('rebuild-history', false); f.click('engine-apply'); f.click('serial-manager-close');
+    commitFormula(row); await f.settle();
     assert.equal(f.app.getConfig().global.channelDefinitions[0].expression, 'CH00001*2');
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3]);
     f.app.service.pause(false); f.app.service.receive(Uint8Array.of(4)); await f.settle(); f.app.service.pause(true);
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3, 8]);
     // Reapplying the same expression with rebuild enabled must also refresh older samples.
-    f.change('rebuild-history', true); row = findRow();
+    f.selectConnection();
+    f.change('rebuild-history', true); f.click('engine-apply'); f.click('serial-manager-close'); row = findRow();
     commitFormula(row, true); await f.settle();
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [4, 6, 8]);
     assert.equal(wave.view.getChannelMeta()[number - 1].visible, true);
@@ -509,7 +526,8 @@ test('computed numeric values flow into FFT search and CSV without synthetic raw
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
     f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
-    f.change('rebuild-history', false);
+    f.selectConnection();
+    f.change('rebuild-history', false); f.click('engine-apply'); f.click('serial-manager-close');
     const number = f.app.widgets.addChannel('formula');
     await f.app.widgets.updateChannelDefinition({ number, type: 'formula', expression: 'CH00001/2' });
     f.app.widgets.setChannelName(number - 1, '半幅'); f.app.widgets.setChannelVisible(number - 1, true);

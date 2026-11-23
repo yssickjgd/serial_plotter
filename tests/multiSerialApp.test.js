@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
 
-function saveSerialConfig(f) { f.get('serial-config-form').dispatchEvent({ type: 'submit' }); }
+function saveSerialConfig(f) { f.click('engine-apply'); }
 function addSerial(f, fields = {}) {
     if (!f.get('serial-config-dialog').open) f.click('serial-manager-open');
     f.click('serial-source-add');
@@ -86,7 +86,7 @@ test('additional serial connections keep independent raw histories and can expor
     assert.equal(f.get('serial-baud').disabled, true);
     assert.equal(f.get('serial-config-save'), null);
     assert.equal(f.get('serial-config-offset').disabled, true);
-    f.click('serial-config-reset');
+    assert.equal(f.get('serial-config-reset'), null);
 
     primary.receive([0xa1, 0xa2]);
     secondary.receive([0xb1, 0xb2]);
@@ -221,6 +221,7 @@ test('secondary channel management edits and remaps its own catalog and persists
     input(1, 'channel-name').dispatchEvent({ type: 'change' });
     input(1, 'channel-color').value = '#123456';
     input(1, 'channel-color').dispatchEvent({ type: 'input' });
+    saveSerialConfig(f);
     assert.equal(f.app.dataEngine.globals.channelNames[0], 'CH00001');
     assert.equal(capture.dataEngine.globals.channelNames[0], 'temperature');
     assert.equal(capture.dataEngine.globals.channelColors[0], '#123456');
@@ -297,7 +298,7 @@ test('global channel mapping packs two transports and exposes the same synchroni
     assert.match(await f.blobs.at(-1).text(), /23,9,14/);
     const rawHistory = [f.app.service, secondary].map(capture => [capture.history.endByte, capture.epoch]);
     f.click('serial-manager-open'); f.selectConnection('serial-2');
-    f.change('serial-config-offset', '-2'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '-2'); saveSerialConfig(f);
     assert.equal(wave.source.frames.getValue(2, 0), 14, 'previous synchronized data remains visible while recalculating');
     assert.deepEqual([f.app.service, secondary].map(capture => [capture.history.endByte, capture.epoch]), rawHistory);
     await f.tick(100);
@@ -305,7 +306,7 @@ test('global channel mapping packs two transports and exposes the same synchroni
     assert.equal(wave.source.frames.getValue(2, 2), 14);
     f.click('serial-manager-close'); f.click('btn-pause');
     f.click('serial-manager-open'); f.selectConnection('serial-2');
-    f.change('serial-config-offset', '2'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '2'); saveSerialConfig(f);
     assert.equal(wave.source.frames.getValue(2, 2), 14, 'the communications dialog also preserves the displayed history');
     await f.tick(100);
     assert.equal(wave.source.frames.timestampAt(0), 1000);
@@ -393,7 +394,7 @@ test('source timebase settings update retained samples atomically and survive co
     f.change('channel-timebase-mode', 'fixed');
     f.change('channel-timebase-rate', '1000');
     const single = f.app.widgets.create({ type: 'wave' });
-    f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    saveSerialConfig(f);
     assert.equal(wave.source.frames, previous);
     await f.tick(100);
     const frames = wave.source.frames;
@@ -409,7 +410,7 @@ test('source timebase settings update retained samples atomically and survive co
     assert.equal(restored.get('channel-timebase-mode').value, 'fixed');
     assert.equal(restored.app.getConfig().workspaceChannels.timebases.primary.sampleRate, 1000);
     f.change('channel-timebase-rate', '0');
-    f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    saveSerialConfig(f);
     assert.match(f.get('channel-alignment-status').textContent, /采样率/);
     assert.equal(combined.timebases.primary.sampleRate, 1000);
 });
@@ -428,10 +429,12 @@ test('changing a timebase without rebuilding preserves the time of already recei
     assert.equal(single.view.timeXUnit, 's');
     const trace = () => Array.from(history.rawTraceAt(0, 0, history.length).times);
     assert.deepEqual(trace(), [1000, 1000]);
-    f.change('rebuild-history', false);
+    f.selectConnection();
+    f.change('rebuild-history', false); saveSerialConfig(f);
+    f.click('serial-manager-close');
     service.receive(Uint8Array.of(12, 13), { timestamp: 1005 });
     f.change('sidebar-timebase-mode', 'fixed');
-    f.get('sidebar-source-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.get('sidebar-time-alignment-group').dispatchEvent({ type: 'pointerleave' });
     service.receive(Uint8Array.of(14, 15), { timestamp: 1010 });
     await f.tick(100);
     assert.equal(workspaceChannels.numericSource.frames, history);
@@ -466,17 +469,17 @@ test('cross-connection time navigation uses timestamps and applies a signed mill
     assert.equal(f.get('serial-config-offset').disabled, true);
     f.selectConnection('serial-2');
     assert.equal(f.get('serial-config-offset').disabled, false);
-    f.change('serial-config-offset', '-1000.5'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '-1000.5'); saveSerialConfig(f);
     assert.match(f.get('channel-alignment-status').textContent, /整数/);
     assert.equal(second.settings.timeOffsetMs, 0);
-    f.change('serial-config-offset', '-1000'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '-1000'); saveSerialConfig(f);
     f.click('serial-manager-close');
     assert.equal(f.app.tools.jumpToTime(), true);
     assert.equal(b.view.navigationMarkers.timeOrder, b.source.frames.orderAt(1));
     assert.equal(f.app.getConfig().serialSources.entries[0].timeOffsetMs, -1000);
     f.click('serial-manager-open'); f.selectConnection('serial-2');
     assert.equal(f.get('serial-config-offset').value, '-1000');
-    f.change('serial-config-offset', '-999'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '-999'); saveSerialConfig(f);
     const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
     restored.click('serial-manager-open'); restored.selectConnection('serial-2');
     assert.equal(restored.get('serial-config-offset').value, '-999');
@@ -688,7 +691,7 @@ test('serial configuration is a draft until saved and connected ports keep their
     f.change('serial-baud', '1');
     f.change('serial-config-name', '采样串口');
     saveSerialConfig(f);
-    f.change('serial-config-offset', '-4'); f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.change('serial-config-offset', '-4'); saveSerialConfig(f);
     const source = f.app.serialSources.get('serial-2');
     assert.equal(source.settings.name, '采样串口');
     assert.equal(source.settings.timeOffsetMs, -4);
@@ -698,7 +701,7 @@ test('serial configuration is a draft until saved and connected ports keep their
 
     f.selectConnection('serial-2');
     f.change('serial-config-name', '待取消名称');
-    f.click('serial-config-reset');
+    f.click('serial-manager-close');
     assert.equal(source.settings.name, '采样串口');
 });
 

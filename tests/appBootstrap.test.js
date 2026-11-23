@@ -725,7 +725,7 @@ test('the top progress reports byte replay and timing changes and clears cancell
     f.click('workspace-channel-auto-map');
     await f.tick();
     f.change('sidebar-timebase-mode', 'fixed');
-    f.get('sidebar-source-alignment').dispatchEvent({ type: 'pointerleave' });
+    f.get('sidebar-time-alignment-group').dispatchEvent({ type: 'pointerleave' });
     assert.equal(panel.hidden, false);
     assert.match(panel.textContent, /重新对齐保留历史/);
     assert.doesNotMatch(f.get('sidebar-timebase-state').textContent, /重新对齐保留历史/);
@@ -857,14 +857,14 @@ test('primary network mode is configured in the dialog and connects with the req
     assert.equal(f.get('connection-network-parameters').hidden, false);
     assert.equal(f.get('wrap-local-port').hidden, false);
     f.change('net-port', '9001'); f.change('net-local', '9002');
-    f.get('serial-config-form').dispatchEvent({ type: 'submit' });
+    f.click('engine-apply');
     let received;
     f.app.netAdapter.connect = async value => { received = value; f.app.netAdapter.onConnectStatusChange(true); };
     f.click('serial-manager-close'); f.click('btn-connect'); await f.tick();
     assert.equal(received.mode, 'udp'); assert.equal(received.port, 9001); assert.equal(received.localPort, 9002);
     f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('conn-type').disabled, true);
-    f.click('serial-config-reset'); f.click('serial-manager-close');
+    f.click('serial-manager-close');
     f.click('serial-disconnect-all'); await f.tick();
     f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('conn-type').disabled, false);

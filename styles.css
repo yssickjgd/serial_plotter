@@ -150,7 +150,7 @@ body {
 .engine-apply-bar { display: flex; flex-wrap: wrap; gap: 5px; }
 .engine-apply-bar .btn { flex: 1 1 100px; }
 #engine-status { margin: 6px 0; overflow-wrap: anywhere; }
-.is-error, .protocol-editor-error { color: #a02119; }
+.is-error, .source-timing-settings .hint-text.is-error, .protocol-editor-error { color: #a02119; }
 .widget-engine-source { margin: 4px 8px; }
 .widget-engine-notice { position: absolute; bottom: 25px; left: 12px; right: 12px; z-index: 4; padding: 5px 7px; color: #cce2f7; background: #152330ed; border: 1px solid #405469; border-radius: 3px; font-size: var(--ui-note-size); pointer-events: none; }
 .widget-engine-notice[hidden] { display: none; }

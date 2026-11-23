@@ -9,7 +9,7 @@ function saveBaud(f, baud) {
     if (!f.get('serial-config-dialog').open) f.click('serial-manager-open');
     f.selectConnection('primary');
     f.change('serial-baud', baud);
-    f.get('serial-config-form').dispatchEvent({ type: 'submit' });
+    f.click('engine-apply');
 }
 async function bootIndexedDb(t, options = {}) {
     const f = bootApplication(options.legacy ?? null);
@@ -48,7 +48,7 @@ test('IndexedDB startup restores the saved configuration before widgets and layo
     } });
     f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('serial-baud').value, '57600');
-    f.click('serial-config-reset');
+    assert.equal(f.get('serial-config-reset'), null);
     assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .65);
     assert.equal(f.app.workspaceStorage.hasIndexedDB, true);
 });

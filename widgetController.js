@@ -752,6 +752,7 @@ class WidgetController {
     }
 
     _bindInspector() {
+        const bindSetting = (id, apply) => SerialPlotter.bindSettingField(this.element(id), apply, this._listen.bind(this));
         this._listen(this.element('widget-connection-source'), 'change', () => {
             const widget = this.active;
             if (!widget || this.binding) return;
@@ -769,7 +770,7 @@ class WidgetController {
             this.active.settings.engineSource = this.element('widget-engine-source').value;
             this.rebindEngineSources(this.active.capture);
         });
-        this._listen(this.element('plot-window-points'), 'change', () => {
+        bindSetting('plot-window-points', () => {
             try { this.setPlotWindowPoints(this.element('plot-window-points').value); this._showError(''); }
             catch (error) { this._showError(error.message); }
         });
@@ -798,8 +799,9 @@ class WidgetController {
         }
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn'))
             this._listen(button, 'click', () => this.selectTab(button.dataset.tab));
-        for (const name of ['change', 'blur', 'pointerleave'])
-            this._listen(this.element('widget-title'), name, () => this._commitTitle());
+        this._listen(this.element('widget-title'), 'change', () => this._commitTitle());
+        this._listen(this.element('widget-title'), 'blur', () => this._commitTitle());
+        SerialPlotter.bindAutoApply(this.element('widget-title'), () => this._commitTitle(), this._listen.bind(this));
         this._listen(this.element('widget-title-tools'), 'pointerleave', () => this._commitTitle());
         this._listen(this.element('widget-delete'), 'click', () => { if (this.active) this.requestRemove(this.activeId); });
         const dialog = this.element('widget-delete-dialog');
@@ -811,7 +813,7 @@ class WidgetController {
             this._closeDeleteDialog();
             if (id !== null && id !== undefined) this.remove(id);
         });
-        for (const [key, id] of Object.entries(this.fieldIds)) this._listen(this.element(id), 'change', () => {
+        for (const [key, id] of Object.entries(this.fieldIds)) bindSetting(id, () => {
             const widget = this.active;
             if (!widget || widget.type === 'pose' || this.binding) return;
             const field = this.element(id);
@@ -866,7 +868,7 @@ class WidgetController {
                 this.onChange(); this._showError('');
             } catch (error) { this._showError(error.message); }
         });
-        for (const id of ['plot-y-scale-mode', 'plot-y-min', 'plot-y-max']) this._listen(this.element(id), 'change', () => {
+        for (const id of ['plot-y-scale-mode', 'plot-y-min', 'plot-y-max']) bindSetting(id, () => {
             const widget = this.active;
             if (widget?.type !== 'wave') return;
             const suffix = this._ySuffix(widget.settings);
