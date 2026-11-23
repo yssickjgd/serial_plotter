@@ -26,27 +26,56 @@ function bucketExtrema(values, pixels, first = 0, limit = values.length) {
     return result;
 }
 
-/** Keep gaps when compressing a time trace; never connect across a missing sample. */
-function bucketTraceExtrema(values, pixels) {
+/** Keep extrema and gap endpoints in buckets anchored to the source coordinates. */
+function bucketTraceExtrema(values, pixels, { firstIndex = 0, times, timeSpan } = {}) {
     const points = [];
-    let start = 0;
-    while (start < values.length) {
-        while (start < values.length && !Number.isFinite(values[start])) start++;
-        let end = start;
-        while (end < values.length && Number.isFinite(values[end])) end++;
-        if (end > start) {
-            const count = Math.max(1, pixels * (end - start) / values.length);
-            const bucket = bucketExtrema(values, count, start, end);
-            if (start > 0) bucket[0].break = true;
-            for (const point of bucket) points.push(point);
+    const count = Math.max(1, Math.floor(pixels));
+    // Power-of-two time intervals keep the bucket grid steady through small changes in span.
+    const size = times ? (timeSpan > 0 ? 2 ** Math.ceil(Math.log2(timeSpan / count)) : Infinity)
+        : Math.max(1, Math.ceil(values.length / count));
+    let bucket, minIndex, maxIndex, previous = -1;
+    const append = (index, gap = false) => {
+        if (points.at(-1)?.index !== index) {
+            const point = { index, value: values[index] };
+            if (gap) point.break = true;
+            points.push(point);
         }
-        start = end + 1;
+    };
+    const flush = () => {
+        append(Math.min(minIndex, maxIndex));
+        append(Math.max(minIndex, maxIndex));
+    };
+    for (let i = 0; i < values.length; i++) {
+        const value = values[i], x = times ? times[i] : firstIndex + i;
+        if (!Number.isFinite(value) || !Number.isFinite(x)) {
+            if (previous >= 0) {
+                flush();
+                append(previous);
+                previous = -1;
+            }
+            continue;
+        }
+        const nextBucket = Math.floor(x / size);
+        if (previous < 0 || nextBucket !== bucket) {
+            if (previous < 0) append(i, i > 0);
+            else flush();
+            bucket = nextBucket;
+            minIndex = maxIndex = i;
+        } else {
+            if (value < values[minIndex]) minIndex = i;
+            if (value > values[maxIndex]) maxIndex = i;
+        }
+        previous = i;
+    }
+    if (previous >= 0) {
+        flush();
+        append(previous);
     }
     return points;
 }
 
 /** Keep ordered pixel extrema and split the trace at gaps or jumps above maxStep. */
-function bucketAxisExtrema(values, xPositions, maxStep = Infinity) {
+function bucketAxisExtrema(values, xPositions, maxStep = Infinity, pixelScale = 1) {
     const result = [];
     const splitOnJump = Number.isFinite(maxStep);
     let pixel = -1, minIndex = -1, maxIndex = -1;
@@ -63,7 +92,7 @@ function bucketAxisExtrema(values, xPositions, maxStep = Infinity) {
         if (!Number.isFinite(values[i]) || !Number.isFinite(xPositions[i])) {
             flush(); minIndex = maxIndex = pixel = -1; broken = true; continue;
         }
-        const nextPixel = Math.floor(xPositions[i]);
+        const nextPixel = Math.floor(xPositions[i] * pixelScale);
         const jump = splitOnJump && Math.abs(values[i] - values[i - 1]) > maxStep;
         if (nextPixel !== pixel || jump) {
             flush();

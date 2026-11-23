@@ -22,7 +22,10 @@ async function bootIndexedDb(t, options = {}) {
     f.document.dispatchEvent({ type: 'DOMContentLoaded' });
     assert.equal(f.S.application, undefined, 'IndexedDB configuration must load before constructing the application');
     assert.ok(f.S.applicationReady instanceof Promise || typeof f.S.applicationReady?.then === 'function');
+    assert.match(f.get('history-rebuild-progress').textContent, /读取.*配置/);
+    assert.equal(f.get('workspace-task-slot').hidden, false);
     const ready = await f.S.applicationReady;
+    assert.equal(f.get('workspace-task-slot').hidden, true);
     assert.equal(ready, f.S.application);
     f.app = ready;
     t.after(() => f.app.dispose());

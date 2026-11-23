@@ -18,6 +18,7 @@ const plotterLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 const PlotWaveGpuRenderer = typeof module !== 'undefined'
     ? require('./waveGpuRenderer').WaveGpuRenderer : globalThis.SerialPlotter.WaveGpuRenderer;
+const plotSampleMarkerSize = 3;
 
 function sampleTimeBounds(plot, start, end) {
     if (plot.frames.liveTimeBounds && plot.vp?.time.autoFollow)
@@ -240,6 +241,7 @@ class Plotter {
     setFrames(frames) {
         if (this._disposed || this.frames === frames) return;
         this.frames = frames;
+        this._timeTickScale = null;
         this._sourceFirstOrder = frames.orderAt(0);
         this._timeWindowStartOrder = null;
         this._invalidateFft();
@@ -357,15 +359,21 @@ class Plotter {
             this._selection = null;
         }
         const deviceRatio = Number(this.window.devicePixelRatio);
-        const density = Math.max(1, displayScale *
-            (Number.isFinite(deviceRatio) && deviceRatio > 0 ? deviceRatio : 1));
-        // Drawing and pointer coordinates stay logical; only the backing bitmap grows.
+        const density = displayScale * (Number.isFinite(deviceRatio) && deviceRatio > 0 ? deviceRatio : 1);
+        // Use the coarser of CSS pixels and device pixels as the minimum stroke width.
+        this._traceDensity = Math.min(1, displayScale, density);
+        // The overlay follows device pixels while coordinates remain in logical units.
         const visible = this.isVisible && this._inViewport;
         const pixelWidth = visible ? Math.ceil(this.width * density) : 1;
         const pixelHeight = visible ? Math.ceil(this.height * density) : 1;
         if (this.canvas.width !== pixelWidth) this.canvas.width = pixelWidth;
         if (this.canvas.height !== pixelHeight) this.canvas.height = pixelHeight;
-        this.gpuRenderer?.resize(this.width, this.height, pixelWidth, pixelHeight);
+        // WebGL line strips are one backing pixel wide. Use a smaller bitmap at
+        // reduced workspace zoom so the lines keep their minimum displayed width.
+        const compact = visible && displayScale < 1;
+        const gpuWidth = compact ? Math.max(1, Math.floor(this.width * this._traceDensity)) : pixelWidth;
+        const gpuHeight = compact ? Math.max(1, Math.floor(this.height * this._traceDensity)) : pixelHeight;
+        this.gpuRenderer?.resize(this.width, this.height, gpuWidth, gpuHeight);
         if (this.mousePos && this._pointerClient) this.mousePos = this._pointFromPointer(this._pointerClient);
     }
 
@@ -562,6 +570,7 @@ class Plotter {
         this._clearYZoom('time');
         this._clearYZoom('frequency');
         if (!this.viewOnly) this.frames.clear();
+        this._timeTickScale = null;
         this.sampleRateHz = 0;
         this._invalidateFft();
         this._cachedScrollTotal = 0;
@@ -953,7 +962,7 @@ class Plotter {
         return series;
     }
 
-    _prepareTracePoints(series, start, end, width, scale) {
+    _prepareTracePoints(series, start, end, width, scale, pixels, aligned) {
         let positions;
         if (this.displayMode !== 'time') {
             const cached = this._frequencyPositions;
@@ -969,28 +978,33 @@ class Plotter {
             }
         }
         const maxStep = this._maxPhaseStep;
+        const frameOrdinal = this.displayMode === 'time' && this.frames.frameOrdinalAt?.(start);
+        const firstIndex = Number.isFinite(frameOrdinal) ? frameOrdinal : start;
+        const { bucketTraceExtrema } = globalThis.SerialPlotter;
         for (const item of series) {
             if (this.displayMode === 'time') {
-                if (item.points && item.pointWidth === width) continue;
+                if (item.points && item.pointWidth === width && item.pointPixels === pixels) continue;
                 if (item.times) {
-                    const { first, last } = sampleTimeBounds(this, start, end);
-                    const span = Math.max(Number.EPSILON, last - first);
-                    const xs = Float64Array.from(item.times, time => (time - first) / span * width);
-                    item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.rawValues, xs);
+                    const { first, last } = aligned;
+                    const timeSpan = last - first;
+                    const span = Math.max(Number.EPSILON, timeSpan);
+                    item.points = bucketTraceExtrema(item.rawValues, pixels, { times: item.times, timeSpan });
                     for (const point of item.points) {
-                        point.x = xs[point.index];
+                        point.x = (item.times[point.index] - first) / span * width;
                         point.synthetic = point.index === 0 && item.direct?.syntheticStart ||
                             point.index === item.rawValues.length - 1 && item.direct?.syntheticEnd;
                         if (item.direct?.recoveredIndices?.has(point.index)) point.recovered = true;
                     }
                 } else {
-                    item.points = globalThis.SerialPlotter.bucketTraceExtrema(item.rawValues, width);
+                    item.points = bucketTraceExtrema(item.rawValues, pixels, { firstIndex });
                     const step = width / Math.max(1, end - start - 1);
                     for (const point of item.points) point.x = point.index * step;
                 }
                 item.pointWidth = width;
+                item.pointPixels = pixels;
             } else {
-                item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.mags, positions, maxStep);
+                item.points = globalThis.SerialPlotter.bucketAxisExtrema(
+                    item.mags, positions, maxStep, this._traceDensity);
                 for (const point of item.points) point.x = positions[point.index];
             }
         }
@@ -1471,7 +1485,8 @@ class Plotter {
         const summaryText = this._buildSummary(series, this.displayMode);
         const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(summaryText);
         const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
-        this._prepareTracePoints(series, startIdx, actualEnd, plotW, xScale);
+        const tracePixels = Math.max(1, Math.floor(plotW * this._traceDensity));
+        this._prepareTracePoints(series, startIdx, actualEnd, plotW, xScale, tracePixels, aligned);
 
         let min, max;
         const logY = this._logY;
@@ -1570,7 +1585,7 @@ class Plotter {
                 point.y = plotH - yRatio * plotH;
             }
             const trace = { points: item.points, color: item.ch.color,
-                dots: item.mags.length <= plotW || item.points.length === 1 };
+                dots: item.mags.length <= tracePixels || item.points.length === 1 };
             traces.push(trace);
             if (trace.dots && item.direct?.recoveredIndices?.size) recoveredTraces.push(trace);
         }
@@ -1603,7 +1618,7 @@ class Plotter {
     _drawTrace2D({ points, color, dots }) {
         if (!points.length) return;
         this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 1.2;
+        this.ctx.lineWidth = Math.max(1.2, 1 / this._traceDensity);
         this.ctx.beginPath();
         for (let i = 0; i < points.length; i++) {
             const { x, y } = points[i];
@@ -1614,20 +1629,22 @@ class Plotter {
         this.ctx.stroke();
         if (dots) {
             this.ctx.fillStyle = color;
+            const halfSize = plotSampleMarkerSize / 2;
             for (const { x, y, synthetic, recovered } of points) {
                 if (!synthetic && !recovered && Number.isFinite(x) && Number.isFinite(y))
-                    this.ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+                    this.ctx.fillRect(x - halfSize, y - halfSize, plotSampleMarkerSize, plotSampleMarkerSize);
             }
         }
     }
 
     _drawRecoveredMarkers(traces, plotW, plotH) {
-        const ctx = this.ctx, radius = 3.5;
+        const ctx = this.ctx, strokeWidth = .75;
+        const radius = (plotSampleMarkerSize - strokeWidth) / 2;
         ctx.save();
         ctx.beginPath();
         ctx.rect(0, 0, plotW, plotH);
         ctx.clip();
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = strokeWidth;
         for (const { points, color } of traces) {
             ctx.beginPath();
             ctx.strokeStyle = color;
@@ -1641,11 +1658,70 @@ class Plotter {
         ctx.restore();
     }
 
+    _drawTimeTicks(width, height, start, end, aligned) {
+        const seconds = !!aligned || this.timeXUnit === 's';
+        const ordinal = this.fixedTimeRate ? this.frames.frameOrdinalAt?.(0) : 0;
+        const offset = Number.isFinite(ordinal) ? ordinal : 0;
+        const first = aligned ? (aligned.first - this.frames.originTimestamp) / 1000
+            : seconds ? (start + offset) / this.sampleRateHz : start;
+        const last = aligned ? (aligned.last - this.frames.originTimestamp) / 1000
+            : seconds ? (end - 1 + offset) / this.sampleRateHz : end - 1;
+        const span = last - first;
+        if (!Number.isFinite(span) || span <= 0) return false;
+
+        const ctx = this.ctx;
+        const format = (value, precision) => seconds ? Number(value.toFixed(precision)) + ' s' : String(value);
+        const precisionFor = step => Math.max(0, Math.min(15, -Math.floor(Math.log10(step))));
+        const maxPrecision = precisionFor(span / 10);
+        const measure = value => ctx.measureText(seconds ? value.toFixed(maxPrecision) + ' s' : String(value)).width;
+        const labelWidth = Math.max(measure(first), measure(last));
+        const divisions = Math.max(1, Math.min(10, width / (labelWidth + 8)));
+        const required = Math.max(seconds ? 0 : 1, span / divisions);
+        const magnitude = 10 ** Math.floor(Math.log10(required));
+        let step = ([1, 2, 5, 10].find(factor => factor * magnitude >= required) ?? 10) * magnitude;
+
+        // Keep the coarser step through small changes in receive-time span or label width.
+        const unit = aligned ? 'timestamp' : seconds ? 'seconds' : 'samples';
+        const previous = this._timeTickScale;
+        if (previous?.width === width && previous.unit === unit && previous.step > step && required > step * 0.8)
+            step = previous.step;
+        this._timeTickScale = { width, unit, step };
+
+        const precision = precisionFor(step);
+        const firstTick = Math.ceil(first / step), lastTick = Math.floor(last / step);
+        ctx.textAlign = 'left';
+        ctx.beginPath();
+        let boundary = -Infinity;
+        const visibleTicks = Math.min(10, lastTick - firstTick);
+        for (let i = 0; i <= visibleTicks; i++) {
+            const value = (firstTick + i) * step;
+            const text = format(value, precision);
+            const pixels = ctx.measureText(text).width;
+            const x = (value - first) / span * width;
+            const left = x - pixels / 2;
+            // A tick leaves the axis only at its own edge; it never displaces the rest.
+            if (left < 0 || left + pixels > width || left < boundary) continue;
+            ctx.fillText(text, left, height + 3);
+            ctx.moveTo(x, height); ctx.lineTo(x, height + 3);
+            boundary = left + pixels + 8;
+        }
+        if (boundary !== -Infinity) {
+            ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.stroke();
+        } else {
+            const middle = (first + last) / 2;
+            const text = format(seconds ? middle : Math.round(middle), Math.max(precision, maxPrecision));
+            const pixels = ctx.measureText(text).width;
+            if (pixels <= width) ctx.fillText(text, (width - pixels) / 2, height + 3);
+        }
+        return true;
+    }
+
     _drawXAxisLabels(width, height, start, end, count, total, scale, series, aligned) {
         const ctx = this.ctx;
         ctx.textBaseline = 'top';
         ctx.fillStyle = '#aaaaaa';
         const frequency = this.displayMode !== 'time';
+        if (!frequency && !this.frames.responseMode && this._drawTimeTicks(width, height, start, end, aligned)) return;
         const divisions = frequency ? 5 : Math.min(10, Math.max(1, count - 1));
         const labels = [];
         for (let i = 0; i <= divisions; i++) {

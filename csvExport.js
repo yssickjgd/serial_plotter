@@ -16,10 +16,10 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, options = {}) {
     if (frames.rawMode || !channels.length || !frames.length) return;
     const indices = csvChannelIndices(channels, options);
     if (!indices.length) return;
-    const { timestamps = false } = options;
+    const { timestamps = false, onProgress } = options, count = frames.length;
+    onProgress?.(0, count);
     yield ['Index', ...(timestamps ? ['Timestamp'] : []),
         ...indices.map(index => csvFieldForExport(channels[index].name))].join(',') + '\r\n';
-    const count = frames.length;
     const firstOrder = frames.orderAt(0);
     for (let start = 0; start < count; start += rowsPerChunk) {
         if (frames.orderAt(0) !== firstOrder)
@@ -38,6 +38,7 @@ function* frameCsvChunks(frames, channels, rowsPerChunk = 1024, options = {}) {
             lines.push(fields.join(','));
         }
         yield lines.join('\r\n') + '\r\n';
+        onProgress?.(Math.min(count, start + rowsPerChunk), count);
     }
 }
 

@@ -7,7 +7,8 @@ async function startSerialPlotterApplication() {
     'use strict';
     const S = globalThis.SerialPlotter, el = id => document.getElementById(id);
     const CONFIG_KEY = 'serialplot_v3_config', WORKSPACE_KEY = 'serialplot_v3_workspace';
-    const cleanups = [], progressRows = new Map(), rates = new Map(), draws = new Map();
+    const cleanups = [], progressRows = new Map(), captureProgressSources = new Set(), rates = new Map(), draws = new Map();
+    const taskProgress = el('history-rebuild-progress'), workspaceTaskSlot = el('workspace-task-slot');
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
     let boundExportSourceId = null, boundExportFormat = null, bindingExport = false;
     let widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
@@ -20,6 +21,17 @@ async function startSerialPlotterApplication() {
     const report = error => status('cfg-save-status', error.message ?? String(error));
     const bytesLabel = n => n < 1024 ? Math.round(n) + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
     let storageBlocked = false, storageLoadError = null, storageWarnings = 0, configRevision = 0;
+    function paintProgress() {
+        if (document.hidden || typeof window.requestAnimationFrame !== 'function') return;
+        return new Promise(resolve => {
+            const fallback = setTimeout(resolve, 80);
+            window.requestAnimationFrame(() => setTimeout(() => {
+                clearTimeout(fallback); resolve();
+            }, 0));
+        });
+    }
+    const itemsProcessed = (done, total, unit) => done.toLocaleString() + ' / ' + total.toLocaleString() + ' ' + unit;
+    const configProgress = (key, label, done) => setTaskProgress(key, label, done / 3, itemsProcessed(done, 3, '步'));
     const validateStoredConfig = (candidate, layout) => {
         const config = S.WidgetConfig.migrateWorkspaceConfig(candidate, layout);
         preflightWorkspaceEngines(config);
@@ -39,12 +51,18 @@ async function startSerialPlotterApplication() {
     }
     const workspaceStorage = new S.WorkspaceStorage({ indexedDB: globalThis.indexedDB, localStorage: globalThis.localStorage,
         configKey: CONFIG_KEY, workspaceKey: WORKSPACE_KEY,
-        validate: validateStoredConfig,
+        validate(candidate, layout) {
+            if (restoring) configProgress('config-restore', '正在校验启动配置', 1);
+            return validateStoredConfig(candidate, layout);
+        },
         onError(error) { storageWarnings++; report(error); } });
     let initial;
     try {
         if (workspaceStorage.hasIndexedDB) {
+            configProgress('config-restore', '正在读取启动配置', 0);
             initial = await workspaceStorage.load() ?? S.WidgetConfig.migrateWorkspaceConfig(null);
+            configProgress('config-restore', '正在恢复工作区', 2);
+            await paintProgress();
         } else {
             // Legacy-only environments initialize synchronously, including the browser test harness.
             const raw = localStorage.getItem(CONFIG_KEY), layout = localStorage.getItem(WORKSPACE_KEY);
@@ -95,21 +113,64 @@ async function startSerialPlotterApplication() {
         if (saveTimer !== null) await saveNow();
         return workspaceStorage.flush();
     }
+    function setTaskProgress(key, label, fraction, counter = '') {
+        if (disposed) return;
+        let item = progressRows.get(key);
+        if (!label) {
+            if (!item) return;
+            item.row.remove(); progressRows.delete(key);
+        } else {
+            if (!item) {
+                const row = document.createElement('div'), title = document.createElement('span');
+                const detail = document.createElement('span'), meter = document.createElement('progress');
+                const amount = document.createElement('span');
+                row.className = 'task-progress-row'; detail.className = 'task-progress-detail';
+                meter.max = 100; meter.setAttribute('aria-hidden', 'true');
+                detail.append(meter, amount); row.append(title, detail);
+                item = { row, title, detail, meter, amount };
+                progressRows.set(key, item); taskProgress.append(row);
+            }
+            if (item.title.textContent !== label) item.title.textContent = label;
+            const percent = Number.isFinite(fraction) ? Math.round(Math.max(0, Math.min(1, fraction)) * 100) : null;
+            const amount = [percent === null ? '' : percent + '%', counter].filter(Boolean).join(' · ');
+            item.detail.hidden = !amount;
+            item.meter.hidden = percent === null;
+            if (percent !== null && item.meter.value !== percent) item.meter.value = percent;
+            if (item.amount.textContent !== amount) item.amount.textContent = amount;
+        }
+        syncTaskProgressVisibility();
+    }
+    function syncTaskProgressVisibility() {
+        const hidden = progressRows.size === 0;
+        const hideWorkspace = hidden || taskProgress.parentElement !== workspaceTaskSlot;
+        if (taskProgress.hidden !== hidden) taskProgress.hidden = hidden;
+        if (workspaceTaskSlot.hidden !== hideWorkspace) workspaceTaskSlot.hidden = hideWorkspace;
+    }
+    function resetTaskProgress() {
+        captureProgressSources.clear(); progressRows.clear();
+        taskProgress.replaceChildren(); syncTaskProgressVisibility();
+    }
     function showProgress(source, progress) {
         if (disposed) return;
-        const container = el('history-rebuild-progress');
-        if (source && (source.rebuilding || source.frames.rebuilding)) {
-            let row = progressRows.get(source);
-            if (!row) { row = document.createElement('div'); row.dataset.sourceId = source.id; progressRows.set(source, row); container.appendChild(row); }
-            const titles = [...(widgets?.widgets.values() ?? [])].filter(widget => widget.source === source).map(widget => widget.title);
+        // The protocol records, message sequences and synchronized table share one replay.
+        const sharedOutput = source?.engineManaged && source.rebuilding && source.kind !== 'protocol';
+        if (source && !sharedOutput && (source.rebuilding || source.frames.rebuilding)) {
+            captureProgressSources.add(source);
+            const owner = allConnections().find(connection => connection.capture.sources.has(source));
+            const title = source.kind === 'protocol' ? '正在重新解析协议历史'
+                : source.kind === 'raw' ? '正在重建字节流历史'
+                    : source.rebuilding ? '正在重建数值历史' : '正在重算运算通道';
             progress ??= source.rebuilding ? source.progress : source.frames.progress;
             const fraction = typeof progress === 'number' ? progress : progress?.fraction ?? progress?.progress ??
-                (progress?.totalBytes ? progress.processedBytes / progress.totalBytes : 0);
-            row.textContent = (titles.join('、') || (source.kind === 'numeric' ? '共享数值' : '原始字节')) +
-                '：准备历史 ' + Math.round(fraction * 100) + '%';
-        } else if (source) { progressRows.get(source)?.remove(); progressRows.delete(source); }
-        for (const [item, row] of progressRows) if (!hasCaptureSource(item) || !item.rebuilding && !item.frames.rebuilding) { row.remove(); progressRows.delete(item); }
-        container.hidden = progressRows.size === 0;
+                (progress?.totalBytes ? progress.processedBytes / progress.totalBytes : null);
+            const counter = progress?.totalBytes
+                ? bytesLabel(progress.processedBytes ?? 0) + ' / ' + bytesLabel(progress.totalBytes) : '';
+            setTaskProgress(source, owner ? title + ' · ' + owner.settings.name : title, fraction, counter);
+        }
+        for (const item of captureProgressSources) {
+            if (hasCaptureSource(item) && (item.rebuilding || item.frames.rebuilding)) continue;
+            captureProgressSources.delete(item); setTaskProgress(item);
+        }
     }
     function scheduleSourceUi() {
         if (disposed || uiFrame !== null) return;
@@ -127,7 +188,7 @@ async function startSerialPlotterApplication() {
             if (disposed) return;
             widgets?.syncData(source, { pendingRaw });
             if (pendingRaw) return;
-            if (source && !source.rebuilding && progressRows.has(source)) showProgress(source, null);
+            if (captureProgressSources.has(source)) showProgress(source);
             scheduleSourceUi();
         },
         onProgress: showProgress,
@@ -159,10 +220,46 @@ async function startSerialPlotterApplication() {
     };
     let workspaceChannelTimer = null, workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null;
     function scheduleWorkspaceReplay() { replayWorkspace = true; scheduleSourceUi(); }
+    function cancelAlignmentReplay() {
+        alignmentReplay?.capture.dispose();
+        alignmentReplay = null;
+        setTaskProgress('alignment');
+    }
     function restartAlignmentReplay(settings) {
         const capture = workspaceChannels.createAlignmentReplay(settings);
         alignmentReplay?.capture.dispose();
         alignmentReplay = { epoch: workspaceChannels.epoch, definitions: workspaceChannels.settings.channelDefinitions, capture };
+        setTaskProgress('alignment', '正在按新时基重新对齐保留历史');
+    }
+    function alignmentScanTargets(inputs, replay) {
+        const mappedSources = new Set(replay.mappings.map(entry => entry.sourceId));
+        return inputs.flatMap(({ settings, capture }) => {
+            const engine = capture.dataEngine;
+            if (!mappedSources.has(settings.id) || engine.mode === 'Raw_Data') return [];
+            const source = engine.mode === 'Self_Defined_Frame' ? engine.recordsSource : engine.arraySource;
+            if (!source || source.rebuilding || !source.frames.length) return [];
+            const frames = source.frames;
+            return [{ id: settings.id, source, first: frames.frameOrdinalAt(Math.max(0, frames.length - replay.capacity)),
+                last: frames.frameOrdinalAt(frames.length - 1) }];
+        });
+    }
+    function reportAlignmentReplay(replay, caughtUp) {
+        let done = 0, total = 0;
+        for (const target of alignmentReplay.targets) {
+            const { first, last, source } = target;
+            const frames = source.frames, remainingFirst = frames.frameOrdinalAt(0);
+            const cursor = replay.cursors.get(target.id);
+            const scanned = cursor?.source === source ? cursor.readFrame : null;
+            const count = last - first + 1;
+            done += Math.max(0, Math.min(count, (scanned ?? first - 1) - first + 1));
+            // Evicted frames are no longer part of the replay target.
+            const retainedStart = Number.isFinite(remainingFirst) ? remainingFirst : last + 1;
+            const skipped = Math.max(0, Math.min(last + 1, retainedStart) - Math.max(first, (scanned ?? first - 1) + 1));
+            total += count - skipped;
+        }
+        const label = caughtUp ? '时基重新对齐等待有效样点' : done && done === total
+            ? '正在生成对齐结果' : '正在按新时基重新对齐保留历史';
+        setTaskProgress('alignment', label, total ? done / total : null, total ? itemsProcessed(done, total, '帧') : '');
     }
     function realignWorkspaceChannels(sourceId) {
         if (!workspaceChannels.mappings.some(entry => entry.sourceId === sourceId)) return;
@@ -170,9 +267,7 @@ async function startSerialPlotterApplication() {
         scheduleSourceUi();
     }
     function pumpWorkspaceChannels(flush = false) {
-        if (alignmentReplay && alignmentReplay.epoch !== workspaceChannels.epoch) {
-            alignmentReplay.capture.dispose(); alignmentReplay = null;
-        }
+        if (alignmentReplay && alignmentReplay.epoch !== workspaceChannels.epoch) cancelAlignmentReplay();
         if (!workspaceChannels.mappings.length || service.paused && !flush && !replayWorkspace && !alignmentReplay || disposed) return;
         const inputs = allConnections();
         const cutoff = service.paused || flush ? Infinity : Date.now();
@@ -183,18 +278,18 @@ async function startSerialPlotterApplication() {
             const replay = alignmentReplay?.capture;
             if (replay) {
                 if (replay.capacity !== workspaceChannels.capacity) replay.resize(workspaceChannels.capacity);
+                alignmentReplay.targets ??= alignmentScanTargets(inputs, replay);
                 next = replay.collect(inputs, cutoff);
                 const caughtUp = !Number.isFinite(next) || next > cutoff;
-                alignmentReplay.waitingForInput = caughtUp && !replay.numericSource.frames.length;
                 if (caughtUp && (replay.numericSource.frames.length || !workspaceChannels.numericSource.frames.length)) {
                     workspaceChannels.finishAlignmentReplay(replay);
-                    alignmentReplay = null;
+                    alignmentReplay = null; setTaskProgress('alignment');
                     tools?.invalidate();
                     renderAlignmentTimebaseStatus();
-                }
+                } else reportAlignmentReplay(replay, caughtUp);
             } else next = workspaceChannels.collect(inputs, cutoff);
         } catch (error) {
-            alignmentReplay?.capture.dispose(); alignmentReplay = null;
+            cancelAlignmentReplay();
             report(error); replayWorkspace = false; return;
         }
         const pending = Number.isFinite(next);
@@ -228,6 +323,7 @@ async function startSerialPlotterApplication() {
         container: el(container), source, offset: el(offset),
         mode: el(prefix + '-timebase-mode'), rate: el(prefix + '-timebase-rate'), fixed: el(prefix + '-timebase-fixed'),
         method: el(prefix + '-grid-method'), errorId: prefix + '-alignment-status', statusId: prefix + '-timebase-state',
+        fixedResync: el(prefix + '-resync-fixed'),
         resync: el(prefix + '-resync-enabled'), delay: el(prefix + '-resync-delay'), batches: el(prefix + '-resync-batches'),
         confirmation: el(prefix + '-resync-confirmation')
     });
@@ -237,7 +333,7 @@ async function startSerialPlotterApplication() {
     const alignmentPanels = [dialogAlignment, sidebarAlignment];
 
     function showTimebaseFields(panel) {
-        panel.fixed.hidden = panel.mode.value !== 'fixed';
+        panel.fixed.hidden = panel.fixedResync.hidden = panel.mode.value !== 'fixed';
         panel.delay.disabled = panel.batches.disabled = panel.confirmation.disabled = !panel.resync.checked;
     }
     function renderAlignmentTimebaseStatus() {
@@ -247,10 +343,9 @@ async function startSerialPlotterApplication() {
             if (!id || workspaceChannels.timebases[id]?.mode !== 'fixed') { status(panel.statusId, ''); continue; }
             const live = workspaceChannels.cursors.get(id);
             const mapped = workspaceChannels.mappings.some(entry => entry.sourceId === id);
-            status(panel.statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay?.waitingForInput
-                ? '等待有效时基样点，当前波形仍可查看。' : alignmentReplay ? '正在按新时基重新对齐保留历史…'
-                    : !live ? '等待可解析的帧。' : live.invalidLatest ? '最近的帧缺少有效的时基值，已保留原始记录。'
-                        : live.lastResync ? '最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。' : '');
+            status(panel.statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay ? ''
+                : !live ? '等待可解析的帧。' : live.invalidLatest ? '最近的帧缺少有效的时基值，已保留原始记录。'
+                    : live.lastResync ? '最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。' : '');
         }
     }
     function renderAlignmentTimebase(panel, source = panel.source()) {
@@ -347,6 +442,11 @@ async function startSerialPlotterApplication() {
     }
     const connectionView = new S.SerialSourceView(el('serial-source-list'), {
         dialog: el('serial-config-dialog'),
+        onDialogChange(open) {
+            const slot = open ? el('dialog-task-slot') : workspaceTaskSlot;
+            if (taskProgress.parentElement !== slot) slot.append(taskProgress);
+            syncTaskProgressVisibility();
+        },
         onConnect: source => { void changeConnections([source], !source.connected); },
         onBind: source => { void bindSerialPort(source); },
         onEngine(source, tab, focus = true) {
@@ -692,13 +792,19 @@ async function startSerialPlotterApplication() {
         step: initial.workspace.step, zoom: initial.workspace.zoom,
         onZoomChange: zoom => {
             el('workspace-zoom-percent').value = String(Math.round(zoom * 100));
-            for (const widget of widgets?.widgets.values() ?? [])
-                if (widget.type === 'wave' || widget.type === 'pose') widget.view.resize();
+            for (const widget of widgets?.widgets.values() ?? []) {
+                // Synchronize the log offset before the browser reports zoom-induced scrolling.
+                if (widget.type === 'byte') widget.view.render();
+                else widget.view.resize();
+            }
         },
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
         onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
     widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices, getPrimaryConnectionName: primaryConnectionName,
         getWorkspaceCapture: () => workspaceChannels,
+        onTextPreparation: (widget, fraction, done, total) => setTaskProgress(widget,
+            fraction === null || !total ? null : '正在准备字节流文本 · ' + widget.title, fraction,
+            total ? bytesLabel(done) + ' / ' + bytesLabel(total) : ''),
         onChange() {
             if (!widgets || disposed) return;
             tools?.syncSources(); syncExportSources(); showProgress(null, null); saveSoon();
@@ -734,6 +840,8 @@ async function startSerialPlotterApplication() {
             connectionView.showProtocol(opener, () => engineView.editor.close());
         },
         onProtocolClose: () => connectionView.returnFromProtocol(),
+        onSampleProgress: progress => setTaskProgress('protocol-samples',
+            progress && '协议样例 · ' + progress.label, progress?.fraction, progress?.counter),
         async onSaveProtocolDraft() {
             if (!await saveNow()) throw new Error('未能写入配置存储');
         },
@@ -786,6 +894,11 @@ async function startSerialPlotterApplication() {
         getActiveWidget: () => widgets.active,
         getChannelNames: () => widgets.active?.capture.dataEngine.globals.channelNames ?? globals.channelNames,
         getTimeOffset: widget => connectionSources.get(widget?.settings.connectionSource)?.settings.timeOffsetMs ?? 0,
+        onSearchProgress: progress => setTaskProgress('search', progress && '搜索中 · ' + progress.title, progress?.fraction,
+            progress ? itemsProcessed(progress.done, progress.total, '条') : ''),
+        onTimeProgress: progress => setTaskProgress('time-jump', progress && '正在定位时间',
+            progress ? progress.done / progress.total : null,
+            progress ? itemsProcessed(progress.done, progress.total, '条') : ''),
         onStateChange: saveSoon });
     exportView = new S.ExportSettingsView(document, { onChange: exportSettingsChanged });
     const widgetExportView = new S.ExportSettingsView(document, { widget: true, onChange(key) {
@@ -934,7 +1047,7 @@ async function startSerialPlotterApplication() {
         const blob = new Blob(parts, { type }), anchor = document.createElement('a');
         anchor.href = URL.createObjectURL(blob); anchor.download = filename; anchor.click(); URL.revokeObjectURL(anchor.href);
     }
-    async function writeExport(view, options, buffers, check, chunks, metadataSize = 0) {
+    async function writeExport(view, options, buffers, check, makeChunks, metadataSize = 0) {
         const csv = options.format === 'csv', binary = options.format === 'binary';
         const text = options.format === 'text' || options.format === 'engine-text';
         const extension = csv ? 'csv' : binary ? 'bin' : text ? 'txt' : 'hex';
@@ -943,11 +1056,19 @@ async function startSerialPlotterApplication() {
             buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, metadataSize) > 32 * 1024 * 1024;
         const statusId = view.prefix + '-source-status';
         exporting = true; syncExportAvailability();
-        let writable, failure = '';
+        const key = 'export';
+        let writable, failure = '', writtenBytes = 0, processed = 0, total = 0;
+        const updateProgress = (label = '正在导出数据') => setTaskProgress(key, label, total ? processed / total : null,
+            [total ? itemsProcessed(processed, total, '条') : '', writtenBytes ? '已输出 ' + bytesLabel(writtenBytes) : '']
+                .filter(Boolean).join(' · '));
+        const onProgress = (done, count) => { processed = done; total = count; updateProgress(); };
+        updateProgress('正在准备导出');
         try {
             if (large) {
                 if (typeof window.showSaveFilePicker !== 'function') throw new Error('大容量导出需要支持文件系统保存的 Chrome 或 Edge');
+                updateProgress('等待选择导出位置');
                 const handle = await window.showSaveFilePicker({ suggestedName: filename }); check();
+                updateProgress('正在准备导出');
                 writable = await handle.createWritable(); check();
             }
             const encoder = binary ? null : await S.createExportTextEncoder(text ? options.outputEncoding : 'utf-8');
@@ -956,10 +1077,16 @@ async function startSerialPlotterApplication() {
             const writeBytes = async bytes => {
                 check();
                 if (writable) { await writable.write(bytes); check(); } else parts.push(bytes);
+                writtenBytes += bytes.length;
             };
             if (csv) await writeBytes(encoder.encode('\uFEFF'));
-            let written = false, work = 0;
-            for await (const chunk of chunks) {
+            let written = false, work = 0, nextYield = performance.now() + 12;
+            const yieldExport = async () => {
+                updateProgress();
+                await new Promise(resolve => setTimeout(resolve, 0)); check();
+                work = 0; nextYield = performance.now() + 12;
+            };
+            for await (const chunk of makeChunks(onProgress)) {
                 if (typeof chunk !== 'string') {
                     if (chunk.length) { written = true; await writeBytes(chunk); work += chunk.length; }
                 } else for (let start = 0; start < chunk.length;) {
@@ -968,13 +1095,16 @@ async function startSerialPlotterApplication() {
                         /[\u0304\u030c]/.test(chunk[end]) && /[\u00ca\u00ea]/.test(chunk[end - 1]))) end++;
                     const bytes = encoder.encode(chunk.slice(start, end));
                     written = true; await writeBytes(bytes); work += bytes.length; start = end;
-                    if (work >= 262144) { work = 0; await new Promise(resolve => setTimeout(resolve, 0)); check(); }
+                    if (work >= 262144 || performance.now() >= nextYield) await yieldExport();
                 }
-                if (work >= 262144) { work = 0; await new Promise(resolve => setTimeout(resolve, 0)); check(); }
+                if (work >= 262144 || performance.now() >= nextYield) await yieldExport();
             }
             if (!written) throw new Error('暂无符合条件的记录');
             check();
-            if (writable) { await writable.close(); writable = null; }
+            if (writable) {
+                updateProgress('正在完成文件保存');
+                await writable.close(); writable = null;
+            }
             else download(parts, filename, binary ? 'application/octet-stream' : csv ? 'text/csv;charset=utf-8' :
                 'text/plain;charset=' + (text ? options.outputEncoding : 'utf-8'));
             return true;
@@ -983,7 +1113,7 @@ async function startSerialPlotterApplication() {
             if (error.name !== 'AbortError') failure = '导出失败：' + error.message;
             return false;
         } finally {
-            exporting = false; syncExportSources();
+            setTaskProgress(key); exporting = false; syncExportSources();
             if (failure) status(statusId, failure);
         }
     }
@@ -1004,7 +1134,8 @@ async function startSerialPlotterApplication() {
         const generation = source.generation;
         const check = exportCheck(sources, () => exportFormat === options.format && rawExportCapture() === capture && (options.direction === 'tx' ||
             rawExportSource() === source && source.generation === generation && capture.sources.has(source)), capture);
-        return writeExport(exportView, options, sources, check, S.captureExportChunks(source.frames, tx, options));
+        return writeExport(exportView, options, sources, check,
+            onProgress => S.captureExportChunks(source.frames, tx, { ...options, onProgress }));
     }
     async function exportWidgetData() {
         if (exporting || disposed) return false;
@@ -1021,14 +1152,16 @@ async function startSerialPlotterApplication() {
         const check = exportCheck(buffers, () => widgets.widgets.get(widget.id) === widget && widget.source === source &&
             source.generation === generation && frames.generation === frameGeneration &&
             (!protocolSource || engine.recordsSource === protocolSource && protocolSource.generation === protocolGeneration), widget.capture);
-        const settings = { ...options, check, fieldPaths, channelIndices, successfulOnly: true };
-        const chunks = wire ? S.parsedByteChunks(selected, protocolSource, settings)
-            : format === 'text' ? S.captureExportChunks(frames, widget.capture.txFrames, { ...settings, encoding: selected.encoding })
-            : format === 'engine-text' ? S.parsedTextChunks(selected, settings)
-            : source.kind === 'protocol' ? S.structuredCsvChunksAsync(frames, source.decodeRecord, settings)
-            : typeof frames.provenanceAt === 'function' ? S.synchronizedCsvChunks(frames, channels, settings)
-            : S.frameCsvChunks(frames, channels, 1024, settings);
-        return writeExport(widgetExportView, options, buffers, check, chunks, !wire ? frames.length * (channelIndices?.length ?? 0) * 16 : 0);
+        const makeChunks = onProgress => {
+            const settings = { ...options, check, onProgress, fieldPaths, channelIndices, successfulOnly: true };
+            if (wire) return S.parsedByteChunks(selected, protocolSource, settings);
+            if (format === 'text') return S.captureExportChunks(frames, widget.capture.txFrames, { ...settings, encoding: selected.encoding });
+            if (format === 'engine-text') return S.parsedTextChunks(selected, settings);
+            if (source.kind === 'protocol') return S.structuredCsvChunksAsync(frames, source.decodeRecord, settings);
+            if (typeof frames.provenanceAt === 'function') return S.synchronizedCsvChunks(frames, channels, settings);
+            return S.frameCsvChunks(frames, channels, 1024, settings);
+        };
+        return writeExport(widgetExportView, options, buffers, check, makeChunks, !wire ? frames.length * (channelIndices?.length ?? 0) * 16 : 0);
     }
     listen(el('btn-export'), 'click', () => { void exportData(); });
     listen(el('btn-widget-export'), 'click', () => { void exportWidgetData(); });
@@ -1220,8 +1353,9 @@ async function startSerialPlotterApplication() {
         tools.invalidate(); rates.clear(); draws.clear();
         for (const widget of widgets.widgets.values()) widget.view.clear();
         previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: service.epoch };
-        for (const row of progressRows.values()) row.remove(); progressRows.clear();
-        el('history-rebuild-progress').hidden = true; tools.syncPaused(); updateStats(); syncExportAvailability();
+        cancelAlignmentReplay(); showProgress();
+        setTaskProgress('export');
+        tools.syncPaused(); updateStats(); syncExportAvailability();
     });
     function updateMemoryStatus() {
         const state = service.memoryUsage();
@@ -1337,10 +1471,12 @@ async function startSerialPlotterApplication() {
         widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout); syncExportSources();
     }
     function applyConfig(input) {
-        const config = S.WidgetConfig.migrateWorkspaceConfig(input);
-        preflightWorkspaceEngines(config);
+        return applyValidatedConfig(validateStoredConfig(input));
+    }
+    function applyValidatedConfig(config) {
         connectionView.close(false);
         connectionView.clearFormDrafts();
+        cancelAlignmentReplay();
         const wasRestoring = restoring, revision = ++importRevision; restoring = true;
         try {
             for (const source of allConnections()) if (source.pending && !source.connected)
@@ -1365,11 +1501,44 @@ async function startSerialPlotterApplication() {
     }
     listen(el('btn-export-cfg'), 'click', () => download([JSON.stringify(getConfig(), null, 2)], 'serialplot-config.json', 'application/json'));
     listen(el('btn-import-cfg'), 'click', () => el('cfg-file-input').click());
+    let fileImportRevision = 0;
+    function readConfigFile(file, onProgress) {
+        if (typeof FileReader !== 'function') return file.text();
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onprogress = event => {
+                if (event.lengthComputable && event.total) onProgress(event.loaded, event.total);
+            };
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.onabort = () => reject(new Error('配置文件读取已取消'));
+            reader.readAsText(file);
+        });
+    }
     listen(el('cfg-file-input'), 'change', async event => {
         const file = event.target.files?.[0]; if (!file) return;
-        try { applyConfig(JSON.parse(await file.text())); status('cfg-save-status', '配置已导入'); }
-        catch (error) { report(error); }
-        finally { event.target.value = ''; }
+        event.target.value = '';
+        const revision = ++fileImportRevision, key = 'config-import';
+        const current = () => !disposed && revision === fileImportRevision;
+        const canPaint = file.size >= 512 * 1024;
+        configProgress(key, '正在读取配置文件', 0);
+        try {
+            const raw = await readConfigFile(file, (done, total) => {
+                if (current()) setTaskProgress(key, '正在读取配置文件', done / total / 3,
+                    bytesLabel(done) + ' / ' + bytesLabel(total));
+            });
+            if (!current()) return;
+            configProgress(key, '正在校验导入配置', 1);
+            if (canPaint) await paintProgress();
+            if (!current()) return;
+            const config = validateStoredConfig(JSON.parse(raw));
+            configProgress(key, '正在应用导入配置', 2);
+            if (canPaint) await paintProgress();
+            if (!current()) return;
+            applyValidatedConfig(config);
+            status('cfg-save-status', '配置已导入');
+        } catch (error) { if (current()) report(error); }
+        finally { if (current()) setTaskProgress(key); }
     });
     for (const button of el('sidebar-top').querySelectorAll('.tab-btn')) listen(button, 'click', () => {
         for (const tab of el('sidebar-top').querySelectorAll('.tab-btn')) {
@@ -1530,7 +1699,7 @@ async function startSerialPlotterApplication() {
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
         if (workspaceChannelTimer !== null) clearTimeout(workspaceChannelTimer);
-        alignmentReplay?.capture.dispose();
+        alignmentReplay?.capture.dispose(); resetTaskProgress();
         workspaceChannelView.dispose(); workspaceChannels.dispose();
         clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose(); widgetExportView.dispose();
         engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose();
@@ -1541,7 +1710,7 @@ async function startSerialPlotterApplication() {
         for (const adapter of [serialAdapter, netAdapter]) releaseTransport(adapter);
         return workspaceStorage.dispose();
     }
-    installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
+    installWidgets(initial); restoring = false; setTaskProgress('config-restore'); updateStats();
     const statsTimer = setInterval(updateStats, 1000);
     S.application = { service, widgets, workspace, tools, serialAdapter, serialSources: connectionSources, netAdapter, sendController,
         protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, exportWidgetData, updateStats,

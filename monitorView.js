@@ -364,6 +364,7 @@ class MonitorView {
         this._inViewport = true;
         this.decodeCache = options.decodeCache ?? null;
         this.prepareRecord = options.prepareRecord ?? null;
+        this.onTextPreparation = options.onTextPreparation ?? null;
         this.protocolDecoder = options.getProtocolRecord ?? options.decodeRecord ?? null;
         this.protocolVersion = 0; this.protocolOptionsVersion = 0;
         this.protocolOptions = {}; this.protocolCache = new Map(); this.protocolCacheWeight = 0;
@@ -560,6 +561,7 @@ class MonitorView {
 
     _cancelTextPreparation() {
         this.textPreparationVersion++;
+        if (this.textPreparation) this.onTextPreparation?.(null);
         this.textPreparation = null;
         for (const [id, resolve] of this._yieldTasks) { clearTimeout(id); resolve(); }
         this._yieldTasks.clear();
@@ -1222,7 +1224,7 @@ class MonitorView {
         const totalBytes = targets.reduce((sum, index) => sum + frames.rawBytesAt(index).length, 0);
         let completed = 0;
         const pending = [];
-        onProgress(0);
+        onProgress(0, completed, totalBytes);
         for (const frame of targets) {
             if (isCancelled()) return null;
             const row = frames.frameAt(frame), bytes = frames.rawBytesAt(frame);
@@ -1286,7 +1288,7 @@ class MonitorView {
                     if (isCancelled()) return;
                     state.rows.set(row.order, prepared);
                     completed += bytes.length;
-                    onProgress(completed / Math.max(1, totalBytes));
+                    onProgress(completed / Math.max(1, totalBytes), completed, totalBytes);
                 });
                 // Cancellation can exit while other records still run in the shared worker pool.
                 job.catch(() => {});
@@ -1310,7 +1312,7 @@ class MonitorView {
                 const end = Math.min(bytes.length, start + 2048);
                 consume(decoder.write(bytes.subarray(start, end), frame, start));
                 completed += end - start;
-                onProgress(completed / Math.max(1, totalBytes));
+                onProgress(completed / Math.max(1, totalBytes), completed, totalBytes);
                 await yieldControl();
             }
             data.needsFollowing = decoder.pending.some(entry => entry.frame === frame);
@@ -1327,7 +1329,7 @@ class MonitorView {
         }
         await Promise.all(pending);
         if (isCancelled()) return null;
-        onProgress(1);
+        onProgress(1, completed, totalBytes);
         return state;
     }
 
@@ -1353,21 +1355,24 @@ class MonitorView {
     _prepareMissingText(row) {
         if (this._disposed || !this.isVisible || !this._inViewport || this.textPreparation) return;
         const version = this.textPreparationVersion, encoding = this.encoding, mode = this.mode;
+        const isCancelled = () => version !== this.textPreparationVersion || this.mode !== mode;
         const promise = this.prepareText(this.frames, encoding, {
-            isCancelled: () => version !== this.textPreparationVersion || this.mode !== mode,
-            targetIndex: row.frameIndex
+            isCancelled, targetIndex: row.frameIndex,
+            onProgress: (fraction, done, total) => { if (!isCancelled()) this.onTextPreparation?.(fraction, done, total); }
         });
         this.textPreparation = promise;
         promise.then(state => {
             if (state && !this._disposed && version === this.textPreparationVersion && this.mode === mode) {
                 this.installPreparedText(state);
-                this.textPreparation = null;
+                this.textPreparation = null; this.onTextPreparation?.(null);
                 this.render();
             }
         }, error => {
             if (!this._disposed && version === this.textPreparationVersion) this.textPreparationError = error;
         }).finally(() => {
-            if (this.textPreparation === promise) this.textPreparation = null;
+            if (this.textPreparation === promise) {
+                this.textPreparation = null; this.onTextPreparation?.(null);
+            }
         });
     }
 
@@ -1940,7 +1945,7 @@ class MonitorView {
             compactVisibleParts(layout.data, layout.lineStarts, firstLine, lastLine) };
         else if (layout.byteMode === 'text' && !layout.unprepared)
             layout = { ...layout, parts: visibleTextParts(layout.parts, firstLine, lastLine) };
-        if (layout.unprepared) layout = { ...layout, parts: [{ text: '正在准备文本…', token: null }] };
+        if (layout.unprepared) layout = { ...layout, parts: this.onTextPreparation ? [] : [{ text: '正在准备文本…', token: null }] };
         if (layout.byteMode === 'number' && layout.folded) {
             let line = 0;
             const numberSegments = [];

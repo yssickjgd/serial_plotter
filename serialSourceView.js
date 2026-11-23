@@ -1,9 +1,9 @@
 /** Connection overview rows and the shared configuration dialog. */
 class SerialSourceView {
-    constructor(root, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect }) {
+    constructor(root, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect, onDialogChange = () => {} }) {
         this.root = root;
         const document = root.ownerDocument, get = id => document.getElementById(id);
-        Object.assign(this, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect });
+        Object.assign(this, { dialog, onConnect, onBind, onRemove, onSave, onEngine, onSelect, onDialogChange });
         this.rows = new Map();
         this.formDrafts = new Map();
         this.manager = get('serial-manager-panel');
@@ -57,7 +57,9 @@ class SerialSourceView {
                 if (!event.repeat) this.dismiss();
             }],
             [this.dialog, 'cancel', event => { event.preventDefault(); this.dismiss(); }],
-            [this.dialog, 'close', () => { if (!this.dialog.open) this.showList(); }]
+            [this.dialog, 'close', () => {
+                if (!this.dialog.open) { this.onDialogChange(false); this.showList(); }
+            }]
         ];
         globalThis.SerialPlotter.bindAutoApply(this.form, () => this.submit(), (...binding) => this.handlers.push(binding));
         for (const [node, event, listener] of this.handlers) node?.addEventListener?.(event, listener);
@@ -86,9 +88,13 @@ class SerialSourceView {
         }
     }
 
+    _openDialog() {
+        this.dialog.showModal(); this.onDialogChange(true);
+    }
+
     showManager() {
         if (!this.dialog.open) {
-            this.dialog.showModal();
+            this._openDialog();
             if (this.showingOverview && this.listPosition) this.sourceNav.scrollTop = this.listPosition.nav;
         }
         this.showList();
@@ -184,7 +190,7 @@ class SerialSourceView {
     }
 
     showEngine(source, onClose) {
-        if (!this.dialog.open) this.dialog.showModal();
+        if (!this.dialog.open) this._openDialog();
         this.selectSource(source.settings.id);
         this.rememberList();
         if (this.compact?.matches) this.sourceWorkspace.setAttribute('data-show-details', '');
@@ -315,7 +321,7 @@ class SerialSourceView {
         if (wasOpen) {
             this.rememberEnginePosition();
             this.closeEnginePage();
-            this.dialog.close();
+            this.dialog.close(); this.onDialogChange(false);
         }
         this.sourceWorkspace.removeAttribute('data-show-details');
         this.showList();

@@ -2,7 +2,7 @@
 class WidgetController {
     constructor({ document, service, globals, workspace, onChange = () => {}, onRulesChange = () => {}, onActivate = () => {},
         onBeforeChannelRenumber = () => {}, onChannelMetadataChange = () => {}, getConnections = () => [],
-        getPrimaryConnectionName = () => '主连接', getWorkspaceCapture = () => null }) {
+        getPrimaryConnectionName = () => '主连接', getWorkspaceCapture = () => null, onTextPreparation = null }) {
         this.document = document;
         this.service = service;
         this.getConnections = getConnections;
@@ -11,6 +11,7 @@ class WidgetController {
         this.globals = globals;
         this.workspace = workspace;
         this.onChange = onChange;
+        this.onTextPreparation = onTextPreparation;
         this.onRulesChange = onRulesChange;
         this.onBeforeChannelRenumber = onBeforeChannelRenumber;
         this.onChannelMetadataChange = onChannelMetadataChange;
@@ -162,7 +163,8 @@ class WidgetController {
         });
         else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: capture.txFrames, getSourceErrors: () => widget.source.errors,
-            getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.()
+            getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.(),
+            onTextPreparation: this.onTextPreparation && ((fraction, done, total) => this.onTextPreparation(widget, fraction, done, total))
         });
         if (type === 'byte') {
             this._measureByteChrome(widget);

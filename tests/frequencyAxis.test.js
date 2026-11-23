@@ -382,7 +382,7 @@ test('time seconds, frequency bins, and logarithmic axes use their selected unit
     plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 's' });
     labels.length = 0;
     plotter.draw();
-    assert.ok(labels.includes('0.999 s'));
+    assert.ok(labels.includes('0.9 s'), 'the time axis shows stable second ticks inside the visible range');
     plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins',
         freqXScale: 'log', freqYScale: 'log' });
     labels.length = 0;
@@ -395,6 +395,41 @@ test('time seconds, frequency bins, and logarithmic axes use their selected unit
     assert.ok(labels.includes('Freq: 22.627 Hz (Bin 22.627)'),
         'the cursor in the middle of a log axis lands near the geometric mean');
 });
+
+for (const mode of ['sample index', 'fixed rate', 'receive time']) {
+    test('live time ticks retain their values as the ' + mode + ' window moves', () => {
+        const { plotter, labels } = createPlotter();
+        plotter.clear();
+        plotter.setMaxPoints(4096);
+        plotter.setPlotWindowPoints(1000);
+        plotter.setSampleRateHz(1000);
+        plotter.receiveTimeAxis = mode === 'receive time';
+        plotter.fixedTimeRate = mode === 'fixed rate' ? 1000 : null;
+        plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: mode === 'sample index' ? 'samples' : 's' });
+
+        const timestamp = 1700000000000;
+        const append = (first, end, receiptOffset = 0) => {
+            for (let i = first; i < end; i++) {
+                const arrival = timestamp + Math.floor(i / 8) * 8 + receiptOffset;
+                plotter.addFrame([Math.sin(i / 50)], undefined, '', i + 1, arrival);
+            }
+        };
+        const axis = () => {
+            labels.length = 0;
+            plotter.draw();
+            return labels.filter(label => mode === 'sample index' ? /^\d+$/.test(label) : label.endsWith(' s'));
+        };
+        append(0, 2048);
+        const initial = axis();
+        append(2048, 2056, 2);
+        const next = axis();
+        assert.equal(plotter._drawState.startIdx, 1056);
+        assert.ok(initial.length >= 3 && next.length >= 3, 'both frames show multiple ticks');
+        const shared = next.filter(label => initial.includes(label));
+        assert.ok(shared.length >= Math.min(initial.length, next.length) - 2,
+            'only ticks at the viewport edges should change: ' + initial.join(', ') + ' -> ' + next.join(', '));
+    });
+}
 
 test('frequency axis does not invent hertz when sample rate is unknown', () => {
     const { plotter, labels } = createPlotter();
@@ -603,4 +638,53 @@ test('zero-inclusive logarithmic silent spectra use a finite linear range', () =
     assert.equal(plotter._drawState.min, 0);
     assert.equal(plotter._drawState.max, 0.5);
     assert.equal(plotter._drawState.yScale.linearThreshold, 0.5);
+});
+
+test('small magnitude and phase plots render fewer vertices while preserving bins, gaps and hover', () => {
+    let trace;
+    const gpu = { available: true, resize() {}, dispose() {},
+        render(traces) { trace = traces[0]; return true; } };
+    const { plotter, labels } = createPlotter(null, { gpuRenderer: gpu });
+    const count = 5001, cursorBin = 401;
+    const mags = Float64Array.from({ length: count }, (_, i) => i % 2 ? 5 + i % 29 : 2 + i % 17);
+    const phases = Float64Array.from({ length: count }, (_, i) => i % 2 ? i % 23 : -(i % 19));
+    mags[31] = 400; mags[32] = .001; mags[2500] = NaN;
+    phases[1001] = 178; phases[1002] = -178; phases[2500] = NaN;
+    const spectra = new Map([[0, { mags, phases, fftSize: 10000 }]]);
+    plotter._computeFftForVisibleChannels = () => spectra;
+    plotter.setSampleRateHz(10000);
+    let zoom = 1;
+    const rect = () => ({ width: 800 * zoom, height: 400 * zoom, left: 0, top: 0 });
+    plotter.canvas.closest = () => ({ dataset: { workspaceZoom: String(zoom) } });
+    plotter.canvas.getBoundingClientRect = plotter.canvas.parentElement.getBoundingClientRect = rect;
+
+    function draw(scale, mode) {
+        zoom = scale;
+        plotter.resize();
+        plotter.setDisplayOptions({ displayMode: mode, freqXScale: 'linear', freqYScale: 'linear',
+            phaseUnwrap: false, phaseUnit: 'degrees' });
+        plotter.vp[mode].displayCount = count;
+        plotter.mousePos = { x: (800 - plotter.pX) * cursorBin / (count - 1), y: 100 };
+        labels.length = 0;
+        plotter.draw();
+        const { startIdx, visibleCnt, min, max } = plotter._drawState;
+        assert.deepEqual([startIdx, visibleCnt], [0, count]);
+        return { points: trace.points, bounds: [min, max],
+            hover: labels.find(label => label.startsWith('CH00001:')) };
+    }
+
+    for (const [mode, values] of [['frequency', mags], ['phase', phases]]) {
+        const full = draw(1, mode);
+        const small = draw(.39, mode);
+        assert.ok(small.points.length < full.points.length / 2);
+        assert.ok(small.points.length <= 568, `drew ${small.points.length} vertices in ${mode} mode`);
+        assert.deepEqual(small.bounds, full.bounds);
+        assert.equal(small.hover, full.hover);
+        assert.ok(small.hover.includes(values[cursorBin].toFixed(6)));
+        assert.equal(small.points.find(point => point.index > 2500)?.break, true);
+        assert.equal(small.points[0].index, 0);
+        assert.equal(small.points.at(-1).index, count - 1);
+        if (mode === 'phase') assert.equal(small.points.find(point => point.index === 1002)?.break, true);
+        else assert.equal(small.points.find(point => point.index === 31)?.value, 400);
+    }
 });

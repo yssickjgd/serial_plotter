@@ -45,6 +45,36 @@ function fixture(widgets, options = {}) {
     return { tools, document, service, map, select, activate, el: id => document.getElementById(id) };
 }
 
+test('large unordered time jumps report scanned records and cancel without moving the view', async () => {
+    const length = 9000, timestamps = Array.from({ length }, (_, index) => 10000 + index);
+    [timestamps[30], timestamps[8000]] = [timestamps[8000], timestamps[30]];
+    const source = widget('wave', new Array(length).fill(1), { timestamps });
+    const progress = [], f = fixture([source], { onTimeProgress: value => progress.push(value) });
+    f.select('wave'); f.el('nav-jump-relative').value = '8';
+    const cancelled = f.tools.jumpToTime();
+    assert.equal(progress[0]?.total, length);
+    f.tools.invalidate();
+    assert.equal(await cancelled, false);
+    assert.equal(progress.at(-1), null);
+    assert.deepEqual(source.view.jumps, []);
+    assert.equal(await f.tools.jumpToTime(), true);
+    assert.deepEqual(source.view.jumps, [30]);
+    assert.ok(progress.some(value => value?.done > 0 && value.done < length));
+    assert.equal(progress.at(-1), null);
+    f.tools.dispose();
+});
+
+test('large ordered time jumps find a sample without scanning the retained history', () => {
+    const source = widget('wave', new Array(9000).fill(1));
+    const frames = source.source.frames, read = frames.timestampAt.bind(frames);
+    let reads = 0; frames.timestampAt = index => { reads++; return read(index); };
+    const f = fixture([source]); f.select('wave'); f.el('nav-jump-relative').value = '1000';
+    assert.equal(f.tools.jumpToTime(), true);
+    assert.deepEqual(source.view.jumps, [1000]);
+    assert.ok(reads < 30);
+    f.tools.dispose();
+});
+
 test('numeric parser gaps cannot create search markers or jumps', async () => {
     const byte = widget('byte', [0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0], { type: 'byte', settings: { captureMode: 'hex' } });
     const wave = widget('wave', [1]);

@@ -4,12 +4,14 @@ const captureExportBytes = typeof module !== 'undefined'
 const captureExportCodec = typeof module !== 'undefined'
     ? require('./textCodec') : globalThis.SerialPlotter.TextCodec;
 
-function* captureRecords(rx, tx, direction) {
+function* captureRecords(rx, tx, direction, onProgress) {
     const sources = [
         { frames: rx, kind: 'rx', count: direction === 'tx' ? 0 : rx.length, position: 0 },
         { frames: tx, kind: 'tx', count: direction === 'rx' ? 0 : tx.length, position: 0 }
     ];
     for (const source of sources) source.firstOrder = source.frames.orderAt(0);
+    const total = sources[0].count + sources[1].count;
+    onProgress?.(0, total);
     while (sources.some(source => source.position < source.count)) {
         for (const source of sources)
             if (source.count && source.frames.orderAt(0) !== source.firstOrder)
@@ -19,6 +21,10 @@ function* captureRecords(rx, tx, direction) {
             : left.frames.orderAt(left.position) <= right.frames.orderAt(right.position) ? left : right;
         const frame = source.frames.frameAt(source.position++);
         yield { ...frame, kind: source.kind };
+        if (onProgress) {
+            const done = left.position + right.position;
+            if (done % 256 === 0 || done === total) onProgress(done, total);
+        }
     }
 }
 
@@ -30,7 +36,7 @@ function* captureExportChunks(rx, tx, options = {}) {
     const { format = 'hex-text', direction = 'rx', encoding = 'utf-8' } = options;
     if (!['binary', 'hex-text', 'text'].includes(format)) throw new Error('导出格式无效');
     if (!['rx', 'tx', 'both'].includes(direction)) throw new Error('导出范围无效');
-    const records = captureRecords(rx, tx, direction);
+    const records = captureRecords(rx, tx, direction, options.onProgress);
     if (format !== 'text') {
         for (const record of records) yield format === 'binary' ? record.bytes
             : recordPrefix(record, options) + captureExportBytes.bytesToHex(record.bytes) + '\r\n';

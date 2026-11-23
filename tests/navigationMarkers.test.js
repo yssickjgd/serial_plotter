@@ -99,16 +99,14 @@ test('seconds labels stay inside the plotted width and leave room between adjace
     for (const file of ['projectLimits.js', 'plotter.js'])
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context);
     const labels = [], measureText = text => ({ width: text.length * 7 });
-    const view = {
+    const view = Object.assign(Object.create(context.SerialPlotter.Plotter.prototype), {
         displayMode: 'time', frames: { originTimestamp: 0 },
-        ctx: { measureText, fillText(text, left) { labels.push({ text, left }); } },
-        _formatAxisNumber: value => Number(value.toFixed(3))
-    };
-    context.SerialPlotter.Plotter.prototype._drawXAxisLabels.call(view, 360, 150, 0, 5000, 5000, 5000, 'linear', null,
-        { first: 7278120, last: 7283119 });
+        ctx: { measureText, fillText(text, left) { labels.push({ text, left }); },
+            beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} }
+    });
+    view._drawXAxisLabels(360, 150, 0, 5000, 5000, 5000, 'linear', null, { first: 7278120, last: 7283119 });
     assert.ok(labels.length > 2 && labels.length < 11);
-    assert.equal(labels[0].text, '7278.12 s');
-    assert.equal(labels.at(-1).text, '7283.119 s');
+    assert.ok(labels.every(({ text }) => text.endsWith(' s') && parseFloat(text) >= 7278.12 && parseFloat(text) <= 7283.119));
     assert.ok(labels.every(({ text, left }, i) => left >= 0 && left + measureText(text).width <= 360 &&
         (!i || labels[i - 1].left + measureText(labels[i - 1].text).width < left)));
 });

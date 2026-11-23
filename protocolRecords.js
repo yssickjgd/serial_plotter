@@ -183,6 +183,8 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
             lines.push(values.map(csv).join(','));
         }
         if (lines.length) yield lines.join('\r\n') + '\r\n';
+        else if (options.onProgress) yield '';
+        options.onProgress?.(Math.min(count, start + rowsPerChunk), count);
     }
 }
 
@@ -190,6 +192,9 @@ function* structuredCsvChunks(frames, decodeRecord, options = {}) {
 async function* structuredCsvChunksAsync(frames, decodeRecord, options = {}) {
     const count = frames.length, firstOrder = frames.orderAt(0), paths = new Set();
     let accepted = 0;
+    const total = count * 2;
+    const { onProgress } = options;
+    onProgress?.(0, total);
     const yieldControl = options.yieldControl ?? (() => new Promise(resolve => setTimeout(resolve, 0)));
     const guard = () => {
         options.check?.();
@@ -202,10 +207,13 @@ async function* structuredCsvChunksAsync(frames, decodeRecord, options = {}) {
             accepted++;
             for (const field of protocolCsvFields(record, options)) paths.add(field.path);
         }
+        if (index % 256 === 255 || index + 1 === count) onProgress?.(index + 1, total);
         if (index % 256 === 255) { await yieldControl(); guard(); }
     }
     if (!accepted) return;
-    for (const chunk of structuredCsvChunks(frames, decodeRecord, { ...options, columnPaths: [...paths], recordCount: count })) {
+    const settings = { ...options, columnPaths: [...paths], recordCount: count,
+        onProgress: onProgress ? done => onProgress(count + done, total) : undefined };
+    for (const chunk of structuredCsvChunks(frames, decodeRecord, settings)) {
         guard(); yield chunk; await yieldControl(); guard();
     }
 }

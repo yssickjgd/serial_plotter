@@ -122,3 +122,27 @@ test('CSV channel names with separators, quotes or line breaks are escaped', () 
     assert.equal(csvField('a"b'), '"a""b"');
     assert.equal(csvField('a\nb'), '"a\nb"');
 });
+
+test('sliding sample windows keep extrema from the same interior buckets', () => {
+    const values = [9, 1, 3, 8, 2, 4, 7, 2, 6, 1, 5, 8, 0];
+    const { bucketTraceExtrema } = require('../plotMath');
+    const shape = start => bucketTraceExtrema(values.slice(start, start + 12), 3, { firstIndex: start })
+        .map(point => point.index + start).filter(index => index >= 4 && index < 8);
+    assert.deepEqual(shape(0), [4, 6]);
+    assert.deepEqual(shape(1), [4, 6]);
+});
+
+test('sliding receive-time windows keep extrema at their original absolute timestamps', () => {
+    const { bucketTraceExtrema } = require('../plotMath');
+    const epoch = 1700000000000;
+    const offsets = [0, .8, 2, 3.1, 4, 5, 6.2, 7, 8, 9, 10, 11, 12.2];
+    const values = [9, 1, 3, 8, 2, 4, 7, 2, 6, 1, 5, 8, 0];
+    const shape = start => {
+        const times = offsets.slice(start, start + 12).map(offset => epoch + offset);
+        return bucketTraceExtrema(values.slice(start, start + 12), 3,
+            { times, timeSpan: times.at(-1) - times[0] }).map(point => point.index + start)
+            .filter(index => index >= 4 && index < 8);
+    };
+    assert.deepEqual(shape(0), [4, 6]);
+    assert.deepEqual(shape(1), [4, 6]);
+});

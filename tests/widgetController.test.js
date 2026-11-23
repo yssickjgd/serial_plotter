@@ -37,6 +37,51 @@ test('resuming capture clears navigation and makes every retained widget follow 
 });
 const { bootApplication } = require('./helpers/widgetAppHarness');
 
+test('byte logs keep following across the native scroll events from entering and leaving title focus', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const { workspace, widgets, service } = f.app;
+    const byte = widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
+    const { view } = byte, log = byte.refs['data-log'], title = byte.refs['monitor-header'];
+    const append = value => { service.receive(Uint8Array.of(value)); service.endStream(); };
+    workspace.setZoom(0.39);
+    for (let i = 0; i < 80; i++) append(i);
+    await f.settle();
+    assert.ok(log.scrollTop > 100, 'the live log has room for the browser to adjust its scroll position');
+
+    // Native layout zoom can reconcile the old scroll offset before dispatching scroll and resize callbacks.
+    let zoom = workspace.surface.style.zoom;
+    Object.defineProperty(workspace.surface.style, 'zoom', {
+        get: () => zoom,
+        set(value) {
+            if (value !== zoom) log.scrollTop -= 60;
+            zoom = value;
+        }
+    });
+    const changeFocus = () => {
+        title.dispatchEvent({ type: 'dblclick' });
+        log.dispatchEvent({ type: 'scroll' });
+        log.dispatchEvent({ type: 'scrollend' });
+    };
+    for (const [focused, value, expected] of [[true, 0xCD, /CD/], [false, 0xEF, /EF/]]) {
+        changeFocus();
+        assert.equal(Boolean(workspace.focusState), focused);
+        assert.equal(view.followTail, true);
+        append(value); await f.tick();
+        assert.match(view.spacer.children.at(-1).children[1].textContent, expected);
+        assert.equal(log.scrollTop, log.scrollHeight - log.clientHeight);
+    }
+    assert.equal(workspace.zoom, 0.39);
+
+    log.scrollTop -= 120;
+    log.dispatchEvent({ type: 'scroll' });
+    log.dispatchEvent({ type: 'scrollend' });
+    assert.equal(view.followTail, false);
+    const order = view.anchor.order;
+    changeFocus();
+    assert.equal(view.followTail, false);
+    assert.equal(view.anchor.order, order);
+});
+
 test('amplitude and phase widgets share one FFT and deleting a subscriber preserves the other result', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const amplitude = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'frequency' } });

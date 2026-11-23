@@ -905,7 +905,7 @@ input.channel-name-input {
     width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; overflow: hidden;
     padding: 0; border: 0; background: var(--sidebar-bg); color: var(--text); font-family: var(--ui-font);
 }
-.serial-config-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.serial-config-dialog[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
 .serial-config-dialog::backdrop { background: #07111db3; }
 .serial-config-dialog [hidden] { display: none !important; }
 .serial-config-heading { flex: 1; min-width: 0; }
@@ -949,7 +949,7 @@ input.channel-name-input {
 .connection-config-fields { display: flex; align-items: start; gap: 8px; }
 .connection-config-fields > .input-group { flex: 1 1 0; min-width: 0; }
 .serial-config-dialog #config-net { gap: 6px; }
-#engine-communication > .control-group { margin-top: var(--ui-section-gap); }
+#engine-communication > :is(.control-group, .source-timing-settings) { margin-top: var(--ui-section-gap); }
 .serial-config-dialog :is(select, input):disabled { opacity: .75; }
 .serial-config-dialog :is(select, input, button):focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .serial-config-error { color: #a02119; }
@@ -1386,14 +1386,42 @@ canvas {
 }
 [hidden] { display: none !important; }
 
-.history-rebuild-progress {
-    flex: 0 0 auto;
+.task-progress-slot { flex: 0 0 auto; min-width: 0; }
+#workspace-task-slot { position: sticky; top: 0; z-index: 20; }
+.task-progress {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-group-gap) 16px;
+    max-height: min(22dvh, 8rem);
+    overflow: auto;
     padding: 6px 10px;
     border: 1px solid #3d4652;
     background: #19232e;
     color: #d5eaff;
-    font-size: 12px;
+    font-size: var(--ui-note-size);
 }
+.task-progress-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 8px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.task-progress-detail { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.task-progress progress {
+    display: block;
+    inline-size: 64px;
+    block-size: 5px;
+    accent-color: #91c5ff;
+}
+#dialog-task-slot .task-progress {
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: #e8f1f8;
+    color: #24445f;
+}
+#dialog-task-slot progress { accent-color: var(--primary); }
 
 #stat-fail { flex-basis: auto; }
 #stat-fail-value { min-width: 8ch; width: auto; }

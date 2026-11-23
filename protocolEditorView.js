@@ -14,12 +14,13 @@
     const records = () => typeof module !== 'undefined' && module.exports ? require('./protocolRecords') : root.SerialPlotter.ProtocolRecords;
     const messageZh = error => (typeof module !== 'undefined' && module.exports
         ? require('./protocolMessages').protocolMessageZh : root.SerialPlotter.protocolMessageZh)(error);
+    const sampleCountFormat = new Intl.NumberFormat('zh-CN');
     typeNames.bitfield = '位段';
     typeNames.checksum = '校验';
     let nextInstance = 0;
     class ProtocolEditorView {
-        constructor({ document, root: host, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded = false, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool }) {
-            Object.assign(this, { document, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool });
+        constructor({ document, root: host, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded = false, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool, onSampleProgress }) {
+            Object.assign(this, { document, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool, onSampleProgress });
             this.editorState = clone(getEditorState?.() ?? {}); this.editorState.samples ??= {};
             this.history = []; this.future = []; this.collapsed = new Set(); this.leftTab = 'outline'; this.bottomTab = 'layout';
             this.propertyTab = 'basic'; this.pristine = new Map();
@@ -272,7 +273,7 @@
             if(kind==='protocol'){
                 if(this._protocolReferenced(id))return;
                 const snapshot=this._librarySnapshot();this.history.push(snapshot);this.future=[];
-                this.library=this.library.filter(item=>item.id!==id);this.generation++;
+                this.library=this.library.filter(item=>item.id!==id);this._advanceDraftGeneration();
                 const history=this.history;
                 if(this.library.length){this.emptyLibrary=false;this.libraryId=this.library[0].id;this._restoreDraft(this.library[0]);this.history=history;this._renderLibrary();}
                 else{this.emptyLibrary=true;this._render();this.onLibraryChange?.([],null);}
@@ -315,6 +316,7 @@
         }
         open(schema = this.getProtocol?.()) {
             if (this.disposed || this.busy) return;
+            this._advanceDraftGeneration();
             this.library = clone(this.getProtocols?.() ?? (schema ? [schema?._compiledProtocol ? schema.schema : schema] : []));
             this.emptyLibrary = Boolean(this.getProtocols && !schema && !this.library.length);
             this.draft = clone(schema?._compiledProtocol ? schema.schema : schema ?? {
@@ -331,7 +333,7 @@
             this.previewPage = this.bytePage = 0;
             this.previewRecord = null; this.previewBytes = null; this.selectedSpan = null;
             this.sampleHex = ''; this.sampleValues = '{}'; this.sampleId = ''; this.sampleName = ''; this.sampleResults = []; this.jsonInvalid = false;
-            this.status.textContent = ''; this.generation++; this.opened = true; this.history = []; this.future = [];
+            this.status.textContent = ''; this.opened = true; this.history = []; this.future = [];
             this.editorState = clone(this.getEditorState?.() ?? this.editorState); this.editorState.samples ??= {};
             this.pristine.clear();this.outlineSelection=null;
             this.leftTab=this._navigation().leftTab === 'edit'?'edit':'outline';this.propertyTab=this._navigation().propertyTab ?? 'basic';
@@ -364,7 +366,7 @@
         }
         close() {
             if (!this.opened) return;
-            this.opened = false; this.generation++;
+            this.opened = false; this._advanceDraftGeneration();
             this.expressionCompletions.forEach(item => item.close());
             if (this.deleteDialog.open) this.deleteDialog.close();
             this.pendingDelete = null;
@@ -416,11 +418,15 @@
             } catch (error) { this.compiled = null; this.validationError = error; this._error(error); }
             this.applyButton.disabled = !this.compiled || this.jsonInvalid || this.busy || this.emptyLibrary;
         }
+        _advanceDraftGeneration() {
+            this.generation++;
+            this._finishSampleCheck();
+        }
         _change(action) {
             if (this.disposed || this.busy) return;
             if (this.jsonInvalid) throw new Error('请先修复 JSON 草稿，再修改可视化字段');
             const before = clone(this.draft);
-            action(); this.history.push(before); if (this.history.length > 100) this.history.shift(); this.future = []; this.generation++;
+            action(); this.history.push(before); if (this.history.length > 100) this.history.shift(); this.future = []; this._advanceDraftGeneration();
             this.status.textContent = '草稿已修改，尚未应用';
             this.previewRecord = null; this.selectedSpan = null;
             this._render(); this._checkPristine(); this._publish();
@@ -811,7 +817,7 @@
             this.leftTab=this._navigation().leftTab==='edit'?'edit':'outline';this.propertyTab=this._navigation().propertyTab ?? 'basic';
             if(changedProtocol||!this._outlineNodes().some(item=>item.key===this.outlineSelection))this.outlineSelection=null;
             const navigation=clone(this._navigation());
-            this.generation++; this.previewRecord = null; this._render();
+            this._advanceDraftGeneration(); this.previewRecord = null; this._render();
             if(changedProtocol)this._restoreNavigationScroll(navigation);
             this._publish();
         }
@@ -2029,10 +2035,11 @@
             this.jsonInput.rows = 24; this.jsonInput.className = 'protocol-schema-json';
             this.jsonInput.addEventListener('input', () => {
                 if (this.disposed || this.busy) return;
+                this._finishSampleCheck();
                 try {
                     const value = JSON.parse(this.jsonInput.value);
                     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('协议必须是 JSON 对象');
-                    this.history.push(clone(this.draft)); this.future = []; this.generation++;
+                    this.history.push(clone(this.draft)); this.future = []; this._advanceDraftGeneration();
                     try { this.draft = model().toUnified(value); } catch (_) { this.draft = value; }
                     this._checkPristine();
                     this.jsonInvalid = false; this.selectedField = null; this.previewRecord = null; this.selectedSpan = null;
@@ -2044,7 +2051,7 @@
         }
         importJson(text) {
             const compiled = protocol().compile(model().toUnified(JSON.parse(text)));
-            this.history.push(clone(this.draft)); this.future = []; this.generation++; this.emptyLibrary = false;
+            this.history.push(clone(this.draft)); this.future = []; this._advanceDraftGeneration(); this.emptyLibrary = false;
             if (this.getProtocols) { const imported = model().importProtocol(this.library, compiled.schema); this.library = imported.protocols; this.libraryId = imported.protocol.id; this.draft = imported.protocol; }
             else this.draft = clone(compiled.schema);
             for(const [key,item] of this.pristine)if(item.protocolId===this.draft.id)this.pristine.delete(key);
@@ -2104,10 +2111,19 @@
             if (!this.sampleResultsHost) return; this.sampleResultsHost.replaceChildren();
             for (const item of (this.sampleResults ?? []).slice(0, 100)) this.sampleResultsHost.append(this._node('p', item.ok ? 'protocol-sample-pass' : 'protocol-sample-fail', item.name + '：' + messageZh(item.message)));
         }
+        _notifySampleProgress(progress) {
+            try { this.onSampleProgress?.(progress); }
+            catch { /* Keep the result independent of its progress observer. */ }
+        }
+        _finishSampleCheck(run = this.sampleCheck) {
+            if (!run || run !== this.sampleCheck) return;
+            this.sampleCheck = null;
+            if (this.status.textContent === run.status) this.status.textContent = run.previousStatus;
+            if (run.reported) this._notifySampleProgress(null);
+        }
         async checkSamples(stream = false) {
-            if (this.disposed || this.jsonInvalid || this.emptyLibrary) return;
-            const generation = this.checkGeneration = (this.checkGeneration ?? 0) + 1, editGeneration = this.generation;
-            const current = () => !this.disposed && this.opened && generation === this.checkGeneration && editGeneration === this.generation;
+            if (this.disposed || !this.opened || this.jsonInvalid || this.emptyLibrary) return;
+            this._finishSampleCheck();
             const yieldTask = () => new Promise(resolve => setTimeout(resolve, 0));
             const samples = stream ? [{ name: this.sampleName || '当前字节流', hex: this.hexInput.value }] : clone(this._getSamples());
             if (!samples.length) { this._error(new Error('请先保存至少一个命名样例')); return; }
@@ -2115,8 +2131,18 @@
             try { compiled = protocol().compile(schema); pool = this.getWorkerPool?.(); }
             catch (error) { this._error(error); return; }
             if (typeof pool?.runTask !== 'function') pool = null;
-            const results = new Array(samples.length); let nextSample = 0;
-            this.status.textContent = stream ? '正在检查字节流…' : '正在批量解码…';
+            const label = stream ? '流检查' : '批量解码', chunkSize = 16384;
+            const run = { status: stream ? '正在检查字节流…' : '正在批量解码…', previousStatus: this.status.textContent, reported: false };
+            this.sampleCheck = run;
+            if (!this.onSampleProgress) this.status.textContent = run.status;
+            const current = () => this.sampleCheck === run;
+            const report = (completed, total, unit) => {
+                if (!this.onSampleProgress || !current() || !total) return;
+                run.reported = true;
+                this._notifySampleProgress({ label, fraction: completed / total,
+                    counter: sampleCountFormat.format(completed) + ' / ' + sampleCountFormat.format(total) + ' ' + unit });
+            };
+            const results = new Array(samples.length); let nextSample = 0, completedSamples = 0;
             const processNext = async () => {
                 while (current() && nextSample < samples.length) {
                     const index = nextSample++, sample = samples[index];
@@ -2125,16 +2151,22 @@
                     try {
                         const bytes = Uint8Array.from(this._hex(sample.hex));
                         if (stream) {
+                            const reportBytes = completed => report(completed, bytes.length, 'B');
+                            reportBytes(0);
+                            if (!current()) return;
                             let counts;
-                            if (pool) counts = await pool.runTask({ kind: 'protocol-stream-check', schema, bytes, chunkSize: 16384 });
+                            if (pool) counts = await pool.runTask({ kind: 'protocol-stream-check', schema, bytes, chunkSize },
+                                this.onSampleProgress ? { onProgress: reportBytes } : undefined);
                             else {
                                 const parser = new (protocol().StreamParser)(compiled, { maxDecodedFields: 32768 });
                                 counts = { frames: 0, errors: 0, invalidFrames: 0, pending: 0 };
                                 parser.onFrameParsed = record => { counts.frames++; if (record.valid === false) { counts.invalidFrames++; counts.errors++; } };
                                 parser.onFrameError = () => { counts.errors++; };
-                                for (let offset = 0; offset < bytes.length; offset += 16384) {
+                                for (let offset = 0; offset < bytes.length; offset += chunkSize) {
                                     await yieldTask(); if (!current()) return;
-                                    parser.appendData(bytes.subarray(offset, offset + 16384));
+                                    const end = Math.min(bytes.length, offset + chunkSize);
+                                    parser.appendData(bytes.subarray(offset, end));
+                                    if (end < bytes.length) reportBytes(end);
                                 }
                                 counts.pending = parser.length;
                             }
@@ -2142,6 +2174,7 @@
                             const { frames, errors, pending, invalidFrames = 0 } = counts;
                             results[index] = { name: sample.name, ok: frames > 0 && !errors && !pending,
                                 message: Math.max(0, frames - invalidFrames) + ' 帧通过 · ' + errors + ' 处异常 · 剩余 ' + pending + ' 字节' };
+                            reportBytes(bytes.length);
                         } else {
                             const record = pool ? (await pool.runTask({ kind: 'protocol-decode', schema, records: [bytes], maxDecodedFields: 32768 }))[0]
                                 : protocol().decode(bytes, compiled, { maxFields: 32768 });
@@ -2154,13 +2187,17 @@
                         if (!current()) return;
                         results[index] = { name: sample.name, ok: false, message: messageZh(error) };
                     }
+                    if (!stream) report(++completedSamples, samples.length, '条');
                 }
             };
             // The shared pool owns CPU reservation and worker lifetime; only fill its configured capacity.
             const capacity = pool ? Math.max(1, Math.floor(pool.workerLimit ?? pool.maxWorkers ?? 1)) : 1;
-            await Promise.all(Array.from({ length: Math.min(samples.length, capacity) }, () => processNext()));
-            if (!current()) return;
-            this.sampleResults = results; this._renderSampleResults(); this.status.textContent = results.filter(item => item.ok).length + ' / ' + results.length + ' 样例通过';
+            try {
+                if (!stream) report(0, samples.length, '条');
+                await Promise.all(Array.from({ length: Math.min(samples.length, capacity) }, () => processNext()));
+                if (!current()) return;
+                this.sampleResults = results; this._renderSampleResults(); this.status.textContent = results.filter(item => item.ok).length + ' / ' + results.length + ' 样例通过';
+            } finally { this._finishSampleCheck(run); }
         }
         decode() {
             if (this.disposed || this.busy || this.jsonInvalid) return;

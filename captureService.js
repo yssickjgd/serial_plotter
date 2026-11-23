@@ -312,6 +312,7 @@ class CaptureService {
         source.rebuilding = true;
         source.pin = startByte;
         source.progress = { processedBytes: 0, totalBytes: snapshotEnd - startByte };
+        this._safeNotify(this.onProgress, source);
         const cancelled = () => this.disposed || epoch !== this.epoch || generation !== source.generation || !this.sources.has(source);
         const options = { startByte, stopByte: snapshotEnd, flushPending: false, isCancelled: cancelled,
             onStorage: storage => {

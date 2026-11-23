@@ -28,7 +28,13 @@ function widgetExportSelection(widget, channelNames = [], engineMode) {
 function* parsedTextChunks(selection, options = {}) {
     const { source, channelIndices, fieldPaths } = selection;
     const { frames } = source, count = frames.length;
+    const { onProgress } = options;
+    onProgress?.(0, count);
     for (let index = 0; index < count; index++) {
+        if (onProgress && index && index % 256 === 0) {
+            onProgress(index, count);
+            yield '';
+        }
         options.check?.();
         const timestamp = options.timestamps ? frames.timestampAt(index) : null;
         const time = !options.timestamps ? '' : Number.isFinite(timestamp) ? new Date(timestamp).toISOString() :
@@ -49,6 +55,7 @@ function* parsedTextChunks(selection, options = {}) {
             yield prefix + values.join('  ') + '\r\n';
         }
     }
+    onProgress?.(count, count);
 }
 
 /** Reuse retained wire bytes, resolving provenance when the widget consumes derived records. */
@@ -62,16 +69,20 @@ async function* parsedByteChunks(selection, protocolSource, options = {}) {
         return (time ? `[${time}] ` : '') + (options.markers ? 'RX ' : '') +
             engineExportUtils.ByteUtils.bytesToHex(bytes) + '\r\n';
     };
+    const { onProgress } = options;
     if (!protocolSource || source.kind === 'protocol') {
+        onProgress?.(0, count);
         for (let index = 0; index < count; index++) {
             options.check?.();
             if (source.kind !== 'protocol' || engineExportUtils.protocolRecordIsSuccessful(source.decodeRecord(index)))
                 yield output(frames, index);
+            if (index % 256 === 255 || index + 1 === count) onProgress?.(index + 1, count);
             if (index % 256 === 255) await yieldControl();
         }
         return;
     }
-    const original = protocolSource.frames, originalCount = original.length;
+    const original = protocolSource.frames, originalCount = original.length, total = count + originalCount;
+    onProgress?.(0, total);
     const marked = new Uint8Array(originalCount);
     const mark = order => {
         const index = original.indexAtOrAfterOrder(order);
@@ -89,11 +100,13 @@ async function* parsedByteChunks(selection, protocolSource, options = {}) {
             }
             if (++work % 4096 === 0) { await yieldControl(); options.check?.(); }
         }
+        if (index % 256 === 255 || index + 1 === count) onProgress?.(index + 1, total);
         if (index % 256 === 255) await yieldControl();
     }
     for (let index = 0; index < originalCount; index++) {
         options.check?.();
         if (marked[index] && engineExportUtils.protocolRecordIsSuccessful(protocolSource.decodeRecord(index))) yield output(original, index);
+        if (index % 256 === 255 || index + 1 === originalCount) onProgress?.(count + index + 1, total);
         if (index % 256 === 255) await yieldControl();
     }
 }
@@ -106,6 +119,8 @@ function* synchronizedCsvChunks(frames, channels, options = {}) {
         options.syncStates ? [channels[index]?.name ?? `CH${String(index + 1).padStart(5, '0')}`, `Status:${index + 1}`, `SourceByte:${index + 1}`,
                 ...(frames.multipleSources ? [`Source:${index + 1}`] : [])]
             : [channels[index]?.name ?? `CH${String(index + 1).padStart(5, '0')}`])];
+    const { onProgress } = options;
+    onProgress?.(0, count);
     yield columns.map(field).join(',') + '\r\n';
     let rows = [];
     for (let index = 0; index < count; index++) {
@@ -122,9 +137,15 @@ function* synchronizedCsvChunks(frames, channels, options = {}) {
             }
         }
         rows.push(row.map(field).join(','));
-        if (rows.length === 1024) { yield rows.join('\r\n') + '\r\n'; rows = []; }
+        if (rows.length === 1024) {
+            yield rows.join('\r\n') + '\r\n'; rows = [];
+            onProgress?.(index + 1, count);
+        }
     }
-    if (rows.length) yield rows.join('\r\n') + '\r\n';
+    if (rows.length) {
+        yield rows.join('\r\n') + '\r\n';
+        onProgress?.(count, count);
+    }
 }
 const EngineExportApi = { synchronizedCsvChunks, widgetExportSelection, parsedTextChunks, parsedByteChunks };
 globalThis.SerialPlotter ??= {}; Object.assign(globalThis.SerialPlotter, EngineExportApi);

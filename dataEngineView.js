@@ -1,7 +1,7 @@
 /** Global parsing drafts and channel editing remain available in an empty workspace. */
 (function(root) {
     class DataEngineView {
-        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onTabChange = () => {}, onProtocolOpen, onProtocolClose, onSaveProtocolDraft, getSourceName, getProtocolReferences = () => [] }) {
+        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onTabChange = () => {}, onProtocolOpen, onProtocolClose, onSampleProgress, onSaveProtocolDraft, getSourceName, getProtocolReferences = () => [] }) {
             Object.assign(this, { document, engine, controller, onChange, onApply, getProtocolReferences });
             this.listeners = []; this.mappingPage = 0; this.binding = false;
             this.arrayIds = { dataType: 'data-type', endianness: 'endianness', channelsCount: 'channels-count',
@@ -54,7 +54,8 @@
             this.channels = new root.SerialPlotter.EngineChannelView({ document, root: this.el('engine-channel-panel'), controller,
                 capture: engine.service, onChange: () => this.changedChannels() });
             this.editor = new root.SerialPlotter.ProtocolEditorView({ document, root: this.el('protocol-editor-host'),
-                embedded: true, onOpen: onProtocolOpen, onClose: onProtocolClose, onSaveDraft: onSaveProtocolDraft, getSourceName,
+                embedded: true, onOpen: onProtocolOpen, onClose: onProtocolClose, onSampleProgress,
+                onSaveDraft: onSaveProtocolDraft, getSourceName,
                 getProtocol: () => this.currentProtocol(), getProtocols: () => this.draft.protocols,
                 getWorkerPool: () => this.engine.service.workerPool,
                 onLibraryChange: (schemas, selectedId) => this.updateProtocolLibrary(schemas, selectedId),
@@ -202,7 +203,7 @@
             const revision = this.applyRevision = (this.applyRevision ?? 0) + 1, draftRevision = this.draftRevision ?? 0;
             try {
                 const { settings, expansion } = this.prepareApply();
-                this.el('engine-apply').disabled = true; this.status('正在应用配置…');
+                this.el('engine-apply').disabled = true; this.status('');
                 const engine = this.engine, previous = engine.config;
                 const ready = engine.apply(settings, { channelExpansion: expansion && {
                     globals: expansion.globals, numberMap: expansion.numberMap,

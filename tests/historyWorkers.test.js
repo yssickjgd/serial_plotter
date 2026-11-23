@@ -119,6 +119,23 @@ test('protocol stream checks share the worker budget, retain source bytes and re
     }
 });
 
+test('protocol stream checks report completed byte chunks in the worker and fallback', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const schema = { id: 'stream.progress', framing: { fixedLength: 20 }, messages: [
+        { id: 'sample', fields: [{ name: 'payload', type: 'bytes', length: 20 }] }
+    ] };
+    const task = { kind: 'protocol-stream-check', schema, bytes: new Uint8Array(36001), chunkSize: 16384 };
+    for (const workerFactory of [undefined, nodeWorkerFactory()]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: workerFactory ? 3 : 2, workerFactory });
+        t.after(() => pool.dispose());
+        const progress = [];
+        const result = await pool.runTask(task, { onProgress: processedBytes => progress.push(processedBytes) });
+        assert.deepEqual(progress, [16384, 32768]);
+        assert.deepEqual(result, { frames: 1800, errors: 0, invalidFrames: 0, pending: 1 });
+        if (workerFactory) assert.equal(pool.workerCount, 1);
+    }
+});
+
 test('idle history workers retire individually and clearing FFT cache permits a fresh snapshot', async t => {
     const { HistoryWorkerPool } = loadPool();
     const timers = new Map(), workers = [];

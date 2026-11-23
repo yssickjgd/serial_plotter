@@ -6,14 +6,14 @@ const vm = require('node:vm');
 test('plotter uses the full sample window for CSV and bounds draw work to pixels', () => {
     let lineToCount = 0;
     const markerCalls = [];
-    const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
+    const ctx = new Proxy({}, { get: (state, key) => key === 'measureText'
         ? () => ({ width: 50 })
         : key === 'lineTo' ? (x, y) => {
             assert.ok(Number.isFinite(x) && Number.isFinite(y)); lineToCount++;
         } : key === 'fillRect' ? (x, y, w, h) => {
             assert.ok([x, y, w, h].every(Number.isFinite));
             markerCalls.push(['fillRect', x, y, w, h]);
-        } : key === 'arc' ? (...args) => markerCalls.push(['arc', ...args]) : () => {} });
+        } : key === 'arc' ? (...args) => markerCalls.push(['arc', ...args, state.lineWidth]) : () => {} });
     const element = () => ({ style: {}, offsetHeight: 12, clientWidth: 800,
         addEventListener() {}, getBoundingClientRect: () => ({ width: 800, height: 400 }) });
     const elements = new Map();
@@ -94,7 +94,10 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter._drawTrace2D(trace);
     assert.deepEqual(markerCalls, [['fillRect', 13.5, 8.5, 3, 3], ['fillRect', 33.5, 28.5, 3, 3]]);
     plotter._drawRecoveredMarkers([trace], 100, 80);
-    assert.deepEqual(markerCalls.at(-1).slice(0, 3), ['arc', 25, 20]);
+    const recoveredMarker = markerCalls.at(-1);
+    assert.deepEqual(recoveredMarker.slice(0, 3), ['arc', 25, 20]);
+    assert.equal(2 * recoveredMarker[3] + recoveredMarker.at(-1), markerCalls[0][3],
+        'the outline including its stroke fits the same width as a measured sample marker');
 
     const drawsBefore = plotter.completedDraws;
     plotter.draw();
@@ -175,4 +178,77 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     assert.equal(plotter.completedDraws, firstDraw + 3,
         'a display change redraws promptly while the frequency cache is fresh');
     assert.equal(plotter.completedSpectrumDraws, firstSpectrum + 3);
+});
+
+test('a 39% waveform budgets vertices and backing pixels for its displayed size', () => {
+    let zoom = 1;
+    const rect = () => ({ width: 800 * zoom, height: 400 * zoom, top: 0, left: 0 });
+    const widths = [];
+    const ctx = new Proxy({}, { get: (state, key) => {
+        if (key === 'measureText') return () => ({ width: 20 });
+        if (key === 'stroke') return () => {
+            if (state.strokeStyle === '#00FF7F') widths.push(state.lineWidth);
+        };
+        return () => {};
+    } });
+    const document = { defaultView: { devicePixelRatio: 2 } };
+    const canvas = { ownerDocument: document, parentElement: { getBoundingClientRect: rect },
+        getContext: () => ctx, getBoundingClientRect: rect,
+        closest: () => ({ dataset: { workspaceZoom: String(zoom) } }) };
+    const gpu = { available: true, resize(...size) { this.size = size; },
+        render(traces) { this.trace = traces[0]; return true; } };
+    const context = vm.createContext({ document, window: document.defaultView, performance,
+        requestAnimationFrame() {}, console });
+    for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js', 'channelTransform.js',
+        'spectrum.js', 'plotter.js']) {
+        vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
+    }
+    const { Plotter, FrameBuffer } = context.SerialPlotter;
+    const frames = new FrameBuffer(1, 5000);
+    const plotter = new Plotter(canvas, frames, { gpuRenderer: gpu });
+    plotter.setChannelCount(1);
+    plotter.setChannelVisible(0, true);
+    plotter.setMaxPoints(5000);
+    plotter.setPlotWindowPoints(5000);
+    for (let i = 0; i < 5000; i++) plotter.addFrame([i === 1000 ? 100 : i === 1001 ? -100
+        : i === 2500 ? NaN : i % 2 ? i % 29 : -(i % 31)]);
+
+    plotter.draw();
+    const largeTraceSize = gpu.trace.points.length;
+    assert.ok(largeTraceSize > 1000);
+    zoom = .39;
+    plotter.resize();
+    plotter.draw();
+    assert.equal(plotter._drawState.visibleCnt, 5000);
+    assert.equal(frames.length, 5000);
+    assert.equal(frames.getValue(0, 1), 1);
+    assert.ok(gpu.trace.points.length <= 560, `sent ${gpu.trace.points.length} vertices for a 277 px plot`);
+    assert.ok(gpu.trace.points.length < largeTraceSize / 2);
+    assert.equal(gpu.trace.points[0].index, 0);
+    assert.equal(gpu.trace.points.at(-1).index, 4999);
+    for (const [index, value] of [[1000, 100], [1001, -100]]) {
+        assert.equal(gpu.trace.points.find(point => point.index === index)?.value, value);
+    }
+    assert.equal(gpu.trace.points.find(point => point.index === 2501)?.break, true);
+    assert.deepEqual(gpu.size, [800, 388, 312, 151]);
+    assert.equal(canvas.width, 624, 'the axes retain screen device-pixel density');
+
+    const interior = first => Array.from(gpu.trace.points, point => point.index + first)
+        .filter(index => index >= 100 && index < 4900);
+    const beforeScroll = interior(0);
+    plotter.addFrame([42]);
+    plotter.draw();
+    assert.equal(frames.frameOrdinalAt(0), 1);
+    assert.deepEqual(interior(1), beforeScroll, 'the interior shape survives live ring-buffer eviction');
+
+    gpu.available = false;
+    plotter.draw();
+    assert.ok(Math.abs(widths.at(-1) * zoom - 1) < 1e-9,
+        'the Canvas fallback renders a one-CSS-pixel stroke at this zoom');
+
+    document.defaultView.devicePixelRatio = .8;
+    plotter.resize();
+    plotter.draw();
+    assert.ok(widths.at(-1) * zoom * document.defaultView.devicePixelRatio >= 1 - 1e-9,
+        'browser zoom also leaves at least one physical pixel for the fallback stroke');
 });

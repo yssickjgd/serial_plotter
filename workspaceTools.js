@@ -6,6 +6,7 @@
             ...require('./channelTransform'), MonitorDisplay: require('./monitorDisplay'), PoseConfig: require('./poseConfig').PoseConfig } : root.SerialPlotter;
     const { MonitorSearch, FrameNavigation, transformChannelValue, MonitorDisplay, PoseConfig } = dependencies;
     const framesOf = widget => widget?.source?.frames ?? widget?.source;
+    const timeScanBatch = 4096;
     const timeIndex = (frames, time) => {
         if (!frames?.length || !Number.isFinite(time)) return -1;
         let a = frames.timestampAt(0), b = frames.timestampAt(frames.length - 1);
@@ -37,9 +38,9 @@
 
     class WorkspaceTools {
         constructor({ document = root.document, service, getWidgets, getActiveWidget = () => null, onStateChange = () => {},
-            onMessage = () => {}, getChannelNames = () => service.channelNames ?? service.numericSource?.format?.channelNames ?? [],
+            onMessage = () => {}, onSearchProgress = () => {}, onTimeProgress = () => {}, getChannelNames = () => service.channelNames ?? service.numericSource?.format?.channelNames ?? [],
             getTimeOffset = () => 0, getAlignedIndex = null, toCaptureTime = time => time, toWallTime = time => time }) {
-            Object.assign(this, { document, service, getWidgets, getActiveWidget, onStateChange, onMessage,
+            Object.assign(this, { document, service, getWidgets, getActiveWidget, onStateChange, onMessage, onSearchProgress, onTimeProgress,
                 getChannelNames, getTimeOffset, getAlignedIndex, toCaptureTime, toWallTime });
             this.sourceId = this.referenceId = null;
             this.matches = [];
@@ -58,8 +59,10 @@
             this._listen(el('monitor-search-case-sensitive'), 'change', () => this.invalidate());
             for (const action of ['nearest', 'prev', 'next'])
                 this._listen(el(`monitor-search-${action}`), 'click', () => { void this.requestSearch(action); });
-            this._listen(el('nav-jump-mode'), 'change', () => this._syncTimeMode());
-            this._listen(el('nav-jump-button'), 'click', () => this.jumpToTime());
+            this._listen(el('nav-jump-mode'), 'change', () => { this._cancelTimeJump(); this._syncTimeMode(); });
+            for (const id of ['nav-jump-absolute', 'nav-jump-relative'])
+                this._listen(el(id), 'input', () => this._cancelTimeJump());
+            this._listen(el('nav-jump-button'), 'click', () => { void this.jumpToTime(); });
             this._listen(el('monitor-search-channel-toggle'), 'click', () => {
                 if (!this._enabled()) return;
                 el('monitor-search-channel-options').hidden = !el('monitor-search-channel-options').hidden;
@@ -167,7 +170,10 @@
                 this.channelPicker.previous.disabled = !enabled || this.channelPage <= 0;
                 this.channelPicker.next.disabled = !enabled || (this.channelPage + 1) * 40 >= this.filteredChannels.length;
             }
-            if (!enabled) { this._closeChannels(); if (this.pending) this.invalidate(); }
+            if (!enabled) {
+                this._closeChannels(); this._cancelTimeJump();
+                if (this.pending) this.invalidate();
+            }
             if (enabled && !this.lastPaused) this._defaultAbsoluteTime();
             this.lastPaused = enabled;
         }
@@ -281,10 +287,13 @@
         }
 
         invalidate() {
+            this._cancelTimeJump();
             this.generation++;
             if (this.timer) clearTimeout(this.timer);
             this.timer = null;
-            this.pending?.resolve(false); this.pending = null;
+            if (this.pending) {
+                this.pending.resolve(false); this.pending = null; this.onSearchProgress(null);
+            }
             this.matches = []; this.currentMatch = -1; this.searchKey = null;
             this._publish(); this._searchStatus('');
         }
@@ -383,9 +392,15 @@
             return mapped;
         }
 
+        _cancelTimeJump() {
+            if (!this.pendingJump) return;
+            this.pendingJump = null; this.onTimeProgress(null);
+        }
+
         jumpToTime() {
+            this._cancelTimeJump();
             if (!this._enabled()) return false;
-            const frames = framesOf(this._source());
+            const widget = this._source(), frames = framesOf(widget);
             if (!frames?.length) { this._status('nav-jump-status', '当前控件没有保留数据'); return false; }
             const relative = this._el('nav-jump-mode').value === 'relative';
             const text = this._el(relative ? 'nav-jump-relative' : 'nav-jump-absolute').value;
@@ -394,15 +409,57 @@
             const target = relative ? text.trim() !== '' && Number.isFinite(seconds) && seconds >= 0
                 ? frames.timestampAt(0) + seconds * 1000 : NaN : frames.multipleSources ? this.toCaptureTime(absolute) : absolute;
             if (!Number.isFinite(target)) { this._status('nav-jump-status', '请输入有效时间'); return false; }
-            let minimum = Infinity, maximum = -Infinity;
-            for (let index = 0; index < frames.length; index++) {
+            if (frames.timestampsMonotonic === true)
+                return this._finishTimeJump(frames, target, timeIndex(frames, target));
+            if (frames.length > timeScanBatch)
+                return this._scanTimeJump(widget, frames, target);
+            const scan = this._scanTimeRange(frames, target, 0, frames.length,
+                { minimum: Infinity, maximum: -Infinity, distance: Infinity, nearest: -1 });
+            const index = target >= scan.minimum && target <= scan.maximum ? scan.nearest : -1;
+            return this._finishTimeJump(frames, target, index);
+        }
+
+        _scanTimeRange(frames, target, start, end, scan) {
+            for (let index = start; index < end; index++) {
                 const timestamp = frames.timestampAt(index);
-                minimum = Math.min(minimum, timestamp); maximum = Math.max(maximum, timestamp);
+                if (!Number.isFinite(timestamp)) continue;
+                scan.minimum = Math.min(scan.minimum, timestamp); scan.maximum = Math.max(scan.maximum, timestamp);
+                const distance = Math.abs(target - timestamp);
+                if (distance < scan.distance) { scan.distance = distance; scan.nearest = index; }
             }
-            if (target < minimum || target > maximum) {
+            return scan;
+        }
+
+        async _scanTimeJump(widget, frames, target) {
+            const capture = this._capture(widget), epoch = capture.epoch, version = frames.version, total = frames.length;
+            const job = {};
+            this.pendingJump = job;
+            this._status('nav-jump-status', '');
+            this.onTimeProgress({ done: 0, total });
+            const scan = { minimum: Infinity, maximum: -Infinity, distance: Infinity, nearest: -1 };
+            try {
+                for (let start = 0; start < total; start += timeScanBatch) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    if (this.pendingJump !== job || !this._enabled() || this._source() !== widget ||
+                        capture.epoch !== epoch || framesOf(widget) !== frames || frames.version !== version) return false;
+                    const end = Math.min(start + timeScanBatch, total);
+                    this._scanTimeRange(frames, target, start, end, scan);
+                    this.onTimeProgress({ done: end, total });
+                }
+                return this._finishTimeJump(frames, target,
+                    target >= scan.minimum && target <= scan.maximum ? scan.nearest : -1);
+            } catch (error) {
+                if (this.pendingJump === job) this._status('nav-jump-status', error.message);
+                return false;
+            } finally {
+                if (this.pendingJump === job) this._cancelTimeJump();
+            }
+        }
+
+        _finishTimeJump(frames, target, index) {
+            if (index < 0) {
                 this._status('nav-jump-status', '时间超出来源控件的保留范围'); return false;
             }
-            const index = frames.nearestTimestampIndex(target);
             const skipped = this._jumpAll(frames.rawByteOffsetAt(index), true, { frames, index }, target);
             const textStatus = `已定位第 ${index + 1} 帧` + (skipped.length ? `；${skipped.join('、')} 超出保留范围` : '');
             this._status('nav-jump-status', textStatus); this.onMessage(textStatus);
@@ -467,9 +524,10 @@
                                 .sort((a, b) => a[positionField] - b[positionField] || a.startFrame - b.startFrame);
                             const pending = this.pending;
                             const success = this._navigate(pending.request);
-                            this.pending = null; pending.resolve(success);
+                            this.pending = null; this.onSearchProgress(null); pending.resolve(success);
                         } else {
-                            this._searchStatus(`搜索中 ${session.position} / ${session.length}`);
+                            this.onSearchProgress({ title: widget.title, fraction: session.position / session.length,
+                                done: session.position, total: session.length });
                             this.timer = setTimeout(scan, 0);
                         }
                     } catch (error) { this.invalidate(); this._searchStatus(error.message); }

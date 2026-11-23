@@ -677,6 +677,86 @@ test('shared numeric rule changes preserve raw bytes and do not report replay as
     assert.equal(f.get('history-rebuild-progress').hidden, true);
 });
 
+test('long searches show progress at the top while completed results stay with the search controls', async t => {
+    const f = boot(t, config([wave('w1')]));
+    f.app.service.receive(new Uint8Array(900).fill(42));
+    await f.tick();
+    f.app.widgets.activate('w1');
+    f.click('btn-pause');
+    f.get('monitor-search-query').value = '42';
+    const panel = f.get('history-rebuild-progress');
+    const pending = f.app.tools.requestSearch('nearest');
+    assert.equal(panel.hidden, false);
+    assert.equal(panel.parentElement, f.get('workspace-task-slot'));
+    assert.match(panel.textContent, /搜索中/);
+    assert.equal(f.get('monitor-search-status').textContent, '');
+    f.click('serial-manager-open');
+    assert.equal(panel.parentElement, f.get('dialog-task-slot'));
+    assert.equal(f.get('workspace-task-slot').hidden, true);
+    f.click('serial-manager-close');
+    assert.equal(panel.parentElement, f.get('workspace-task-slot'));
+    await f.tick();
+    assert.equal(await pending, true);
+    assert.equal(panel.hidden, true);
+    assert.equal(f.get('monitor-search-status').textContent, '900 / 900');
+    assert.equal(f.get('workspace-task-slot').hidden, true);
+
+    f.change('monitor-search-query', '21');
+    const cancelled = f.app.tools.requestSearch('nearest');
+    assert.equal(panel.hidden, false);
+    f.click('btn-clear');
+    assert.equal(await cancelled, false);
+    assert.equal(panel.hidden, true);
+});
+
+test('the top progress reports byte replay and timing changes and clears cancelled replay', async t => {
+    const f = boot(t, config([wave('w1'), bytes('b1')]));
+    f.app.service.receive(new Uint8Array(1024).fill(65));
+    await f.tick();
+    const panel = f.get('history-rebuild-progress');
+    f.app.widgets.activate('b1');
+    f.change('capture-mode', 'text'); f.change('text-boundary', 'lf');
+    assert.equal(panel.hidden, false);
+    assert.match(panel.textContent, /正在重建.*字节流/);
+    await f.settle();
+    await f.tick();
+    assert.equal(panel.hidden, true);
+
+    f.click('workspace-channel-auto-map');
+    await f.tick();
+    f.change('sidebar-timebase-mode', 'fixed');
+    f.get('sidebar-source-alignment').dispatchEvent({ type: 'pointerleave' });
+    assert.equal(panel.hidden, false);
+    assert.match(panel.textContent, /重新对齐保留历史/);
+    assert.doesNotMatch(f.get('sidebar-timebase-state').textContent, /重新对齐保留历史/);
+    f.click('btn-clear');
+    assert.equal(panel.hidden, true);
+    await f.tick();
+    assert.equal(panel.hidden, true);
+});
+
+test('protocol history uses one top-level progress entry for all of its outputs', async t => {
+    const f = boot(t, config([]));
+    const schema = { id: 'progress-protocol', endian: 'little',
+        framing: { header: [170], fixedLength: 4 }, command: { offset: 1, type: 'uint8' }, payloadOffset: 2,
+        messages: [{ id: 'value', command: 1, fields: [{ name: 'temperature', type: 'int16' }] }] };
+    f.app.service.receive(Uint8Array.of(170, 1, 42, 0));
+    await f.tick();
+    f.click('serial-manager-open');
+    const panel = f.get('history-rebuild-progress');
+    const ready = f.app.dataEngine.apply({ ...f.app.dataEngine.serialize(), mode: 'Self_Defined_Frame',
+        protocols: [schema], protocolId: schema.id });
+    assert.equal(panel.hidden, false);
+    assert.equal(panel.parentElement, f.get('dialog-task-slot'));
+    const rows = panel.children.map(row => row.textContent);
+    assert.equal(rows.filter(text => text.includes('正在重新解析协议历史')).length, 1);
+    assert.equal(rows.some(text => text.includes('正在重建数值历史')), false);
+    await f.settle();
+    await ready;
+    await f.tick();
+    assert.equal(panel.hidden, true);
+});
+
 test('search and default nearest reference follow the active widget without a placeholder option', async t => {
     const initial = config([wave('w1'), bytes('b1')]); initial.tools = { sourceId: 'b1', referenceId: 'w1' };
     const f = boot(t, initial);
@@ -1011,14 +1091,24 @@ test('activating another wave does not cancel a snapshot export from the first w
     f.app.widgets.activate('w1');
     f.app.widgets.setChannelVisible(0, true);
     let writes = 0, aborts = 0, closes = 0;
+    let release;
+    const hold = new Promise(resolve => { release = resolve; });
     f.window.showSaveFilePicker = async () => ({ async createWritable() { return {
-        async write() { writes++; f.app.widgets.activate('w2'); },
+        async write() { if (++writes === 3) await hold; f.app.widgets.activate('w2'); },
         async abort() { aborts++; }, async close() { closes++; }
     }; } });
     const pending = f.app.exportWidgetData();
-    for (let i = 0; i < 100; i++) await f.tick(1);
+    for (let i = 0; i < 100 && writes < 3; i++) await f.tick(1);
+    const progress = f.get('history-rebuild-progress');
+    try {
+        assert.equal(progress.hidden, false);
+        assert.ok(progress.querySelector('progress').value >= 0);
+        assert.match(progress.children[0].children[1].children[1].textContent, /50[,.]?001 条/);
+    } finally { release(); }
+    for (let i = 0; i < 100 && !closes; i++) await f.tick(1);
     assert.equal(await pending, true);
     assert.ok(writes > 1); assert.equal(aborts, 0); assert.equal(closes, 1);
+    assert.equal(progress.hidden, true);
     assert.equal(f.get('widget-export-format').value, 'csv');
     assert.equal(f.get('btn-widget-export').disabled, false);
     assert.equal(f.app.getConfig().tools.widgetExport.format, 'csv');

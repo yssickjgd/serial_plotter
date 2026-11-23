@@ -1654,21 +1654,78 @@ test('sample checks use the shared worker pool for decode and stream tasks witho
 
 test('sample worker results are ignored after the draft changes', async () => {
     let finish, submitted;
+    const progress = [];
     const taskStarted = new Promise(resolve => { submitted = resolve; });
     const pool = { maxWorkers: 1, runTask: () => new Promise(resolve => { finish = resolve; submitted(); }) };
-    const f = fixture({ getWorkerPool: () => pool }); f.view.open(); f.change('sample-name', '旧草稿'); f.change('preview-hex', 'AA 01 0A 34 12 07'); f.action('save-sample').click();
+    const f = fixture({ getWorkerPool: () => pool, onSampleProgress: update => progress.push(update) });
+    f.view.open(); f.change('sample-name', '旧草稿'); f.change('preview-hex', 'AA 01 0A 34 12 07'); f.action('save-sample').click();
     const checking = f.view.checkSamples();
     await Promise.race([taskStarted, new Promise((_, reject) => setTimeout(() => reject(new Error('worker task was not submitted')), 250))]);
-    f.change('field.name', 'updated_flags'); finish([{ valid: true, flatFields: [] }]); await checking;
+    f.change('field.name', 'updated_flags');
+    const expectedProgress = [{ label: '批量解码', fraction: 0, counter: '0 / 1 条' }, null];
+    assert.deepEqual(progress, expectedProgress);
+    finish([{ valid: true, flatFields: [] }]); await checking;
+    assert.deepEqual(progress, expectedProgress);
     assert.deepEqual(f.view.sampleResults, []); assert.match(f.view.status.textContent, /草稿已修改/);
 });
 
+test('standalone batch progress counts settled samples including failed inputs', async () => {
+    const progress = [];
+    const f = fixture({ getEditorState: () => ({ samples: { 'editor.demo': [
+        { id: 'valid', name: '有效样例', hex: 'AA 01 0A 34 12 07' },
+        { id: 'invalid', name: '无效样例', hex: 'GG' }
+    ] } }), onSampleProgress: update => progress.push(update) });
+    f.view.open();
+    await f.view.checkSamples();
+    assert.deepEqual(progress, [
+        { label: '批量解码', fraction: 0, counter: '0 / 2 条' },
+        { label: '批量解码', fraction: 0.5, counter: '1 / 2 条' },
+        { label: '批量解码', fraction: 1, counter: '2 / 2 条' },
+        null
+    ]);
+    assert.deepEqual(f.view.sampleResults.map(item => item.ok), [true, false]);
+    assert.match(f.view.sampleResults[1].message, /十六进制/);
+});
+
+test('late worker progress leaves the replacement check active and closing clears it', async () => {
+    const progress = [], requests = [];
+    const pool = { maxWorkers: 1, runTask: (task, options) => new Promise(resolve => requests.push({ task, options, resolve })) };
+    const f = fixture({ getWorkerPool: () => pool, onSampleProgress: update => progress.push(update) });
+    f.view.open(); f.change('preview-hex', 'AA 01 0A 34 12 07');
+    const oldCheck = f.view.checkSamples(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const replacement = f.view.checkSamples(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(requests.length, 2);
+    const start = { label: '流检查', fraction: 0, counter: '0 / 6 B' };
+    assert.deepEqual(progress, [start, null, start]);
+    const counts = { frames: 1, errors: 0, pending: 0, invalidFrames: 0 };
+    requests[0].options.onProgress(3); requests[0].resolve(counts);
+    await oldCheck;
+    assert.deepEqual(progress, [start, null, start]);
+    requests[1].options.onProgress(3);
+    f.view.close();
+    assert.deepEqual(progress, [start, null, start, { label: '流检查', fraction: 0.5, counter: '3 / 6 B' }, null]);
+    requests[1].options.onProgress(5); requests[1].resolve(counts);
+    await replacement;
+    assert.equal(progress.length, 5);
+    assert.deepEqual(f.view.sampleResults, []);
+});
+
 test('standalone stream checking yields real tasks between bounded byte chunks', async () => {
-    const f = fixture(); f.view.open(); f.change('preview-hex', 'AA 01 0A 34 12 07 '.repeat(3000));
+    const progress = [];
+    const f = fixture({ onSampleProgress: update => progress.push(update) });
+    f.view.open(); f.change('preview-hex', 'AA 01 0A 34 12 07 '.repeat(3000));
     let rendered = false; const checking = f.view.checkSamples(true);
     setTimeout(() => { rendered = true; }, 0); await checking;
     assert.equal(rendered, true); assert.equal(f.view.sampleResults[0].ok, true);
     assert.match(f.view.sampleResults[0].message, /3000 帧通过/);
+    assert.deepEqual(progress, [
+        { label: '流检查', fraction: 0, counter: '0 / 18,000 B' },
+        { label: '流检查', fraction: 16384 / 18000, counter: '16,384 / 18,000 B' },
+        { label: '流检查', fraction: 1, counter: '18,000 / 18,000 B' },
+        null
+    ]);
 });
 
 

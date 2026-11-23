@@ -517,6 +517,7 @@
             };
             this.rebuilding = true; reset();
             for (const source of this.managed) { source.rebuilding = true; source.progress = { processedBytes: 0, totalBytes: history.byteLength }; }
+            this.onProgress(this.recordsSource, this.recordsSource.progress);
             const yieldControl = this.service.yieldControl ?? (() => new Promise(resolve => setTimeout(resolve, 0)));
             const work = (async () => {
                 const pool = this.service.workerPool;

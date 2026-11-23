@@ -5,6 +5,8 @@
  * maxDecodedFields is allowed). protocol-batch-limit errors permit split retries;
  * protocol-record-limit identifies one frame exceeding the caller's field budget.
  */
+const protocolStreamProgressBytes = 16384;
+
 function validateProtocolHistoryTask(task) {
     if (!task.schema || typeof task.schema !== 'object' || Array.isArray(task.schema))
         throw new TypeError('Protocol history task requires a schema');
@@ -34,6 +36,7 @@ function createHistoryTaskProcessor(task, dependencies) {
         parser.onFrameParsed = record => { frames++; if (record.valid === false) { errors++; invalidFrames++; } };
         parser.onFrameError = () => { errors++; };
         return {
+            get processedBytes() { return offset; },
             step(byteBudget) {
                 let remaining = byteBudget === Infinity ? Infinity : Math.max(1, Math.floor(byteBudget) || 1);
                 while (offset < task.bytes.length && remaining > 0) {
@@ -246,7 +249,10 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
                         TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees, Protocol });
-                processor.step(Infinity);
+                if (data.reportProgress) {
+                    while (!processor.step(${protocolStreamProgressBytes}))
+                        self.postMessage({ id: data.id, processedBytes: processor.processedBytes });
+                } else processor.step(Infinity);
                 const result = processor.result();
                 const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
                 if (data.task.kind === 'fft') transfer.push(result.mags.buffer, result.phases.buffer,
@@ -370,7 +376,8 @@ class HistoryWorkerPool {
         return promise;
     }
 
-    runTask(task) {
+    /** Stream checks can report intermediate byte offsets. The result means the full input was checked. */
+    runTask(task, { onProgress } = {}) {
         if (this.disposed) return Promise.reject(historyAbortError());
         if (task?.kind === 'fft' && !(task.values instanceof Float64Array))
             return Promise.reject(new TypeError('FFT values must be a Float64Array'));
@@ -387,7 +394,9 @@ class HistoryWorkerPool {
             (!Array.isArray(parts) || parts.some(part => !(part?.bytes instanceof Uint8Array)))))
             return Promise.reject(new TypeError('History text context bytes must be Uint8Arrays'));
         return new Promise((resolve, reject) => {
-            const job = { id: this.nextId++, task, resolve, reject, settled: false };
+            const reportProgress = task.kind === 'protocol-stream-check' && typeof onProgress === 'function';
+            const job = { id: this.nextId++, task, resolve, reject, settled: false,
+                onProgress: reportProgress ? onProgress : null, reportedBytes: 0 };
             this.jobs.add(job);
             if (task.kind === 'fft') {
                 const firstOther = this.queue.findIndex(queued => queued.task.kind !== 'fft');
@@ -395,6 +404,14 @@ class HistoryWorkerPool {
             } else this.queue.push(job);
             this._pump();
         });
+    }
+
+    _reportProgress(job, processedBytes) {
+        if (!job.onProgress || !Number.isSafeInteger(processedBytes) ||
+            processedBytes < job.reportedBytes + protocolStreamProgressBytes || processedBytes >= job.task.bytes.length) return;
+        job.reportedBytes = processedBytes;
+        try { job.onProgress(processedBytes); }
+        catch { /* A progress observer must not interrupt the job. */ }
     }
 
     _settle(job, error, result) {
@@ -452,7 +469,7 @@ class HistoryWorkerPool {
                             });
                         }
                     }
-                    slot.worker.postMessage({ id: job.id, task }, transfer);
+                    slot.worker.postMessage({ id: job.id, task, reportProgress: Boolean(job.onProgress) }, transfer);
                 } catch { this._failWorkers(); }
             }
         } finally {
@@ -483,6 +500,10 @@ class HistoryWorkerPool {
             const data = event.data;
             const job = slot.job;
             if (!job || data?.id !== job.id) return;
+            if (Object.hasOwn(data, 'processedBytes')) {
+                this._reportProgress(job, data.processedBytes);
+                return;
+            }
             if (!Object.hasOwn(data, 'error') && !Object.hasOwn(data, 'result')) {
                 this._failWorkers();
                 return;
@@ -546,7 +567,8 @@ class HistoryWorkerPool {
             try {
                 processor ??= createHistoryTaskProcessor(job.task, historyWorkerDependencies());
                 if (!processor.step(this.sliceBytes)) {
-                    this.fallbackTimer = this.schedule(advance);
+                    this._reportProgress(job, processor.processedBytes);
+                    if (!this.disposed) this.fallbackTimer = this.schedule(advance);
                     return;
                 }
                 this._settle(job, null, processor.result());

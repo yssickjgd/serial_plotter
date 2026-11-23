@@ -81,8 +81,27 @@ test('synchronized grid settings belong to the main channel tab and plot help fo
     assert.equal(f.get('plot-workspace-sampling-hint').hidden, true);
 });
 
-test('each resync field has the same dedicated help in the sidebar and communications', t => {
+test('alignment and sampling are separate groups with matching resync help and mode-specific controls', t => {
     const f = communications(t);
+    const summaries = ['sidebar', 'channel'].map(prefix => {
+        const alignment = f.get(prefix + '-time-alignment-group');
+        const sampling = f.get(prefix + '-sampling-group');
+        assert.ok(alignment && sampling);
+        assert.equal(alignment.parentElement, sampling.parentElement);
+        assert.ok(alignment.contains(f.get(prefix + '-timebase-rate')));
+        assert.ok(sampling.contains(f.get(prefix + '-resync-enabled')));
+        assert.ok(sampling.contains(f.get(prefix + '-grid-method')));
+        assert.equal(f.get(prefix + '-resync-fixed').hidden, true);
+        assert.equal(f.get(prefix + '-grid-method').disabled, false);
+        f.change(prefix + '-timebase-mode', 'fixed');
+        assert.equal(f.get(prefix + '-timebase-fixed').hidden, false);
+        assert.equal(f.get(prefix + '-resync-fixed').hidden, false);
+        const summary = f.get(prefix + '-resync-summary');
+        assert.equal(f.get(prefix + '-resync-settings').firstElementChild, summary);
+        return summary.textContent;
+    });
+    assert.equal(summaries[0], summaries[1]);
+    assert.match(summaries[0], /同时/);
     for (const field of ['delay', 'batches', 'confirmation']) {
         const hints = ['sidebar', 'channel'].map(prefix => {
             const input = f.get(prefix + '-resync-' + field);

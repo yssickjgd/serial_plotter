@@ -42,60 +42,65 @@
                         <div class="status-text" id="connection-status" role="status"></div>
                     </div>
 
-                    <section class="control-group" id="sidebar-source-alignment">
-                        <div class="section-title">来源时间对齐与同步采样</div>
-                        <div class="input-group">
-                            <label for="sidebar-alignment-source">数据来源</label>
-                            <select id="sidebar-alignment-source"></select>
-                        </div>
-                        <div class="input-group">
-                            <label for="sidebar-config-offset">对齐偏移（ms）</label>
-                            <input id="sidebar-config-offset" type="number" step="1" value="0" aria-describedby="sidebar-alignment-hint" />
-                        </div>
-                        <div class="input-group">
-                            <label for="sidebar-timebase-mode">时间基准</label>
-                            <select id="sidebar-timebase-mode">
-                                <option value="receive">电脑接收时间</option>
-                                <option value="fixed">按设定帧率推算时间</option>
-                            </select>
-                        </div>
-                        <div id="sidebar-timebase-fixed" class="sidebar-stack" hidden>
+                    <div class="sidebar-stack source-timing-settings" id="sidebar-source-alignment">
+                        <section class="control-group" id="sidebar-time-alignment-group" aria-labelledby="sidebar-time-alignment-title">
+                            <div class="section-title" id="sidebar-time-alignment-title">来源时间对齐</div>
                             <div class="input-group">
+                                <label for="sidebar-alignment-source">数据来源</label>
+                                <select id="sidebar-alignment-source"></select>
+                            </div>
+                            <div class="input-group">
+                                <label for="sidebar-config-offset">对齐偏移（ms）</label>
+                                <input id="sidebar-config-offset" type="number" step="1" value="0" aria-describedby="sidebar-alignment-hint" />
+                            </div>
+                            <div class="input-group">
+                                <label for="sidebar-timebase-mode">时间基准</label>
+                                <select id="sidebar-timebase-mode">
+                                    <option value="receive">电脑接收时间</option>
+                                    <option value="fixed">按设定帧率推算时间</option>
+                                </select>
+                            </div>
+                            <div id="sidebar-timebase-fixed" class="input-group" hidden>
                                 <label for="sidebar-timebase-rate">该来源的帧率（帧/秒）</label>
                                 <input id="sidebar-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                             </div>
-                            <label class="option-label"><input id="sidebar-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
-                            <div id="sidebar-resync-settings" class="sidebar-stack">
-                                <div class="input-group">
-                                    <label for="sidebar-resync-delay">延迟阈值（ms）</label>
-                                    <input id="sidebar-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="sidebar-resync-delay-hint" />
-                                    <span id="sidebar-resync-delay-hint" class="hint-text">批次延迟偏离当前时轴的程度超过该值才开始确认，实际阈值至少为两个帧周期。</span>
+                            <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
+                        </section>
+                        <section class="control-group" id="sidebar-sampling-group" aria-labelledby="sidebar-sampling-title">
+                            <div class="section-title" id="sidebar-sampling-title">同步采样</div>
+                            <div id="sidebar-resync-fixed" class="sidebar-stack" hidden>
+                                <label class="option-label"><input id="sidebar-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
+                                <div id="sidebar-resync-settings" class="sidebar-stack">
+                                    <span id="sidebar-resync-summary" class="hint-text">以下三项共同决定何时自动重新同步。偏差持续同向超出延迟阈值，并同时满足连续批次数和确认时间条件时，才校正来源时轴。估算出缺口后，按欠采样恢复策略尝试补全。</span>
+                                    <div class="input-group">
+                                        <label for="sidebar-resync-delay">延迟阈值（ms）</label>
+                                        <input id="sidebar-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="sidebar-resync-delay-hint" />
+                                        <span id="sidebar-resync-delay-hint" class="hint-text">比较每批末帧的实际接收时刻与预计时刻，以正常交付延迟为基准判断偏差。连续丢帧可能造成持续偏差，批量交付也可能造成短暂偏差。有效阈值至少为两个帧周期。</span>
+                                    </div>
+                                    <div class="input-group">
+                                        <label for="sidebar-resync-batches">连续批次数</label>
+                                        <input id="sidebar-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="sidebar-resync-batches-hint" />
+                                        <span id="sidebar-resync-batches-hint" class="hint-text">偏差连续同向超出延迟阈值的批数达到该值，即满足连续批次数条件。</span>
+                                    </div>
+                                    <div class="input-group">
+                                        <label for="sidebar-resync-confirmation">确认时间（ms）</label>
+                                        <input id="sidebar-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="sidebar-resync-confirmation-hint" />
+                                        <span id="sidebar-resync-confirmation-hint" class="hint-text">从首个超阈批次起，偏差同向超阈的持续时间达到该值，即满足确认时间条件。默认 100 ms，设为 0 时无需额外等待。</span>
+                                    </div>
                                 </div>
-                                <div class="input-group">
-                                    <label for="sidebar-resync-batches">连续批次数</label>
-                                    <input id="sidebar-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="sidebar-resync-batches-hint" />
-                                    <span id="sidebar-resync-batches-hint" class="hint-text">偏差同向超过阈值的连续接收批数须达到该值。</span>
-                                </div>
-                                <div class="input-group">
-                                    <label for="sidebar-resync-confirmation">确认时间（ms）</label>
-                                    <input id="sidebar-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="sidebar-resync-confirmation-hint" />
-                                    <span id="sidebar-resync-confirmation-hint" class="hint-text">从首个超出阈值的批次起，偏差须同向持续达到该时间。默认 100 ms。设为 0 时，只按延迟阈值和连续批次数判断。</span>
-                                </div>
-                                <p class="hint-text">这三项用于校正来源时轴。样点有效期限制补全及公式取值可引用的时间范围，公式最多等待后点控制实时公式等多久。</p>
                             </div>
-                        </div>
-                        <div class="input-group">
-                            <label for="sidebar-grid-method">欠采样恢复策略</label>
-                            <select id="sidebar-grid-method">
-                                <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
-                                <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
-                                <option value="spline">局部自然三次样条（4 点）</option>
-                            </select>
-                        </div>
-                        <p id="sidebar-timebase-state" class="hint-text" role="status" hidden></p>
-                        <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
-                        <p id="sidebar-alignment-status" class="hint-text is-error" role="status" hidden></p>
-                    </section>
+                            <div class="input-group">
+                                <label for="sidebar-grid-method">欠采样恢复策略</label>
+                                <select id="sidebar-grid-method">
+                                    <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
+                                    <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
+                                    <option value="spline">局部自然三次样条（4 点）</option>
+                                </select>
+                            </div>
+                            <p id="sidebar-timebase-state" class="hint-text" role="status" hidden></p>
+                            <p id="sidebar-alignment-status" class="hint-text is-error" role="status" hidden></p>
+                        </section>
+                    </div>
 
                     <div class="control-group" id="board-toolbar" aria-label="缓冲区设置">
                         <div class="section-title">缓冲区设置 <span class="scope-badge">全局共用</span></div>
@@ -208,7 +213,9 @@
         <main class="main-display" id="main-display">
 
 
-            <div id="history-rebuild-progress" class="history-rebuild-progress" role="status" aria-live="polite" hidden></div>
+            <div id="workspace-task-slot" class="task-progress-slot" hidden>
+                <div id="history-rebuild-progress" class="task-progress" role="status" aria-atomic="false" hidden></div>
+            </div>
 
             <section class="monitor-workspace" id="monitor-workspace" aria-label="监视台工作区">
                 <div class="workspace-toolbar" id="workspace-toolbar">
@@ -733,6 +740,7 @@
                 <button id="serial-manager-close" class="protocol-editor-button" type="button">关闭</button>
             </div>
         </header>
+        <div id="dialog-task-slot" class="task-progress-slot"></div>
         <div id="serial-manager-panel" class="serial-manager-panel">
             <div id="serial-manager-workspace" class="serial-manager-workspace">
                 <aside class="serial-source-sidebar">
@@ -818,56 +826,61 @@
                                 <button id="serial-config-reset" type="button" class="protocol-editor-button">撤销修改</button>
                             </div>
                         </form>
-                        <section class="control-group" id="serial-config-alignment">
-                            <div class="section-title">来源时间对齐与同步采样</div>
-                            <div class="input-group">
-                                <label for="serial-config-offset">对齐偏移（ms）</label>
-                                <input id="serial-config-offset" type="number" step="1" value="0" aria-describedby="channel-alignment-hint" />
-                            </div>
-                            <div class="input-group">
-                                <label for="channel-timebase-mode">时间基准</label>
-                                <select id="channel-timebase-mode">
-                                    <option value="receive">电脑接收时间</option>
-                                    <option value="fixed">按设定帧率推算时间</option>
-                                </select>
-                            </div>
-                            <div id="channel-timebase-fixed" class="sidebar-stack" hidden>
+                        <div class="sidebar-stack source-timing-settings" id="serial-config-alignment">
+                            <section class="control-group" id="channel-time-alignment-group" aria-labelledby="channel-time-alignment-title">
+                                <div class="section-title" id="channel-time-alignment-title">来源时间对齐</div>
                                 <div class="input-group">
+                                    <label for="serial-config-offset">对齐偏移（ms）</label>
+                                    <input id="serial-config-offset" type="number" step="1" value="0" aria-describedby="channel-alignment-hint" />
+                                </div>
+                                <div class="input-group">
+                                    <label for="channel-timebase-mode">时间基准</label>
+                                    <select id="channel-timebase-mode">
+                                        <option value="receive">电脑接收时间</option>
+                                        <option value="fixed">按设定帧率推算时间</option>
+                                    </select>
+                                </div>
+                                <div id="channel-timebase-fixed" class="input-group" hidden>
                                     <label for="channel-timebase-rate">该来源的帧率（帧/秒）</label>
                                     <input id="channel-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                                 </div>
-                                <label class="option-label"><input id="channel-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
-                                <div id="channel-resync-settings" class="sidebar-stack">
-                                    <div class="input-group">
-                                        <label for="channel-resync-delay">延迟阈值（ms）</label>
-                                        <input id="channel-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="channel-resync-delay-hint" />
-                                        <span id="channel-resync-delay-hint" class="hint-text">批次延迟偏离当前时轴的程度超过该值才开始确认，实际阈值至少为两个帧周期。</span>
+                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
+                            </section>
+                            <section class="control-group" id="channel-sampling-group" aria-labelledby="channel-sampling-title">
+                                <div class="section-title" id="channel-sampling-title">同步采样</div>
+                                <div id="channel-resync-fixed" class="sidebar-stack" hidden>
+                                    <label class="option-label"><input id="channel-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
+                                    <div id="channel-resync-settings" class="sidebar-stack">
+                                        <span id="channel-resync-summary" class="hint-text">以下三项共同决定何时自动重新同步。偏差持续同向超出延迟阈值，并同时满足连续批次数和确认时间条件时，才校正来源时轴。估算出缺口后，按欠采样恢复策略尝试补全。</span>
+                                        <div class="input-group">
+                                            <label for="channel-resync-delay">延迟阈值（ms）</label>
+                                            <input id="channel-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="channel-resync-delay-hint" />
+                                            <span id="channel-resync-delay-hint" class="hint-text">比较每批末帧的实际接收时刻与预计时刻，以正常交付延迟为基准判断偏差。连续丢帧可能造成持续偏差，批量交付也可能造成短暂偏差。有效阈值至少为两个帧周期。</span>
+                                        </div>
+                                        <div class="input-group">
+                                            <label for="channel-resync-batches">连续批次数</label>
+                                            <input id="channel-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="channel-resync-batches-hint" />
+                                            <span id="channel-resync-batches-hint" class="hint-text">偏差连续同向超出延迟阈值的批数达到该值，即满足连续批次数条件。</span>
+                                        </div>
+                                        <div class="input-group">
+                                            <label for="channel-resync-confirmation">确认时间（ms）</label>
+                                            <input id="channel-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="channel-resync-confirmation-hint" />
+                                            <span id="channel-resync-confirmation-hint" class="hint-text">从首个超阈批次起，偏差同向超阈的持续时间达到该值，即满足确认时间条件。默认 100 ms，设为 0 时无需额外等待。</span>
+                                        </div>
                                     </div>
-                                    <div class="input-group">
-                                        <label for="channel-resync-batches">连续批次数</label>
-                                        <input id="channel-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="channel-resync-batches-hint" />
-                                        <span id="channel-resync-batches-hint" class="hint-text">偏差同向超过阈值的连续接收批数须达到该值。</span>
-                                    </div>
-                                    <div class="input-group">
-                                        <label for="channel-resync-confirmation">确认时间（ms）</label>
-                                        <input id="channel-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="channel-resync-confirmation-hint" />
-                                        <span id="channel-resync-confirmation-hint" class="hint-text">从首个超出阈值的批次起，偏差须同向持续达到该时间。默认 100 ms。设为 0 时，只按延迟阈值和连续批次数判断。</span>
-                                    </div>
-                                    <p class="hint-text">这三项用于校正来源时轴。样点有效期限制补全及公式取值可引用的时间范围，公式最多等待后点控制实时公式等多久。</p>
                                 </div>
-                            </div>
-                            <div class="input-group">
-                                <label for="channel-grid-method">欠采样恢复策略</label>
-                                <select id="channel-grid-method">
-                                    <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
-                                    <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
-                                    <option value="spline">局部自然三次样条（4 点）</option>
-                                </select>
-                            </div>
-                            <p id="channel-timebase-state" class="hint-text" role="status" hidden></p>
-                            <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
-                            <p id="channel-alignment-status" class="hint-text is-error" role="status" hidden></p>
-                        </section>
+                                <div class="input-group">
+                                    <label for="channel-grid-method">欠采样恢复策略</label>
+                                    <select id="channel-grid-method">
+                                        <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
+                                        <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
+                                        <option value="spline">局部自然三次样条（4 点）</option>
+                                    </select>
+                                </div>
+                                <p id="channel-timebase-state" class="hint-text" role="status" hidden></p>
+                                <p id="channel-alignment-status" class="hint-text is-error" role="status" hidden></p>
+                            </section>
+                        </div>
                         <p class="hint-text">串口首次使用时需绑定端口。TCP 和 UDP 通过本地 Bridge 连接。</p>
                     </div>
                     <div id="engine-parsing" class="tab-content active">
