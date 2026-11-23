@@ -178,7 +178,7 @@ function axisValueAtFraction(fraction, min, max, scale = 'linear') {
 
 /** Convert a dragged plot rectangle into an inclusive sample window and Y range. */
 function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
-    startIndex, visibleCount, min, max, xScale = 'linear', yScale = 'linear' }) {
+    startIndex, visibleCount, min, max, xScale = 'linear', yScale = 'linear', indexAtFraction }) {
     if (plotWidth <= 0 || plotHeight <= 0 || visibleCount < 2 || max <= min) return null;
     const left = Math.max(0, Math.min(plotWidth, Math.min(x0, x1)));
     const right = Math.max(0, Math.min(plotWidth, Math.max(x0, x1)));
@@ -186,8 +186,9 @@ function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
     const bottom = Math.max(0, Math.min(plotHeight, Math.max(y0, y1)));
     if (right - left < 6 || bottom - top < 6) return null;
     const endIndex = startIndex + visibleCount - 1;
-    const first = Math.ceil(axisValueAtFraction(left / plotWidth, startIndex, endIndex, xScale));
-    const last = Math.floor(axisValueAtFraction(right / plotWidth, startIndex, endIndex, xScale));
+    const indexAt = indexAtFraction ?? (ratio => axisValueAtFraction(ratio, startIndex, endIndex, xScale));
+    const first = Math.ceil(indexAt(left / plotWidth, false));
+    const last = Math.floor(indexAt(right / plotWidth, true));
     if (last <= first) return null;
     return {
         scrollOffset: first,

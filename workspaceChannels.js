@@ -6,6 +6,39 @@
     const MAX = 65535;
     const sampleMethods = ['hold', 'nearest', 'linear', 'quadratic', 'spline'];
     const sampleTime = event => event.traceTime ?? event.timestamp;
+    // Bulk reads start with binary searches and carry both cursors through
+    // adjacent grid rows. A dense batch can still be skipped by binary search.
+    function eventBoundary(events, time, high, aligned, previous) {
+        let low = previous ?? 0;
+        if (previous !== undefined) {
+            const end = Math.min(high, low + 16);
+            while (low < end) {
+                const event = events[low];
+                if (!(aligned ? sampleTime(event) <= time : event.sealedThrough < time)) return low;
+                low++;
+            }
+        }
+        while (low < high) {
+            const mid = (low + high) >>> 1, event = events[mid];
+            if (aligned ? sampleTime(event) <= time : event.sealedThrough < time) low = mid + 1;
+            else high = mid;
+        }
+        return low;
+    }
+
+    // The four-point natural spline can cover an edge interval when both extra
+    // samples are on the same side of the bracket.
+    function cubicCorrection(points, interval, x) {
+        const [p0, p1, p2, p3] = points;
+        const h0 = sampleTime(p1) - sampleTime(p0), h1 = sampleTime(p2) - sampleTime(p1), h2 = sampleTime(p3) - sampleTime(p2);
+        const slope = (p2.value - p1.value) / h1;
+        const r1 = 6 * (slope - (p1.value - p0.value) / h0), r2 = 6 * ((p3.value - p2.value) / h2 - slope);
+        const a = 2 * (h0 + h1), b = 2 * (h1 + h2), det = a * b - h1 * h1;
+        const second = [0, (b * r1 - h1 * r2) / det, (a * r2 - h1 * r1) / det, 0];
+        const span = [h0, h1, h2][interval], left = 1 - x;
+        return span * span / 6 * ((left ** 3 - left) * second[interval] + (x ** 3 - x) * second[interval + 1]);
+    }
+
     const sourceIdPattern = /^(?:primary|serial-[1-9]\d*)$/;
     const idFor = entry => entry.sourceId + '/' + entry.channelId;
     const defaultColor = index => ['#ff0000', '#00ff00', '#00ffff', '#ffff00', '#ff00ff', '#ffffff'][index % 6];
@@ -171,65 +204,82 @@
         }
 
         // A late observation can appear on its original curve without revising published grid values.
-        _estimate(channel, time, includeLate = false) {
+        _estimate(channel, time, includeLate = false, cursor) {
             const list = this.events.get(channel);
             if (!list?.length) return null;
-            let low = 0, high = list.length;
-            while (!includeLate && low < high) {
-                const mid = (low + high) >>> 1;
-                if (list[mid].sealedThrough < time) low = mid + 1; else high = mid;
-            }
-            const available = includeLate ? list.length : low;
-            low = 0; high = available;
-            while (low < high) {
-                const mid = (low + high) >>> 1;
-                if (sampleTime(list[mid]) <= time) low = mid + 1; else high = mid;
-            }
+            const available = includeLate || list.at(-1).sealedThrough < time ? list.length
+                : eventBoundary(list, time, list.length, false, cursor?.available);
+            const low = eventBoundary(list, time, available, true, cursor?.index);
+            if (cursor) { cursor.available = available; cursor.index = low; }
             const ttl = this.expiry[channel] * 1000;
+            const preceding = list[low - 1], precedingTime = preceding ? sampleTime(preceding) : NaN;
+            const left = preceding && Number.isFinite(preceding.value) && (!ttl || time - precedingTime < ttl) ? preceding : null;
+            const method = this.sampleMethods?.[channel] ?? 'hold';
+            if (method === 'hold' || left && precedingTime === time) return left;
             const usable = i => {
                 if (i < 0 || i >= available) return null;
                 const point = list[i], delta = sampleTime(point) - time;
                 return Number.isFinite(point.value) && (!ttl || Math.abs(delta) < ttl) ? point : null;
             };
-            const left = usable(low - 1), right = usable(low);
-            const method = this.sampleMethods?.[channel] ?? 'hold';
-            if ((left && sampleTime(left) === time) || method === 'hold') return left;
+            const right = usable(low);
             if (method === 'nearest') {
                 if (right?.origin?.breakBefore && left) return left;
                 if (!left || !right) return left ?? right;
                 return time - sampleTime(left) < sampleTime(right) - time ? left : right;
             }
             if (!left || !right || right.origin?.breakBefore) return null;
-            const h = sampleTime(right) - sampleTime(left), x = (time - sampleTime(left)) / h;
+            const leftTime = sampleTime(left), h = sampleTime(right) - leftTime, x = (time - leftTime) / h;
             if (!(h > 0)) return null;
-            let value = left.value + x * (right.value - left.value);
+            const estimate = value => ({ value, timestamp: time, origin: x < .5 ? left.origin : right.origin });
+            const linear = (1 - x) * left.value + x * right.value;
             if (method === 'quadratic' || method === 'spline') {
-                let before = usable(low - 2), after = usable(low + 1);
-                if (left.origin?.breakBefore || before && sampleTime(before) >= sampleTime(left)) before = null;
-                if (after?.origin?.breakBefore || after && sampleTime(after) <= sampleTime(right)) after = null;
-                if (method === 'quadratic') {
-                    const extra = before ?? after;
-                    if (!extra) return null;
-                    const u = (sampleTime(extra) - sampleTime(left)) / h;
-                    value += x * (x - 1) * (extra.value - left.value - u * (right.value - left.value)) / (u * (u - 1));
-                } else {
-                    if (!before || !after) return null;
-                    // Natural cubic through the four adjacent samples, evaluated on its middle interval.
-                    const h0 = sampleTime(left) - sampleTime(before), h2 = sampleTime(after) - sampleTime(right);
-                    const slope = (right.value - left.value) / h;
-                    const r1 = 6 * (slope - (left.value - before.value) / h0);
-                    const r2 = 6 * ((after.value - right.value) / h2 - slope);
-                    const a = 2 * (h0 + h), b = 2 * (h + h2), det = a * b - h * h;
-                    const m1 = (b * r1 - h * r2) / det, m2 = (a * r2 - h * r1) / det;
-                    value += h * h / 6 * (((1 - x) ** 3 - (1 - x)) * m1 + (x ** 3 - x) * m2);
+                const neighbor = (index, step) => {
+                    const stamp = sampleTime(list[index]);
+                    for (let next = index + step; ; next += step) {
+                        const point = usable(next);
+                        if (!point || list[step < 0 ? next + 1 : next].origin?.breakBefore) return null;
+                        if (sampleTime(point) !== stamp) return { point, index: next };
+                    }
+                };
+                const before = neighbor(low - 1, -1), after = neighbor(low, 1);
+                if (method === 'spline') {
+                    let cubic = NaN;
+                    if (before && after) cubic = cubicCorrection([before.point, left, right, after.point], 1, x);
+                    else if (before) {
+                        const earlier = neighbor(before.index, -1);
+                        if (earlier) cubic = cubicCorrection([earlier.point, before.point, left, right], 2, x);
+                    } else if (after) {
+                        const later = neighbor(after.index, 1);
+                        if (later) cubic = cubicCorrection([left, right, after.point, later.point], 0, x);
+                    }
+                    if (Number.isFinite(linear + cubic)) return estimate(linear + cubic);
+                }
+                const extra = (before ?? after)?.point;
+                if (extra) {
+                    const u = (sampleTime(extra) - leftTime) / h;
+                    const quadratic = linear + x * (x - 1) * (extra.value - left.value - u * (right.value - left.value)) / (u * (u - 1));
+                    if (Number.isFinite(quadratic)) return estimate(quadratic);
                 }
             }
-            return Number.isFinite(value) ? { value, timestamp: time, origin: x < .5 ? left.origin : right.origin } : null;
+            return Number.isFinite(linear) ? estimate(linear) : null;
         }
         _eventValue(channel, time) { return this._estimate(channel, time)?.value ?? NaN; }
         _event(channel, time) { return this._estimate(channel, time); }
 
-        clear() { super.clear(); this.earliestTrace = Infinity; this.latestTrace = -Infinity; }
+        copyChannel(channel, start = 0, end = this.length) {
+            if (channel < 0 || channel >= this.rawChannelCount) return super.copyChannel(channel, start, end);
+            const first = Math.max(0, start), last = Math.min(this.length, end);
+            const values = new Float64Array(Math.max(0, last - first)), cursor = {};
+            for (let offset = 0; offset < values.length; offset++)
+                values[offset] = this._estimate(channel, this.timestampAt(first + offset), false, cursor)?.value ?? NaN;
+            return values;
+        }
+
+        clear() {
+            super.clear();
+            this.earliestTrace = Infinity; this.latestTrace = -Infinity;
+            this.rawTraceSnapshots = null;
+        }
 
         recordValues(time, values, origin, traceTime = time) {
             this.earliestTrace = Math.min(this.earliestTrace, traceTime);
@@ -244,48 +294,84 @@
 
         rawTraceAt(channel, start, end, bounds) {
             if (channel >= this.rawChannelCount) return null;
-            const entries = this.events.get(channel) ?? [], { first, last } = bounds ?? this.timeBounds(start, end);
+            const { first, last } = bounds ?? this.timeBounds(start, end);
+            if (this.rawTraceSnapshots?.version !== this.version)
+                this.rawTraceSnapshots = { version: this.version, traces: new Map() };
+            const { traces } = this.rawTraceSnapshots;
+            const key = [channel, first, last, this.sampleMethods?.[channel], this.expiry[channel]].join(':');
+            if (traces.has(key)) return traces.get(key);
+            const trace = this._readRawTrace(channel, first, last);
+            // The views also hold these snapshots, so share a bounded number of them.
+            if (trace.times.length <= 131072) {
+                if (traces.size === 8) traces.delete(traces.keys().next().value);
+                traces.set(key, trace);
+            }
+            return trace;
+        }
+
+        _readRawTrace(channel, first, last) {
+            const entries = this.events.get(channel) ?? [];
             let low = 0, high = entries.length;
             while (low < high) { const mid = (low + high) >>> 1; if (sampleTime(entries[mid]) < first) low = mid + 1; else high = mid; }
-            const times = [], values = [], expiry = this.expiry[channel] * 1000;
-            let recoveredIndices;
+            const start = low, end = eventBoundary(entries, last, entries.length, true, start);
+            const times = new Array(end - start), values = new Array(end - start), expiry = this.expiry[channel] * 1000;
+            let recoveredIndices, syntheticStart = false, length = 0;
+            const append = (time, value) => {
+                times[length] = time; values[length++] = value;
+            };
             const appendRecovered = time => {
                 const value = this._estimate(channel, time, true)?.value ?? NaN;
-                if (Number.isFinite(value)) (recoveredIndices ??= new Set()).add(values.length);
-                times.push(time);
-                values.push(value);
+                if (Number.isFinite(value)) (recoveredIndices ??= new Set()).add(length);
+                append(time, value);
             };
             const breaks = (left, right) => right.origin?.breakBefore || expiry > 0 && sampleTime(right) - sampleTime(left) >= expiry;
             const boundary = (left, right, time) => {
-                if (!left || !right || time <= sampleTime(left) || time >= sampleTime(right) || breaks(left, right) ||
-                    !Number.isFinite(left.value) || !Number.isFinite(right.value)) return false;
-                times.push(time);
-                values.push(left.value + (right.value - left.value) * (time - sampleTime(left)) / (sampleTime(right) - sampleTime(left)));
+                if (!left || !right || time <= sampleTime(left) || time >= sampleTime(right) ||
+                    right.origin?.breakBefore || !Number.isFinite(left.value) || !Number.isFinite(right.value)) return false;
+                let value;
+                if (right.origin?.missingBefore) value = this._estimate(channel, time, true)?.value;
+                else if (!breaks(left, right)) value = left.value + (right.value - left.value) *
+                    (time - sampleTime(left)) / (sampleTime(right) - sampleTime(left));
+                if (!Number.isFinite(value)) return false;
+                append(time, value);
                 return true;
             };
             const fillMissing = (left, right) => {
                 const { missingBefore: count, period } = right?.origin ?? {};
-                if (!left || !count) return false;
-                const startTime = sampleTime(right) - count * period;
-                const from = Math.max(0, Math.ceil((first - startTime) / period));
-                const to = Math.min(count - 1, Math.floor((last - startTime) / period));
+                if (!left || !Number.isSafeInteger(count) || count <= 0 || !(period > 0) || right.origin?.breakBefore) return false;
+                const leftTime = sampleTime(left), rightTime = sampleTime(right), startTime = rightTime - count * period;
+                const timeAt = slot => startTime + slot * period;
+                // Compare the timestamps we will plot to avoid dropping a slot on
+                // a viewport edge when a fractional period is rounded.
+                const lowerBound = accepts => {
+                    let low = 0, high = count;
+                    while (low < high) {
+                        const mid = Math.floor((low + high) / 2);
+                        if (accepts(timeAt(mid))) high = mid; else low = mid + 1;
+                    }
+                    return low;
+                };
+                const from = lowerBound(time => time >= first && time > leftTime);
+                const end = lowerBound(time => time > last || time >= rightTime);
+                if (!length && (from >= end || timeAt(from) !== first)) syntheticStart = boundary(left, right, first);
                 // Large outages need only a bounded number of display points.
-                const stride = Math.max(1, Math.ceil((to - from + 1) / 256));
-                for (let slot = from; slot <= to; slot += stride) appendRecovered(startTime + slot * period);
-                if (to > from && (to - from) % stride) appendRecovered(startTime + to * period);
+                const stride = Math.max(1, Math.ceil((end - from) / 256));
+                for (let slot = from; slot < end; slot += stride) appendRecovered(timeAt(slot));
+                if (end > from + 1 && (end - 1 - from) % stride) appendRecovered(timeAt(end - 1));
                 return true;
             };
-            const syntheticStart = !entries[low]?.origin?.missingBefore && boundary(entries[low - 1], entries[low], first);
-            let i = low;
-            for (; i < entries.length && sampleTime(entries[i]) <= last; i++) {
-                const entry = entries[i];
-                if (!fillMissing(entries[i - 1], entry) && times.length && breaks(entries[i - 1], entry)) {
-                    times.push(sampleTime(entry)); values.push(NaN);
-                }
-                times.push(sampleTime(entry)); values.push(entry.value);
+            if (!entries[start]?.origin?.missingBefore) syntheticStart = boundary(entries[start - 1], entries[start], first);
+            let previousTime = start ? sampleTime(entries[start - 1]) : NaN;
+            for (let i = start; i < end; i++) {
+                const entry = entries[i], time = sampleTime(entry), origin = entry.origin;
+                const repaired = origin?.missingBefore && fillMissing(entries[i - 1], entry);
+                if (!repaired && length && (origin?.breakBefore || expiry > 0 && time - previousTime >= expiry)) append(time, NaN);
+                append(time, entry.value);
+                previousTime = time;
             }
-            const syntheticEnd = last !== first && !fillMissing(entries[i - 1], entries[i]) &&
-                boundary(entries[i - 1], entries[i], last);
+            fillMissing(entries[end - 1], entries[end]);
+            const syntheticEnd = last !== first && times[length - 1] !== last && boundary(entries[end - 1], entries[end], last);
+            times.length = values.length = length;
             return { times, values, recoveredIndices, syntheticStart, syntheticEnd };
         }
     }
@@ -325,7 +411,7 @@
             for (let i = 0; i < count; i++) expiry[i] = holdMs / 1000;
             const frames = new WorkspaceSynchronizedFrames(count, this.capacity, { sampleRate, expiry, definitions: channelDefinitions,
                 names: channelNames, symbolVersion: 2, resolveFrame: this.resolveFrame, onChange: () => this.onChange() });
-            frames.retainedPredecessors = 2;
+            frames.retainedPredecessors = 3;
             frames.useFormulaInputsOnly = true;
             frames.sampleMethods = mappings.map(entry => config.methods[entry.sourceId] ?? 'hold');
             if (frames.estimatedMemoryBytes > this.memoryLimit()) throw new Error('全局通道状态超过内存预算');
@@ -480,17 +566,49 @@
             return added;
         }
 
-        createCursor(settings, source, epoch) {
-            const timing = this.timebases[settings.id] ?? S.normalizeSourceTimebase();
+        changeTimebaseForFuture({ settings, capture }, previousTiming, previousOffset) {
+            const id = settings.id, timing = this.timebases[id];
+            this.appliedTimebases[id] = timing;
+            const engine = capture.dataEngine;
+            if (engine.mode === 'Raw_Data' || !this.mappings.some(entry => entry.sourceId === id)) return;
+            const source = engine.mode === 'Self_Defined_Frame' ? engine.recordsSource : engine.arraySource;
+            if (!source || source.rebuilding) return;
+            const frames = source.frames;
+            const last = frames.frameOrdinalAt(frames.length - 1);
+            const existing = this.cursors.get(id);
+            if (!existing && !Number.isFinite(last)) return;
+            const cursor = existing ?? this.createCursor(id, source, capture.epoch, previousTiming, previousOffset);
+            this.cursors.set(id, cursor);
+            const from = Number.isFinite(last) ? last + 1 : (cursor.readFrame ?? -1) + 1;
+            const change = { from, timing, offset: settings.timeOffsetMs ?? 0 };
+            if (cursor.timebaseChanges.at(-1)?.from === from) cursor.timebaseChanges.pop();
+            cursor.timebaseChanges.push(change);
+            cursor.timebaseChanged = true;
+        }
+
+        setCursorClock(id, cursor, timing, offset) {
             const policy = JSON.stringify(timing);
-            let state = this.clockAnchors.get(settings.id);
+            let state = this.clockAnchors.get(id);
             if (!state || state.policy !== policy) {
                 state = { policy, anchors: new Map() };
-                this.clockAnchors.set(settings.id, state);
+                this.clockAnchors.set(id, state);
             }
-            const clock = new S.SourceTimebase(timing, { offsetMs: settings.timeOffsetMs ?? 0, sharedAnchor: this.sharedAnchor,
+            cursor.clock = new S.SourceTimebase(timing, { offsetMs: offset, sharedAnchor: this.sharedAnchor,
                 anchors: state.anchors, estimateLoss: true });
-            return { source, generation: source.generation, epoch, readFrame: null, pending: [], clock, timing };
+            if (Number.isFinite(cursor.lastTime)) cursor.clock.lastTime = cursor.lastTime - offset;
+            Object.assign(cursor, { timing, batchStamp: null, prunedOrder: null });
+        }
+
+        createCursor(id, source, epoch, timing = S.normalizeSourceTimebase(this.timebases[id]), offset = 0) {
+            const cursor = { source, generation: source.generation, epoch, readFrame: null, pending: [], timebaseChanges: [] };
+            this.setCursorClock(id, cursor, timing, offset);
+            return cursor;
+        }
+
+        markerIndex(timing, engine) {
+            const id = timing.mode === 'fixed' ? timing.sequenceChannelId : timing.mode === 'device' ? timing.timestampChannelId : null;
+            const channel = id && engine.globals.channelRecords?.find(entry => entry.type === 'raw' && entry.id === id);
+            return channel ? channel.number - 1 : -1;
         }
 
         collect(connections, cutoff = Infinity, limit = 1024) {
@@ -512,7 +630,8 @@
                     this.clear();
                     return this.collect(connections, cutoff, limit);
                 }
-                const cursor = previous ?? this.createCursor(settings, source, capture.epoch);
+                const cursor = previous ?? this.createCursor(settings.id, source, capture.epoch,
+                    this.timebases[settings.id], settings.timeOffsetMs ?? 0);
                 this.cursors.set(settings.id, cursor);
                 const { timing } = cursor;
                 if (timing.mode !== 'receive' && frames.length) {
@@ -528,11 +647,10 @@
                         }
                     }
                 }
-                const markerId = timing.mode === 'fixed' ? timing.sequenceChannelId : timing.mode === 'device' ? timing.timestampChannelId : null;
-                const channel = markerId ? engine.globals.channelRecords?.find(entry => entry.type === 'raw' && entry.id === markerId) : null;
                 const index = cursor.readFrame === null ? Math.max(0, frames.length - this.capacity)
                     : Math.max(0, cursor.readFrame + 1 - frames.frameOrdinalAt(0));
-                lanes.push({ cursor, columns, frames, protocol, engine, capture, index, markerIndex: channel ? channel.number - 1 : -1, id: settings.id });
+                lanes.push({ cursor, columns, frames, protocol, engine, capture, index,
+                    markerIndex: this.markerIndex(timing, engine), id: settings.id });
             }
             const events = [];
             limit = Math.min(limit, Math.max(1, Math.floor(131072 / Math.max(1, this.mappings.length))));
@@ -548,6 +666,12 @@
                     const byteOffset = frames.rawByteOffsetAt(index);
                     const frameIndex = frames.frameOrdinalAt(index);
                     cursor.readFrame = frameIndex;
+                    let nextTimebase;
+                    while (cursor.timebaseChanges[0]?.from <= frameIndex) nextTimebase = cursor.timebaseChanges.shift();
+                    if (nextTimebase) {
+                        this.setCursorClock(lane.id, cursor, nextTimebase.timing, nextTimebase.offset);
+                        lane.markerIndex = this.markerIndex(nextTimebase.timing, lane.engine);
+                    }
                     let projected, marker;
                     if (lane.protocol) {
                         const record = lane.engine.decode(index)?.record;
@@ -562,7 +686,8 @@
                     cursor.pauseSection = section;
                     if (cursor.timing.mode === 'fixed' && !cursor.timing.sequenceChannelId && cursor.batchStamp !== timestamp) {
                         cursor.batchStamp = timestamp;
-                        let lo = index + 1, hi = frames.length;
+                        const nextCutover = cursor.timebaseChanges[0]?.from ?? Infinity;
+                        let lo = index + 1, hi = Math.min(frames.length, nextCutover - frames.frameOrdinalAt(0));
                         while (lo < hi) {
                             const mid = (lo + hi) >>> 1;
                             if (frames.timestampAt(mid) === timestamp) lo = mid + 1; else hi = mid;

@@ -84,7 +84,8 @@ function restoreWidgetViewport(plotter, input) {
         view.autoFollow = saved.autoFollow;
         const total = mode === 'time' ? plotter.frames.length : widgetFrequencyTotal(plotter);
         const travel = Math.max(0, total - view.displayCount);
-        view.scrollOffset = saved.autoFollow ? travel : Math.round(saved.startFraction * travel);
+        const start = saved.startFraction * travel;
+        view.scrollOffset = saved.autoFollow ? travel : mode === 'time' ? Math.round(start) : start;
         const zoom = saved.yZoom;
         plotter._boxZoomY[mode] = zoom ? { min: zoom.min, max: zoom.max } : null;
         if (!zoom) plotter._zoomBaseY[mode] = null;

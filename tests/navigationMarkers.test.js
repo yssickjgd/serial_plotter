@@ -104,7 +104,7 @@ test('seconds labels stay inside the plotted width and leave room between adjace
         ctx: { measureText, fillText(text, left) { labels.push({ text, left }); },
             beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} }
     });
-    view._drawXAxisLabels(360, 150, 0, 5000, 5000, 5000, 'linear', null, { first: 7278120, last: 7283119 });
+    view._drawXAxisLabels(360, 150, 0, 5000, 5000, 'linear', null, { first: 7278120, last: 7283119 });
     assert.ok(labels.length > 2 && labels.length < 11);
     assert.ok(labels.every(({ text }) => text.endsWith(' s') && parseFloat(text) >= 7278.12 && parseFloat(text) <= 7283.119));
     assert.ok(labels.every(({ text, left }, i) => left >= 0 && left + measureText(text).width <= 360 &&

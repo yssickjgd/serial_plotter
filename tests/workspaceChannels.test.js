@@ -43,6 +43,41 @@ test('global sampling holds independent sources on a shared clock and expires mi
     assert.deepEqual(frames.provenanceInfoAt(2, 0).origins.map(origin => origin.sourceId).sort(), ['primary', 'serial-2']);
 });
 
+test('bulk synchronized reads retain individual values without per-sample random access', () => {
+    for (const method of ['hold', 'nearest', 'linear', 'quadratic', 'spline']) {
+        const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
+            methods: { primary: method }, holdMs: 12 }, 128);
+        const events = (from, to, index, pitch) => Array.from({ length: to - from }, (_, i) => {
+            const time = (i + from) * pitch;
+            return { time, values: [[index, i % 19 === 5 ? NaN : time ** 2]], origin: { breakBefore: i === 9 } };
+        });
+        capture.ingest([...events(0, 40, 0, 2.5), ...events(0, 60, 1, 2)].sort((a, b) => a.time - b.time));
+        // The primary source advances in order, but the other source has already sealed these times.
+        capture.ingest(events(40, 65, 0, 2.5));
+        const frames = capture.numericSource.frames;
+        const expected = Array.from({ length: 77 }, (_, i) => frames.getValue(0, i + 1));
+        assert.ok(expected.some(Number.isFinite));
+        const get = frames.getValue;
+        frames.getValue = () => { throw new Error('bulk reads must advance through the existing event order'); };
+        try { assert.deepEqual([...frames.copyChannel(0, 1, 78)], expected, method); }
+        finally { frames.getValue = get; }
+    }
+});
+
+test('widgets with the same global view share raw trace snapshots until the next capture update', () => {
+    const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1)] }, 128);
+    const events = time => ({ time, values: [[0, time]], origin: {} });
+    capture.ingest([events(0), events(1), events(2)]);
+    const frames = capture.numericSource.frames, trace = frames.rawTraceAt(0, 0, 3);
+    assert.equal(frames.rawTraceAt(0, 0, 3, { first: 0, last: 2 }), trace);
+    const other = frames.rawTraceAt(0, 0, 2, { first: 0, last: 1 });
+    assert.deepEqual(other.times, [0, 1]);
+    assert.equal(frames.rawTraceAt(0, 0, 3), trace, 'different widget windows can coexist');
+    capture.ingest([events(3)]);
+    assert.notEqual(frames.rawTraceAt(0, 0, 3), trace);
+    assert.deepEqual(frames.rawTraceAt(0, 0, 4).values, [0, 1, 2, 3]);
+});
+
 function lane(id, frames, { timeOffsetMs = 0 } = {}) {
     const history = new CaptureHistory();
     const buffer = new FrameBuffer(2, 128);
@@ -173,6 +208,72 @@ test('quadratic and natural cubic interpolation have distinct nonlinear results;
     }
 });
 
+test('high-order recovery uses distinct timestamps and supports one-sided cubic stencils', () => {
+    const squared = times => times.map(time => ({ time, values: [[0, time ** 2]], origin: time === 5
+        ? { missingBefore: 2, period: 1 } : {} }));
+    for (const method of ['quadratic', 'spline']) {
+        const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1)],
+            methods: { primary: method }, channelDefinitions: [{ number: 2, type: 'formula', expression: 'CH1' }] }, 40);
+        capture.ingest(squared([0, 0, 1, 1, 2, 2, 5]));
+        const frames = capture.numericSource.frames;
+        const trace = frames.rawTraceAt(0, 0, frames.length);
+        const expected = method === 'quadratic' ? [9, 16] : [11 - 140 / 93, 18 - 112 / 93];
+        for (const [i, time] of [3, 4].entries()) {
+            const index = trace.times.indexOf(time);
+            assert.ok(Math.abs(trace.values[index] - expected[i]) < 1e-10, method);
+            assert.ok(trace.recoveredIndices.has(index), method);
+            assert.ok(Math.abs(frames.getValue(1, time) - expected[i]) < 1e-10, method + ' formula');
+        }
+    }
+});
+
+test('high-order recovery falls back between valid brackets and leaves expired or disconnected data blank', () => {
+    for (const method of ['quadratic', 'spline']) {
+        const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1)],
+            methods: { primary: method }, holdMs: 5,
+            channelDefinitions: [{ number: 2, type: 'formula', expression: 'CH1' }] }, 40);
+        capture.ingest([
+            { time: 0, values: [[0, 0]], origin: {} },
+            { time: 6, values: [[0, 12]], origin: { missingBefore: 5, period: 1 } },
+            { time: 10, values: [[0, 20]], origin: { breakBefore: true } }
+        ]);
+        const frames = capture.numericSource.frames;
+        const trace = frames.rawTraceAt(0, 0, frames.length);
+        assert.deepEqual([...trace.recoveredIndices ?? []].map(i => [trace.times[i], trace.values[i]]),
+            [[2, 4], [3, 6], [4, 8]], method);
+        assert.ok(Number.isNaN(frames.getValue(1, 1)), method + ' expired right sample');
+        assert.ok(Number.isNaN(frames.getValue(1, 5)), method + ' expired left sample');
+        assert.ok(Number.isNaN(frames.getValue(1, 8)), method + ' stream boundary');
+        assert.ok(Number.isNaN(frames.getValue(1, 9)), method + ' stream boundary');
+    }
+});
+
+test('zooming between recovered samples keeps a finite line without adding markers', () => {
+    const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1)],
+        methods: { primary: 'spline' } }, 40);
+    capture.ingest([
+        { time: 0, values: [[0, 0]], origin: {} },
+        { time: 3, values: [[0, 6]], origin: { missingBefore: 2, period: 1 } }
+    ]);
+    const frames = capture.numericSource.frames;
+    const trace = frames.rawTraceAt(0, 0, frames.length, { first: 1.2, last: 1.8 });
+    assert.deepEqual(trace.times, [1.2, 1.8]);
+    assert.ok(trace.values.every((value, index) => Math.abs(value - [2.4, 3.6][index]) < 1e-10));
+    assert.equal(trace.syntheticStart && trace.syntheticEnd, true);
+    assert.equal(trace.recoveredIndices, undefined);
+
+    const start = 1700000000000, period = 1000 / 44100, end = start + 7 * period;
+    capture.clear();
+    capture.ingest([
+        { time: start, values: [[0, 0]], origin: {} },
+        { time: end, values: [[0, 6]], origin: { missingBefore: 6, period } }
+    ]);
+    const slot = end - 6 * period + period;
+    const edge = frames.rawTraceAt(0, 0, frames.length, { first: slot, last: slot });
+    assert.deepEqual(edge.times, [slot]);
+    assert.deepEqual([...edge.recoveredIndices], [0]);
+});
+
 test('multiple origins skip time spent paused in both timebases, including on history replay', () => {
     const a = lane('primary', [[1000, 1], [1001, 2], [6002, 3], [6003, 4]]);
     const b = lane('serial-2', [[1000, 5], [1001, 6], [6002, 7], [6003, 8]]);
@@ -210,7 +311,8 @@ test('sustained loss shifts only the lagging source and repairs its plotted gap 
     const samples = Array.from({ length: 125 }, (_, i) => [1000 + i, i]);
     const a = lane('primary', samples.filter((_, i) => i < 3 || i >= 9));
     const b = lane('serial-2', samples);
-    for (const method of ['linear', 'hold', 'nearest']) {
+    const expected = { linear: 108 + 1 / 7, hold: 108, nearest: 108, quadratic: 108 + 11 / 14, spline: 108 + 27 / 49 };
+    for (const [method, value] of Object.entries(expected)) {
         const capture = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
             timebases: { primary: { mode: 'fixed' }, 'serial-2': { mode: 'fixed' } },
             methods: { primary: method } }, 128);
@@ -220,7 +322,7 @@ test('sustained loss shifts only the lagging source and repairs its plotted gap 
         assert.equal(frames.locateOrigin('primary', 103, true).origin.alignedTime, 1109);
         assert.equal(frames.locateOrigin('primary', 103, true).origin.missingBefore, 6);
         assert.equal(frames.locateOrigin('serial-2', 5, true).origin.alignedTime, 1005);
-        assert.equal(trace.values[trace.times.indexOf(1103)], method === 'linear' ? 108 + (109 - 108) / 7 : 108);
+        assert.ok(Math.abs(trace.values[trace.times.indexOf(1103)] - value) < 1e-10, method);
         const repairedTimes = [...trace.recoveredIndices].map(index => trace.times[index]);
         assert.deepEqual(repairedTimes, [1103, 1104, 1105, 1106, 1107, 1108]);
         assert.equal(trace.values.at(-1), 124);

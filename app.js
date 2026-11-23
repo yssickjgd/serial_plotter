@@ -11,7 +11,7 @@ async function startSerialPlotterApplication() {
     const taskProgress = el('history-rebuild-progress'), workspaceTaskSlot = el('workspace-task-slot');
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
     let boundExportSourceId = null, boundExportFormat = null, bindingExport = false;
-    let widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
+    let widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null, workspaceChannels;
     const connectionSources = new Map();
     let nextConnectionSourceNumber = 2;
     const captureQuota = (global, count) => Math.floor(Number(global.captureMemoryMiB) * 1048576 / (count + 1));
@@ -173,11 +173,14 @@ async function startSerialPlotterApplication() {
         }
     }
     function scheduleSourceUi() {
+        if (workspaceChannels?.mappings.length) scheduleWorkspaceChannelPump();
+        scheduleSourceIndicators();
+    }
+    function scheduleSourceIndicators() {
         if (disposed || uiFrame !== null) return;
         uiFrame = requestAnimationFrame(() => {
             uiFrame = null;
             if (disposed) return;
-            pumpWorkspaceChannels();
             showProgress(null, null); tools?.syncPaused(); syncExportAvailability(); renderAlignmentTimebaseStatus();
         });
     }
@@ -204,7 +207,7 @@ async function startSerialPlotterApplication() {
         }
     });
     const dataEngine = new S.DataEngine(service, initial.dataEngine, globals, { onProgress: showProgress });
-    const workspaceChannels = new S.WorkspaceChannelCapture(initial.workspaceChannels, Number(globals.maxPoints), {
+    workspaceChannels = new S.WorkspaceChannelCapture(initial.workspaceChannels, Number(globals.maxPoints), {
         memoryLimit: () => captureQuota(globals, connectionSources.size + 1),
         resolveFrame(origin) {
             const capture = origin.sourceId === 'primary' ? service : connectionSources.get(origin.sourceId)?.capture;
@@ -216,9 +219,26 @@ async function startSerialPlotterApplication() {
         }
     });
     workspaceChannels.onChange = () => {
-        if (!disposed) widgets?.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
+        if (disposed) return;
+        widgets?.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
+        scheduleSourceIndicators();
     };
-    let workspaceChannelTimer = null, workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null;
+    let workspaceChannelTimer = null, workspaceChannelDue = Infinity;
+    let workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null;
+    function scheduleWorkspaceChannelPump(delay = 0) {
+        if (disposed || service.paused && !replayWorkspace && !alignmentReplay) return;
+        const due = performance.now() + delay;
+        if (workspaceChannelTimer !== null) {
+            if (workspaceChannelDue <= due) return;
+            clearTimeout(workspaceChannelTimer);
+        }
+        workspaceChannelDue = due;
+        // Parse and align received batches independently of the browser paint cycle.
+        workspaceChannelTimer = setTimeout(() => {
+            workspaceChannelTimer = null;
+            pumpWorkspaceChannels();
+        }, delay);
+    }
     function scheduleWorkspaceReplay() { replayWorkspace = true; scheduleSourceUi(); }
     function cancelAlignmentReplay() {
         alignmentReplay?.capture.dispose();
@@ -294,9 +314,7 @@ async function startSerialPlotterApplication() {
         }
         const pending = Number.isFinite(next);
         replayWorkspace = (replayWorkspace || flush) && pending;
-        if (pending && workspaceChannelTimer === null) workspaceChannelTimer = setTimeout(() => {
-            workspaceChannelTimer = null; pumpWorkspaceChannels();
-        }, Math.max(0, Math.min(1000, next - cutoff)));
+        if (pending) scheduleWorkspaceChannelPump(Math.max(0, Math.min(1000, next - cutoff)));
     }
     const serialAdapter = new S.SerialEngine(), netAdapter = new S.NetEngine();
     const portBindings = new S.SerialPortBindings(initial.serialSources.bindings);
@@ -363,6 +381,19 @@ async function startSerialPlotterApplication() {
         status(panel.errorId, '');
         showTimebaseFields(panel); renderAlignmentTimebaseStatus();
     }
+    const sourcePlotTimelines = new WeakMap();
+    function updateSourcePlotTimelines(capture, previous, timing) {
+        if (previous.mode === timing.mode && (timing.mode !== 'fixed' || previous.sampleRate === timing.sampleRate)) return;
+        for (const source of capture.sources) {
+            if (source.kind !== 'numeric' || source === capture.dataEngine.syncSource) continue;
+            if (capture.rebuildHistory) { sourcePlotTimelines.delete(source); continue; }
+            if (!source.frames?.length || !source.frames.frameOrdinalAt || source.rebuilding) continue;
+            const saved = sourcePlotTimelines.get(source);
+            const timeline = saved?.valid ? saved : new S.SourcePlotTimeline(source, previous);
+            timeline.change(timing);
+            sourcePlotTimelines.set(source, timeline);
+        }
+    }
     function commitAlignment(panel, source = panel.source()) {
         if (!source) return true;
         try {
@@ -387,7 +418,25 @@ async function startSerialPlotterApplication() {
             workspaceChannels.methods[id] = method;
             workspaceChannels.timebases[id] = timing;
             try {
-                realignWorkspaceChannels(id);
+                if (source.capture.rebuildHistory) realignWorkspaceChannels(id);
+                else {
+                    if (JSON.stringify(previous) !== JSON.stringify(timing) || originalSettings.timeOffsetMs !== nextSettings.timeOffsetMs) {
+                        const staged = alignmentReplay?.capture;
+                        if (staged) {
+                            const prior = S.normalizeSourceTimebase(staged.timebases[id]);
+                            staged.timebases[id] = timing;
+                            staged.changeTimebaseForFuture(source, prior, originalSettings.timeOffsetMs ?? 0);
+                        }
+                        workspaceChannels.changeTimebaseForFuture(source, previous, originalSettings.timeOffsetMs ?? 0);
+                    }
+                    for (const active of [workspaceChannels, alignmentReplay?.capture]) if (active) {
+                        active.methods[id] = method;
+                        active.mappings.forEach((entry, index) => {
+                            if (entry.sourceId === id) active.numericSource.frames.sampleMethods[index] = method;
+                        });
+                    }
+                    scheduleSourceUi();
+                }
             } catch (error) {
                 source.settings = originalSettings;
                 if (oldMethod === undefined) delete workspaceChannels.methods[id];
@@ -396,6 +445,7 @@ async function startSerialPlotterApplication() {
                 else delete workspaceChannels.timebases[id];
                 throw error;
             }
+            updateSourcePlotTimelines(source.capture, previous, timing);
             for (const widget of widgets.widgets.values()) {
                 if (widget.type === 'wave' && widget.capture === source.capture) widgets.applySettings(widget);
             }
@@ -806,7 +856,7 @@ async function startSerialPlotterApplication() {
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
         onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
     widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices, getPrimaryConnectionName: primaryConnectionName,
-        getWorkspaceCapture: () => workspaceChannels,
+        getWorkspaceCapture: () => workspaceChannels, getSourcePlotTimeline: source => sourcePlotTimelines.get(source),
         onTextPreparation: (widget, fraction, done, total) => setTaskProgress(widget,
             fraction === null || !total ? null : '正在准备字节流文本 · ' + widget.title, fraction,
             total ? bytesLabel(done) + ' / ' + bytesLabel(total) : ''),
@@ -873,7 +923,8 @@ async function startSerialPlotterApplication() {
         const sourceId = widget => widget?.settings.connectionSource ?? 'primary';
         const from = sourceId(origin), to = sourceId(target), shared = workspaceChannels.numericSource.frames;
         const active = workspaceChannels.appliedTimebases;
-        const projected = id => Boolean(active[id]?.mode && active[id].mode !== 'receive');
+        const projected = id => Boolean(active[id]?.mode && active[id].mode !== 'receive' ||
+            workspaceChannels.cursors.get(id)?.timebaseChanged);
         const merged = from === 'workspace' || to === 'workspace';
         if (!projected(from) && !projected(to) && !merged) return undefined;
         const originalFrames = origin?.source.frames;

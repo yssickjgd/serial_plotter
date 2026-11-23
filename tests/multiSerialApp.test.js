@@ -10,6 +10,40 @@ function addSerial(f, fields = {}) {
     saveSerialConfig(f);
 }
 
+test('single-source fixed-rate waves can choose samples and restore the selection without changing the source clock', t => {
+    const setup = bootApplication(); t.after(() => setup.app.dispose());
+    const legacy = setup.app.getConfig();
+    legacy.workspaceChannels.timebases.primary = { mode: 'fixed', sampleRate: 1000 };
+    legacy.widgets = [{ id: 'wave-legacy', type: 'wave', title: '旧波形', settings: { plotTimeXUnit: 'samples' } }];
+    const f = bootApplication(legacy); t.after(() => f.app.dispose());
+    f.app.widgets.activate('wave-legacy');
+    const wave = f.app.widgets.active, axis = f.get('plot-time-x-unit');
+    assert.equal(axis.value, 's', 'legacy fixed-rate waves keep seconds by default');
+    assert.equal(axis.disabled, false);
+
+    f.change('plot-time-x-unit', 'samples');
+    assert.equal(wave.view.timeXUnit, 'samples');
+    assert.equal(wave.view.sampleRateHz, 1000);
+    assert.equal(f.app.getConfig().workspaceChannels.timebases.primary.mode, 'fixed');
+
+    const restored = bootApplication(JSON.parse(JSON.stringify(f.app.getConfig())));
+    t.after(() => restored.app.dispose());
+    restored.app.widgets.activate(wave.id);
+    assert.equal(restored.get('plot-time-x-unit').value, 'samples');
+    assert.equal(restored.app.widgets.active.view.timeXUnit, 'samples');
+
+    f.click('workspace-channel-auto-map');
+    f.change('widget-connection-source', 'workspace');
+    assert.equal(axis.disabled, true);
+    assert.equal(axis.value, 's');
+    assert.equal(wave.view.timeXUnit, 's');
+    f.change('widget-connection-source', 'primary');
+    assert.equal(axis.disabled, false);
+    assert.equal(axis.value, 'samples');
+    f.change('plot-time-x-unit', 's');
+    assert.equal(wave.view.timeXUnit, 's');
+});
+
 async function waitForConnectionButton(f, id) {
     const button = f.get(id);
     for (let attempt = 0; button.disabled && attempt < 10; attempt++) await f.tick(1);
@@ -287,6 +321,61 @@ test('global channel mapping packs two transports and exposes the same synchroni
     assert.equal(restored.app.workspaceChannels.dataEngine.globals.channelDefinitions[0].number, 3);
 });
 
+test('global waveforms receive aligned batches while painting is deferred and another widget is active', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    addSerial(f);
+    f.selectConnection('serial-2', 'engine-parsing');
+    f.change('engine-mode', 'Data_Array');
+    await f.app.engineView.apply();
+    f.click('serial-manager-close');
+    f.click('workspace-channel-auto-map');
+    const workspace = f.app.workspaceChannels, widgets = f.app.widgets;
+    assert.deepEqual(Array.from(workspace.mappings, entry => entry.sourceId), ['primary', 'serial-2']);
+    const wave = widgets.create({ type: 'wave', settings: { connectionSource: 'workspace' } });
+    widgets.setChannelVisible(0, true); widgets.setChannelVisible(1, true);
+    const other = widgets.create({ type: 'byte' });
+    await f.tick(10);
+    assert.equal(widgets.active, other);
+
+    // Hold repaint callbacks while letting the ordinary capture and timer callbacks run.
+    const deferred = new Map(f.rafs);
+    f.rafs.clear();
+    const requestFrame = f.context.requestAnimationFrame, cancelFrame = f.context.cancelAnimationFrame;
+    f.context.requestAnimationFrame = callback => {
+        const id = requestFrame(callback);
+        f.rafs.delete(id);
+        deferred.set(id, callback);
+        return id;
+    };
+    f.context.cancelAnimationFrame = id => { deferred.delete(id); cancelFrame(id); };
+    const wire = value => {
+        const bytes = Uint8Array.of(0xab, 0, 0, 0, 0);
+        new DataView(bytes.buffer).setFloat32(1, value, true);
+        return bytes;
+    };
+    const now = Date.now() - 30, incoming = [f.app.service, f.app.serialSources.get('serial-2').capture];
+    const before = wave.view.completedDraws;
+    try {
+        for (const [i, value] of [1, 10].entries()) {
+            incoming[i].receive(wire(value), { timestamp: now - 5 });
+            incoming[i].receive(wire(value * 2), { timestamp: now });
+        }
+        await f.tick(10);
+        assert.equal(wave.view.completedDraws, before);
+        assert.equal(workspace.numericSource.frames.liveTimeBounds(1000)?.last, now,
+            'capture alignment must run before the next paint');
+        assert.deepEqual([0, 1].map(channel =>
+            workspace.numericSource.frames.rawTraceAt(channel, 0, 1, { first: now, last: now }).values.at(-1)), [2, 20]);
+    } finally {
+        f.context.requestAnimationFrame = requestFrame;
+        f.context.cancelAnimationFrame = cancelFrame;
+        for (const [id, callback] of deferred) f.rafs.set(id, callback);
+    }
+    await f.tick(10);
+    assert.ok(wave.view.completedDraws > before);
+    assert.equal(widgets.active, other);
+});
+
 test('source timebase settings update retained samples atomically and survive configuration reload', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     f.change('chk-header', false); f.change('chk-footer', false);
@@ -323,6 +412,33 @@ test('source timebase settings update retained samples atomically and survive co
     f.get('serial-config-alignment').dispatchEvent({ type: 'pointerleave' });
     assert.match(f.get('channel-alignment-status').textContent, /采样率/);
     assert.equal(combined.timebases.primary.sampleRate, 1000);
+});
+
+test('changing a timebase without rebuilding preserves the time of already received frames', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    f.change('chk-header', false); f.change('chk-footer', false);
+    f.change('data-type', 'uint8'); f.change('channels-count', '1');
+    await f.app.engineView.apply();
+    f.click('workspace-channel-auto-map');
+    const { service, workspaceChannels } = f.app;
+    service.receive(Uint8Array.of(10, 11), { timestamp: 1000 });
+    await f.tick(100);
+    const history = workspaceChannels.numericSource.frames;
+    const single = f.app.widgets.create({ type: 'wave', settings: { plotTimeXUnit: 's', plotTimeXUnitExplicit: true } });
+    assert.equal(single.view.timeXUnit, 's');
+    const trace = () => Array.from(history.rawTraceAt(0, 0, history.length).times);
+    assert.deepEqual(trace(), [1000, 1000]);
+    f.change('rebuild-history', false);
+    service.receive(Uint8Array.of(12, 13), { timestamp: 1005 });
+    f.change('sidebar-timebase-mode', 'fixed');
+    f.get('sidebar-source-alignment').dispatchEvent({ type: 'pointerleave' });
+    service.receive(Uint8Array.of(14, 15), { timestamp: 1010 });
+    await f.tick(100);
+    assert.equal(workspaceChannels.numericSource.frames, history);
+    assert.deepEqual(trace(), [1000, 1000, 1005, 1005, 1010, 1011]);
+    assert.deepEqual(Array.from({ length: 6 }, (_, index) => single.view.timeProjection.timestampAt(index)),
+        [0, 0, 5, 5, 6, 7]);
+    assert.equal(single.view.sampleRateHz, 1000);
 });
 
 test('cross-connection time navigation uses timestamps and applies a signed millisecond offset', async t => {

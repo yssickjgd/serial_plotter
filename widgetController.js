@@ -2,12 +2,14 @@
 class WidgetController {
     constructor({ document, service, globals, workspace, onChange = () => {}, onRulesChange = () => {}, onActivate = () => {},
         onBeforeChannelRenumber = () => {}, onChannelMetadataChange = () => {}, getConnections = () => [],
-        getPrimaryConnectionName = () => '主连接', getWorkspaceCapture = () => null, onTextPreparation = null }) {
+        getPrimaryConnectionName = () => '主连接', getWorkspaceCapture = () => null, getSourcePlotTimeline = () => null,
+        onTextPreparation = null }) {
         this.document = document;
         this.service = service;
         this.getConnections = getConnections;
         this.getPrimaryConnectionName = getPrimaryConnectionName;
         this.getWorkspaceCapture = getWorkspaceCapture;
+        this.getSourcePlotTimeline = getSourcePlotTimeline;
         this.globals = globals;
         this.workspace = workspace;
         this.onChange = onChange;
@@ -220,6 +222,8 @@ class WidgetController {
             alignment.textContent = settings.plotViewMode === 'time' ? capture.alignmentLabel ?? '全局通道 · 近似对齐' : '全局通道 · 同步采样频谱';
             alignment.title = alignment.textContent;
             const timing = this.getWorkspaceCapture()?.timebases?.[settings.connectionSource ?? 'primary'];
+            const timeline = !combined && !response ? this.getSourcePlotTimeline(widget.source) : null;
+            view.timeProjection = timeline?.valid ? timeline : null;
             view.receiveTimeAxis = !combined && !response && timing?.mode !== 'fixed';
             view.fixedTimeRate = !response && !combined && timing?.mode === 'fixed' && widget.source !== capture.dataEngine?.syncSource
                 ? timing.sampleRate : 0;
@@ -251,7 +255,9 @@ class WidgetController {
             view.setPlotWindowPoints(Number(response
                 ? settings.plotResponseTimePoints : this.globals.plotWindowPoints));
             const db = this._magnitudeUnit(settings) === 'db';
-            view.setDisplayOptions({ displayMode: settings.plotViewMode, timeXUnit: (view.fixedTimeRate || combined && !response) ? 's' : settings.plotTimeXUnit,
+            // A fixed-rate source defaults to seconds until the user chooses a unit.
+            const useSeconds = !response && (combined || ((view.fixedTimeRate || view.timeProjection) && !settings.plotTimeXUnitExplicit));
+            view.setDisplayOptions({ displayMode: settings.plotViewMode, timeXUnit: useSeconds ? 's' : settings.plotTimeXUnit,
                 freqXUnit: settings.plotFreqXUnit, freqXScale: settings.plotFreqXScale, freqYScale: settings.plotFreqYScale,
                 magnitudeUnit: this._magnitudeUnit(settings), dbFactor: settings.plotDbFactor,
                 phaseUnwrap: settings.plotPhaseUnwrap, phaseUnit: settings.plotPhaseUnit, responseSampleRate: settings.plotResponseSampleRate,
@@ -331,8 +337,8 @@ class WidgetController {
             if (field.type === 'checkbox') field.checked = widget.settings[key]; else field.value = widget.settings[key];
         }
         const timeAxis = this.element('plot-time-x-unit');
-        timeAxis.disabled = widget.type === 'wave' && (Boolean(widget.view.fixedTimeRate) || Boolean(widget.view.frames.multipleSources));
-        if (timeAxis.disabled) timeAxis.value = 's';
+        timeAxis.disabled = widget.type === 'wave' && widget.settings.connectionSource === 'workspace';
+        if (widget.type === 'wave') timeAxis.value = widget.view.timeXUnit;
         this.syncGlobals();
         if (widget.type === 'wave') this._bindYBounds(widget);
         else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.view.mode); }
@@ -808,8 +814,10 @@ class WidgetController {
         for (const [key, id] of Object.entries(this.fieldIds)) this._listen(this.element(id), 'change', () => {
             const widget = this.active;
             if (!widget || widget.type === 'pose' || this.binding) return;
-            const field = this.element(id), candidate = { ...widget.settings,
-                [key]: field.type === 'checkbox' ? field.checked : field.value };
+            const field = this.element(id);
+            if (key === 'plotTimeXUnit' && field.disabled) return;
+            const candidate = { ...widget.settings, [key]: field.type === 'checkbox' ? field.checked : field.value };
+            if (key === 'plotTimeXUnit') candidate.plotTimeXUnitExplicit = true;
             try {
                 if (widget.type === 'byte' && ['textEncoding', 'textBoundary'].includes(key)) {
                     this.updateTextRules({ [key]: field.value });

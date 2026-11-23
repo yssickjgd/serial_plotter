@@ -286,7 +286,45 @@
         }
     }
 
-    const api = { normalizeSourceTimebase, SourceTimebase, cloneSourceTimebaseAnchors };
+    // A single-source wave can preserve its seconds axis without copying retained samples.
+    class SourcePlotTimeline {
+        constructor(source, timing) {
+            this.source = source;
+            this.frames = source.frames;
+            this.generation = source.generation;
+            const rate = timing.mode === 'fixed' ? timing.sampleRate : 0;
+            this.sections = [{ from: 0, rate, start: 0, offset: -this.frames.originTimestamp }];
+        }
+
+        get valid() { return this.source.frames === this.frames && this.source.generation === this.generation; }
+
+        timestampAt(index) {
+            const ordinal = this.frames.frameOrdinalAt(index);
+            let low = 1, high = this.sections.length;
+            while (low < high) {
+                const mid = (low + high) >>> 1;
+                if (this.sections[mid].from <= ordinal) low = mid + 1; else high = mid;
+            }
+            const { from, rate, start, offset } = this.sections[low - 1];
+            return rate ? start + (ordinal - from) * 1000 / rate : this.frames.timestampAt(index) + offset;
+        }
+
+        change(timing) {
+            const last = this.frames.length - 1;
+            const ordinal = this.frames.frameOrdinalAt(last);
+            const secondsAxis = this.timestampAt(last);
+            if (!Number.isFinite(secondsAxis)) return;
+            const rate = timing.mode === 'fixed' ? timing.sampleRate : 0, from = ordinal + 1;
+            const start = rate ? secondsAxis + 1000 / rate : secondsAxis;
+            const offset = secondsAxis - this.frames.timestampAt(last);
+            if (this.sections.at(-1).from === from) this.sections.pop();
+            this.sections.push({ from, rate, start, offset });
+            const first = this.frames.frameOrdinalAt(0);
+            while (this.sections.length > 1 && this.sections[1].from <= first) this.sections.shift();
+        }
+    }
+
+    const api = { normalizeSourceTimebase, SourceTimebase, cloneSourceTimebaseAnchors, SourcePlotTimeline };
     if (typeof module !== 'undefined') module.exports = api;
     globalThis.SerialPlotter ??= {};
     Object.assign(globalThis.SerialPlotter, api);

@@ -113,7 +113,8 @@ function validateConfig(config) {
         (String(config.idleGapSeconds).trim() === '' || !Number.isFinite(Number(config.idleGapSeconds)) ||
             Number(config.idleGapSeconds) < 0.001 || Number(config.idleGapSeconds) * 1000 > 2147483647))
         throw new RangeError('空闲断帧间隔需为至少 0.001 s 的有限数值，且不超过计时器范围');
-    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc', 'plotPhaseUnwrap', 'rebuildHistory']) {
+    for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc',
+        'plotPhaseUnwrap', 'plotTimeXUnitExplicit', 'rebuildHistory']) {
         if (config[key] !== undefined && typeof config[key] !== 'boolean')
             throw new Error(`${key} 必须是布尔值`);
     }

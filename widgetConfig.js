@@ -19,7 +19,8 @@ const GLOBAL_DEFAULTS = {
     footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
 const WAVE_DEFAULTS = {
-    connectionSource: 'primary', engineSource: null, plotViewMode: 'time', plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
+    connectionSource: 'primary', engineSource: null, plotViewMode: 'time',
+    plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotFreqXUnit: 'hz',
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
     plotResponseSampleRate: '0', plotResponseTimePoints: '1000', responseChannels: [], responseViewport: null,

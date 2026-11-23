@@ -183,6 +183,30 @@ test('worker FFT presents only completed spectra and ignores obsolete settings r
     plotter.dispose();
 });
 
+test('time plots update dominant frequency at a separate cadence while waveform updates continue', () => {
+    const { plotter, context } = createPlotter();
+    let now = 0, transforms = 0;
+    context.performance = { now: () => now };
+    const fft = context.SerialPlotter.prepareFrequencySeries;
+    context.SerialPlotter.prepareFrequencySeries = (...args) => { transforms++; return fft(...args); };
+    plotter.setDisplayOptions({ displayMode: 'time' });
+    const initial = plotter.completedDraws;
+    plotter.draw();
+    for (now = 10; now <= 90; now += 10) {
+        plotter.addFrame([now]);
+        plotter.draw();
+    }
+    assert.equal(transforms, 1);
+    assert.equal(plotter.completedDraws - initial, 10);
+    assert.ok(plotter._drawState.max >= 90);
+    plotter.addFrame([100]); plotter.draw();
+    assert.equal(transforms, 2);
+    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    plotter.addFrame([101]); plotter.draw();
+    assert.equal(transforms, 3);
+    plotter.dispose();
+});
+
 test('Canvas worker FFT starts the latest snapshot without a cooldown or stacked jobs', async () => {
     const pending = [];
     const pool = { runTask(task) { return new Promise(resolve => pending.push({ task, resolve })); } };
@@ -341,6 +365,85 @@ test('wheel zoom keeps the cursor near the same frequency on a log axis', () => 
     canvasEvents.get('wheel')({ clientX: plotW / 2, clientY: 100,
         deltaY: -1, preventDefault() {} });
     assert.ok(plotter.vp.frequency.scrollOffset <= 2);
+});
+
+for (const mode of ['frequency', 'phase']) {
+    test('logarithmic ' + mode + ' wheel zoom keeps the frequency under the cursor', () => {
+        const { plotter, labels, canvasEvents } = createPlotter();
+        plotter.setSampleRateHz(1024);
+        plotter.setDisplayOptions({ displayMode: mode, freqXUnit: 'hz', freqXScale: 'log' });
+        let geometry;
+        const hoveredFrequency = () => {
+            labels.length = 0;
+            plotter.draw();
+            return Number.parseFloat(labels.find(label => label.startsWith('Freq: '))?.slice(6));
+        };
+        plotter.draw();
+        geometry = plotter._drawState;
+        const x = geometry.plotW * .5, y = geometry.plotH / 2;
+        plotter.mousePos = { x, y };
+        const initial = hoveredFrequency();
+        const count = plotter._drawState.visibleCnt;
+        canvasEvents.get('wheel')({ clientX: x, clientY: y, deltaY: -1, preventDefault() {} });
+        assert.ok(Math.abs(hoveredFrequency() - initial) <= .002);
+        assert.ok(plotter._drawState.visibleCnt < count);
+        canvasEvents.get('wheel')({ clientX: x, clientY: y, deltaY: 1, preventDefault() {} });
+        assert.ok(Math.abs(hoveredFrequency() - initial) <= .002);
+    });
+}
+
+function createUnevenReceivePlot() {
+    const { plotter, labels, canvasEvents } = createPlotter();
+    plotter.clear();
+    plotter.receiveTimeAxis = true;
+    plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 's' });
+    for (let i = 0; i < 200; i++) {
+        plotter.addFrame([i], undefined, '', i + 1, 100000 + (i < 100 ? i : 100 + (i - 100) * 10));
+    }
+    plotter.draw();
+    return { plotter, labels, canvasEvents };
+}
+
+test('receive-time wheel zoom anchors on the shown time even with uneven arrivals', () => {
+    const { plotter, labels, canvasEvents } = createUnevenReceivePlot();
+    const { plotW, plotH } = plotter._drawState;
+    plotter.mousePos = { x: plotW * .75, y: plotH / 2 };
+    const hoveredTime = () => {
+        labels.length = 0;
+        plotter.draw();
+        return Number.parseFloat(labels.find(label => label.startsWith('Time: '))?.slice(6));
+    };
+    const initial = hoveredTime();
+    canvasEvents.get('wheel')({ clientX: plotter.mousePos.x, clientY: plotter.mousePos.y, deltaY: -1, preventDefault() {} });
+    assert.ok(Math.abs(hoveredTime() - initial) <= .01);
+    assert.equal(plotter._drawState.visibleCnt, 160);
+});
+
+test('sample-index wheel zoom retains the plotted anchor within one sample', () => {
+    const { plotter, canvasEvents } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 'samples' });
+    plotter.draw();
+    const prior = plotter._drawState, ratio = .71;
+    const anchor = state => state.xFirst + ratio * (state.xLast - state.xFirst);
+    canvasEvents.get('wheel')({
+        clientX: prior.plotW * ratio, clientY: prior.plotH / 2, deltaY: -1, preventDefault() {}
+    });
+    plotter.draw();
+    assert.ok(plotter._drawState.visibleCnt < prior.visibleCnt);
+    assert.ok(Math.abs(anchor(plotter._drawState) - anchor(prior)) <= .5);
+});
+
+test('time rectangle zoom selects the sample range within the drawn timestamps', () => {
+    const { plotter, canvasEvents } = createUnevenReceivePlot();
+    const { plotW, plotH } = plotter._drawState;
+    const fire = (event, x, y) => canvasEvents.get(event)({
+        button: 0, pointerId: 1, clientX: x, clientY: y, preventDefault() {}
+    });
+    fire('pointerdown', plotW * .4, plotH * .25);
+    fire('pointerup', plotW * .8, plotH * .75);
+    // The plotted interval is 0–1090 ms. The box covers 436–872 ms.
+    assert.equal(plotter._drawState.startIdx, 134);
+    assert.equal(plotter._drawState.visibleCnt, 44);
 });
 
 test('wheel over a logarithmic Y axis zooms magnitude without changing frequency bins', () => {

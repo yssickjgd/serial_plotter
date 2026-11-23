@@ -64,7 +64,7 @@
                                 <label for="sidebar-timebase-rate">该来源的帧率（帧/秒）</label>
                                 <input id="sidebar-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                             </div>
-                            <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
+                            <p id="sidebar-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
                         </section>
                         <section class="control-group" id="sidebar-sampling-group" aria-labelledby="sidebar-sampling-title">
                             <div class="section-title" id="sidebar-sampling-title">同步采样</div>
@@ -91,11 +91,12 @@
                             </div>
                             <div class="input-group">
                                 <label for="sidebar-grid-method">欠采样恢复策略</label>
-                                <select id="sidebar-grid-method">
+                                <select id="sidebar-grid-method" aria-describedby="sidebar-grid-method-hint">
                                     <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
                                     <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
                                     <option value="spline">局部自然三次样条（4 点）</option>
                                 </select>
+                                <span id="sidebar-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。</span>
                             </div>
                             <p id="sidebar-timebase-state" class="hint-text" role="status" hidden></p>
                             <p id="sidebar-alignment-status" class="hint-text is-error" role="status" hidden></p>
@@ -196,7 +197,7 @@
                         <div class="input-group">
                             <label for="workspace-wait-ms">公式最多等待后点（ms）</label>
                             <input id="workspace-wait-ms" type="number" min="0" max="60000" value="20" step="1" aria-describedby="workspace-wait-hint" />
-                            <span id="workspace-wait-hint" class="hint-text">实时计算等待后续样点的时长。到期后，最近点可使用仍有效的已有样点，插值所需样点不足时留空。设为 0 表示不额外等待。</span>
+                            <span id="workspace-wait-hint" class="hint-text">实时计算等待后续样点的时长。到期时，高阶插值可降阶。线性及高阶插值都需要前、后两个有效样点。设为 0 表示不额外等待。</span>
                         </div>
                         <p class="hint-text">离开编辑区或按 Enter 应用。</p>
                         <p id="workspace-grid-state" class="hint-text" role="status" hidden></p>
@@ -469,7 +470,7 @@
                                     </select>
                                 </div>
                             </div>
-                            <span id="plot-sample-axis-hint" class="hint-text">Hz 和 s 按最近测得的接收帧率估算；对数横轴从第 1 个频点开始。</span>
+                            <span id="plot-sample-axis-hint" class="hint-text">时域秒轴跟随来源时间基准。频谱 Hz 按所用数据的采样率换算。对数横轴从 Bin 1 开始。</span>
                         </div>
                         <div class="control-group" id="plot-vertical-settings">
                             <div class="section-title">纵轴设置</div>
@@ -844,7 +845,7 @@
                                     <label for="channel-timebase-rate">该来源的帧率（帧/秒）</label>
                                     <input id="channel-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
                                 </div>
-                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。</p>
+                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。离开编辑区或按 Enter 应用。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
                             </section>
                             <section class="control-group" id="channel-sampling-group" aria-labelledby="channel-sampling-title">
                                 <div class="section-title" id="channel-sampling-title">同步采样</div>
@@ -871,11 +872,12 @@
                                 </div>
                                 <div class="input-group">
                                     <label for="channel-grid-method">欠采样恢复策略</label>
-                                    <select id="channel-grid-method">
+                                    <select id="channel-grid-method" aria-describedby="channel-grid-method-hint">
                                         <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
                                         <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
                                         <option value="spline">局部自然三次样条（4 点）</option>
                                     </select>
+                                    <span id="channel-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。</span>
                                 </div>
                                 <p id="channel-timebase-state" class="hint-text" role="status" hidden></p>
                                 <p id="channel-alignment-status" class="hint-text is-error" role="status" hidden></p>
@@ -957,8 +959,8 @@
                         </div>
                         <div class="control-group" id="frame-history-settings">
                             <div class="section-title">重建历史数据 <span class="scope-badge">全局共用</span></div>
-                            <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />格式变更时重建</label>
-                            <span class="hint-text">未勾选时，仅受影响的数据源从当前接收位置开始记录。</span>
+                            <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />解析规则或时间基准变更时重建</label>
+                            <span class="hint-text">未勾选时，解析规则变更从当前接收位置开始记录。切换时间基准时，已收帧保留原来的时间位置。</span>
                         </div>
                     </div>
                     <div id="engine-raw-records" class="tab-content" hidden>
