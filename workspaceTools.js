@@ -292,6 +292,7 @@
             if (this.timer) clearTimeout(this.timer);
             this.timer = null;
             if (this.pending) {
+                this.pending.abort?.abort();
                 this.pending.resolve(false); this.pending = null; this.onSearchProgress(null);
             }
             this.matches = []; this.currentMatch = -1; this.searchKey = null;
@@ -394,6 +395,7 @@
 
         _cancelTimeJump() {
             if (!this.pendingJump) return;
+            this.pendingJump.abort?.abort();
             this.pendingJump = null; this.onTimeProgress(null);
         }
 
@@ -420,14 +422,7 @@
         }
 
         _scanTimeRange(frames, target, start, end, scan) {
-            for (let index = start; index < end; index++) {
-                const timestamp = frames.timestampAt(index);
-                if (!Number.isFinite(timestamp)) continue;
-                scan.minimum = Math.min(scan.minimum, timestamp); scan.maximum = Math.max(scan.maximum, timestamp);
-                const distance = Math.abs(target - timestamp);
-                if (distance < scan.distance) { scan.distance = distance; scan.nearest = index; }
-            }
-            return scan;
+            return MonitorSearch.scanTimestampRange(index => frames.timestampAt(index), target, start, end, scan);
         }
 
         async _scanTimeJump(widget, frames, target) {
@@ -438,10 +433,34 @@
             this.onTimeProgress({ done: 0, total });
             const scan = { minimum: Infinity, maximum: -Infinity, distance: Infinity, nearest: -1 };
             try {
-                for (let start = 0; start < total; start += timeScanBatch) {
+                const current = () => this.pendingJump === job && this._enabled() && this._source() === widget &&
+                    capture.epoch === epoch && framesOf(widget) === frames && frames.version === version;
+                const pool = this.service.workerPool;
+                if (pool?.available && total >= 32768) {
+                    job.abort = new AbortController();
+                    const size = 16384, concurrency = pool.workerLimit ?? pool.maxWorkers;
+                    let next = 0, done = 0;
+                    const scanBatches = async () => {
+                        while (current() && next < total) {
+                            const start = next, count = Math.min(size, total - start);
+                            next += count;
+                            const values = Float64Array.from({ length: count }, (_, index) => frames.timestampAt(start + index));
+                            const partial = await pool.runTask({ kind: 'time-scan', values, target, start }, { signal: job.abort.signal });
+                            if (!current()) return;
+                            scan.minimum = Math.min(scan.minimum, partial.minimum);
+                            scan.maximum = Math.max(scan.maximum, partial.maximum);
+                            if (partial.distance < scan.distance || partial.distance === scan.distance && partial.nearest < scan.nearest) {
+                                scan.distance = partial.distance; scan.nearest = partial.nearest;
+                            }
+                            done += count;
+                            this.onTimeProgress({ done, total });
+                        }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(concurrency, Math.ceil(total / size)) }, scanBatches));
+                    if (!current()) return false;
+                } else for (let start = 0; start < total; start += timeScanBatch) {
                     await new Promise(resolve => setTimeout(resolve, 0));
-                    if (this.pendingJump !== job || !this._enabled() || this._source() !== widget ||
-                        capture.epoch !== epoch || framesOf(widget) !== frames || frames.version !== version) return false;
+                    if (!current()) return false;
                     const end = Math.min(start + timeScanBatch, total);
                     this._scanTimeRange(frames, target, start, end, scan);
                     this.onTimeProgress({ done: end, total });
@@ -498,7 +517,10 @@
                         if (typeof decoder !== 'function') throw new Error('当前协议来源没有可用的字段解码器');
                         return decoder.call(widget.source, index);
                     } } : MonitorSearch.parseMonitorSearch(kind, query, tolerance, channels, encoding, caseSensitive);
-                if (!structured && isWave(widget)) options.valueTransform = (value, channel) => transformChannelValue(value, widget.settings.channels?.[channel]);
+                if (!structured && isWave(widget)) {
+                    options.channelSettings = widget.settings.channels;
+                    options.valueTransform = (value, channel) => transformChannelValue(value, options.channelSettings?.[channel]);
+                }
                 const key = JSON.stringify([widget.id, frames.version, capture.epoch, widget.source.generation,
                     kind, structured ? fieldKind : null, structured ? paths : null, query, tolerance, channels, encoding, caseSensitive, isWave(widget) ? widget.settings.channels : null]);
                 const request = { action, position, positionField };
@@ -513,26 +535,54 @@
                 let resolve;
                 const promise = new Promise(done => { resolve = done; });
                 this.pending = { promise, resolve, request };
+                const isCurrent = () => {
+                    if (generation !== this.generation) return false;
+                    if (this._enabled() && capture.epoch === epoch && widget.source.generation === sourceGeneration &&
+                        framesOf(this._source()) === frames && frames.version === version) return true;
+                    this.invalidate();
+                    return false;
+                };
+                const progress = (done, total) => this.onSearchProgress({ title: widget.title, fraction: done / total, done, total });
+                const finish = matches => {
+                    this.matches = matches.map(match => this._mapSearchMatch(match, frames, widget, epoch))
+                        .sort((a, b) => a[positionField] - b[positionField] || a.startFrame - b.startFrame);
+                    const pending = this.pending;
+                    const success = this._navigate(pending.request);
+                    this.pending = null; this.onSearchProgress(null); pending.resolve(success);
+                };
+                const fail = error => { if (isCurrent()) { this.invalidate(); this._searchStatus(error.message); } };
                 const scan = () => {
                     this.timer = null;
-                    if (generation !== this.generation) return;
-                    if (!this._enabled() || capture.epoch !== epoch || widget.source.generation !== sourceGeneration ||
-                        framesOf(this._source()) !== frames || frames.version !== version) { this.invalidate(); return; }
+                    if (!isCurrent()) return;
                     try {
-                        if (session.step(256)) {
-                            this.matches = session.matches.map(match => this._mapSearchMatch(match, frames, widget, epoch))
-                                .sort((a, b) => a[positionField] - b[positionField] || a.startFrame - b.startFrame);
-                            const pending = this.pending;
-                            const success = this._navigate(pending.request);
-                            this.pending = null; this.onSearchProgress(null); pending.resolve(success);
-                        } else {
-                            this.onSearchProgress({ title: widget.title, fraction: session.position / session.length,
-                                done: session.position, total: session.length });
+                        if (session.step(256)) finish(session.matches);
+                        else {
+                            progress(session.position, session.length);
                             this.timer = setTimeout(scan, 0);
                         }
-                    } catch (error) { this.invalidate(); this._searchStatus(error.message); }
+                    } catch (error) { fail(error); }
                 };
-                scan(); return promise;
+                const engine = capture.dataEngine;
+                const schema = structured && widget.source === engine?.recordsSource ? engine.compiled?.schema : null;
+                const numeric = !structured && options.kind === 'number';
+                const bytes = +frames.retainedByteLength || 0;
+                const large = structured && schema ? frames.length >= 128
+                    : numeric ? frames.length * session.numericChannels.length >= 32768
+                        : frames.length >= 4096 || bytes >= 262144;
+                const pool = this.service.workerPool;
+                if (pool?.available && large && (!structured || schema)) {
+                    const abort = new AbortController();
+                    this.pending.abort = abort;
+                    progress(0, frames.length);
+                    const maxFields = Math.max(1, Math.min(32768, Math.floor((capture.memory?.limitBytes ?? Infinity) / 2048)));
+                    MonitorSearch.searchHistoryInWorkers(pool, frames, { ...options, schema, maxFields },
+                        { isCurrent, signal: abort.signal, onProgress: progress }).then(matches => {
+                        if (!isCurrent()) return;
+                        if (matches) finish(matches);
+                        else { abort.abort(); progress(0, frames.length); scan(); }
+                    }).catch(fail);
+                } else scan();
+                return promise;
             } catch (error) { this._searchStatus(error.message); return Promise.resolve(false); }
         }
 

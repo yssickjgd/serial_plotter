@@ -32,6 +32,33 @@ function recordPrefix(record, options) {
     return `${options.timestamps ? `[${record.time}] ` : ''}${options.markers ? `${record.kind.toUpperCase()} ` : ''}`;
 }
 
+function formatHexExportRecord(bytes, prefix) {
+    return prefix + captureExportBytes.bytesToHex(bytes) + '\r\n';
+}
+
+async function* captureHexChunksInWorkers(rx, tx, pool, options, rowsPerBatch = 1024) {
+    const { direction, check, onProgress } = options;
+    const total = (direction === 'tx' ? 0 : rx.length) + (direction === 'rx' ? 0 : tx.length);
+    function* tasks() {
+        let batch = [], size = 0;
+        for (const record of captureRecords(rx, tx, direction)) {
+            batch.push({ bytes: record.bytes, prefix: recordPrefix(record, options) });
+            size += record.bytes.length;
+            if (batch.length === rowsPerBatch || size >= 262144) {
+                yield { kind: 'hex-export', records: batch };
+                batch = []; size = 0;
+            }
+        }
+        if (batch.length) yield { kind: 'hex-export', records: batch };
+    }
+    let processed = 0;
+    onProgress?.(0, total);
+    for await (const { task, result } of pool.runOrderedTasks(tasks(), { check })) {
+        yield result;
+        onProgress?.(processed += task.records.length, total);
+    }
+}
+
 function* captureExportChunks(rx, tx, options = {}) {
     const { format = 'hex-text', direction = 'rx', encoding = 'utf-8' } = options;
     if (!['binary', 'hex-text', 'text'].includes(format)) throw new Error('导出格式无效');
@@ -39,7 +66,7 @@ function* captureExportChunks(rx, tx, options = {}) {
     const records = captureRecords(rx, tx, direction, options.onProgress);
     if (format !== 'text') {
         for (const record of records) yield format === 'binary' ? record.bytes
-            : recordPrefix(record, options) + captureExportBytes.bytesToHex(record.bytes) + '\r\n';
+            : formatHexExportRecord(record.bytes, recordPrefix(record, options));
         return;
     }
     const decoders = Object.fromEntries([['rx', rx], ['tx', tx]].map(([kind, frames]) =>
@@ -90,6 +117,8 @@ async function writeCaptureExport(rx, tx, options, writable, onProgress = () => 
     onProgress(count);
 }
 
-if (typeof module !== 'undefined') module.exports = { captureExportChunks, writeCaptureExport };
+if (typeof module !== 'undefined') module.exports = { captureExportChunks, writeCaptureExport, captureHexChunksInWorkers, formatHexExportRecord };
+globalThis.SerialPlotter ??= {};
+Object.assign(globalThis.SerialPlotter, { captureHexChunksInWorkers, formatHexExportRecord });
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, { captureExportChunks, writeCaptureExport });

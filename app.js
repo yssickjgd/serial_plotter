@@ -1139,8 +1139,12 @@ async function startSerialPlotterApplication() {
         const generation = source.generation;
         const check = exportCheck(sources, () => exportFormat === options.format && rawExportCapture() === capture && (options.direction === 'tx' ||
             rawExportSource() === source && source.generation === generation && capture.sources.has(source)), capture);
-        return writeExport(exportView, options, sources, check,
-            onProgress => S.captureExportChunks(source.frames, tx, { ...options, onProgress }));
+        const pool = service.workerPool;
+        const parallel = pool.available && options.format === 'hex-text' &&
+            sources.reduce((total, frames) => total + frames.retainedByteLength, 0) >= 262144;
+        return writeExport(exportView, options, sources, check, onProgress => parallel
+            ? S.captureHexChunksInWorkers(source.frames, tx, pool, { ...options, onProgress, check })
+            : S.captureExportChunks(source.frames, tx, { ...options, onProgress }));
     }
     async function exportWidgetData() {
         if (exporting || disposed) return false;
@@ -1164,6 +1168,8 @@ async function startSerialPlotterApplication() {
             if (format === 'engine-text') return S.parsedTextChunks(selected, settings);
             if (source.kind === 'protocol') return S.structuredCsvChunksAsync(frames, source.decodeRecord, settings);
             if (typeof frames.provenanceAt === 'function') return S.synchronizedCsvChunks(frames, channels, settings);
+            if (service.workerPool.available && frames.length * (channelIndices?.length ?? 0) >= 32768)
+                return S.frameCsvChunksInWorkers(frames, channels, service.workerPool, settings);
             return S.frameCsvChunks(frames, channels, 1024, settings);
         };
         return writeExport(widgetExportView, options, buffers, check, makeChunks, !wire ? frames.length * (channelIndices?.length ?? 0) * 16 : 0);

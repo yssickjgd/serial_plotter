@@ -136,6 +136,100 @@ test('protocol stream checks report completed byte chunks in the worker and fall
     }
 });
 
+test('parallel searches preserve numerical channel order and matches crossing byte batches', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { searchHistoryInWorkers, parseMonitorSearch } = require('../monitorSearch');
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const rows = Array.from({ length: 130 }, (_, index) => Uint8Array.of(index % 2 ? 0x42 : 0x41));
+    const frames = { channelCount: 2, length: rows.length,
+        orderAt: index => 1000 + index, getValue: (channel, index) => channel ? -index : index,
+        rawBytesAt: index => rows[index] };
+    const progress = [];
+    const hex = await searchHistoryInWorkers(pool, frames, parseMonitorSearch('hex', '41 42 41'),
+        { batchFrames: 5, onProgress: position => progress.push(position) });
+    assert.equal(hex.length, 64);
+    assert.deepEqual(hex.slice(2, 3), [{ startFrame: 4, startByte: 0, endFrame: 6, endByte: 1,
+        startOrder: 1004, endOrder: 1006 }]);
+    assert.equal(progress.at(-1), rows.length);
+    assert.equal(pool.peakWorkers, 2);
+    const numeric = await searchHistoryInWorkers(pool, frames, { ...parseMonitorSearch('number', '25', '0', [0, 1]),
+        channelSettings: [{ gainEnabled: true, gain: .5 }, { gainEnabled: true, gain: -1 }] }, { batchFrames: 17 });
+    assert.deepEqual(numeric.map(({ startFrame, channel }) => [startFrame, channel]), [[25, 1], [50, 0]]);
+});
+
+test('parallel text and protocol searches match the serial sessions at chunk boundaries', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { searchHistoryInWorkers, parseMonitorSearch, MonitorSearchSession, ProtocolFieldSearchSession } = require('../monitorSearch');
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 5, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const rows = [...new TextEncoder().encode('z😀a😀a\nz😀a')].map(byte => Uint8Array.of(byte));
+    const frames = { length: rows.length, orderAt: index => index + 1,
+        rawBytesAt: index => rows[index], rawByteOffsetAt: index => index, streamStartByteAt: () => 0 };
+    const options = parseMonitorSearch('text', '😀A', '0', -1, 'utf-8', false);
+    const serial = new MonitorSearchSession(frames, options);
+    serial.step(frames.length);
+    assert.equal(serial.matches.length, 3);
+    assert.deepEqual(await searchHistoryInWorkers(pool, frames, options, { batchFrames: 3 }), serial.matches);
+    const longRecord = new Uint8Array(16400);
+    longRecord.set(new TextEncoder().encode('😀a'), 16383);
+    const longFrames = { ...frames, length: 1, rawBytesAt: () => longRecord };
+    const [inside] = await searchHistoryInWorkers(pool, longFrames, options);
+    assert.deepEqual([inside.startByte, inside.endByte], [16383, 16388]);
+
+    const legacy = [0x20, 0xc4, 0xe3, 0xba, 0xc3, 0x20, 0xc4, 0xe3, 0xba, 0xc3].map(byte => Uint8Array.of(byte));
+    const legacyFrames = { ...frames, length: legacy.length, rawBytesAt: index => legacy[index] };
+    const legacyOptions = parseMonitorSearch('text', '你好', '0', -1, 'gbk');
+    const legacySession = new MonitorSearchSession(legacyFrames, legacyOptions);
+    legacySession.step(legacyFrames.length);
+    assert.equal(legacySession.matches.length, 2);
+    assert.deepEqual(await searchHistoryInWorkers(pool, legacyFrames, legacyOptions, { batchFrames: 2 }), legacySession.matches);
+
+    const { Protocol } = require('../protocolEngine');
+    const schema = { id: 'worker.search', framing: { fixedLength: 8 },
+        messages: [{ id: 'values', fields: [{ id: 'counter', name: 'counter', type: 'uint64', offset: 0 }] }] };
+    const exact = 9007199254740993n;
+    const records = [2n, exact, 3n, exact].map(counter => Protocol.encode(schema, 'values', { counter: counter.toString() }));
+    const source = { ...frames, length: records.length, rawBytesAt: index => records[index] };
+    const fields = { kind: 'integer64', query: exact.toString(), path: 'counter' };
+    const session = new ProtocolFieldSearchSession(source, { ...fields, decodeRecord: index => Protocol.decode(records[index], schema) });
+    session.step(source.length);
+    assert.equal(session.matches.length, 2);
+    assert.deepEqual(await searchHistoryInWorkers(pool, source, { ...fields, schema, maxFields: 32768 }, { batchFrames: 1 }),
+        session.matches);
+});
+
+test('worker time location ignores invalid timestamps and keeps the earliest equally near frame', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const values = Float64Array.of(NaN, 1010, 1002, 1008, 1002);
+    assert.deepEqual(await pool.runTask({ kind: 'time-scan', values, target: 1005, start: 20 }),
+        { minimum: 1002, maximum: 1010, distance: 3, nearest: 22 });
+});
+
+test('parallel export preserves CSV calibration and the chronological RX/TX Hex output', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { FrameBuffer } = require('../frameBuffer');
+    const { frameCsvChunks, frameCsvChunksInWorkers } = require('../csvExport');
+    const { captureExportChunks, captureHexChunksInWorkers } = require('../captureExport');
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const rx = new FrameBuffer(1, 16), tx = new FrameBuffer(1, 16);
+    for (let index = 0; index < 10; index++) {
+        rx.append([index], Uint8Array.of(index), 'rx' + index, 2 * index + 1, 1000 + index);
+        tx.append([index], Uint8Array.of(20), 'tx' + index, 2 * index + 2, 1000 + index);
+    }
+    const collect = async chunks => { let text = ''; for await (const chunk of chunks) text += chunk; return text; };
+    const channels = [{ name: 'a,"b"', gainEnabled: true, gain: .5 }];
+    assert.equal(await collect(frameCsvChunksInWorkers(rx, channels, pool, { timestamps: true }, 3)),
+        [...frameCsvChunks(rx, channels, 3, { timestamps: true })].join(''));
+    const options = { format: 'hex-text', direction: 'both', timestamps: true, markers: true };
+    assert.equal(await collect(captureHexChunksInWorkers(rx, tx, pool, options, 3)),
+        [...captureExportChunks(rx, tx, options)].join(''));
+    assert.equal(pool.peakWorkers, 2);
+});
+
 test('idle history workers retire individually and clearing FFT cache permits a fresh snapshot', async t => {
     const { HistoryWorkerPool } = loadPool();
     const timers = new Map(), workers = [];

@@ -5,6 +5,8 @@ const searchTextUtils = typeof module !== 'undefined'
     ? require('./textCodec') : globalThis.SerialPlotter.TextCodec;
 const searchProtocolUtils = typeof module !== 'undefined'
     ? require('./protocolRecords') : globalThis.SerialPlotter;
+const { transformChannelValue: searchTransform } = typeof module !== 'undefined'
+    ? require('./channelTransform') : { transformChannelValue: globalThis.SerialPlotter.transformChannelValue };
 
 function parseMonitorSearch(kind, query, tolerance = 0, channel = -1, encoding = 'utf-8', caseSensitive = true) {
     if (kind === 'text') {
@@ -97,7 +99,8 @@ class MonitorSearchSession {
             }
             const bytes = frames.rawBytesAt(frame);
             if (options.kind === 'text') {
-                this._consumeText(this.textDecoder.write(bytes, frame));
+                for (let offset = 0; offset < bytes.length; offset += 16384)
+                    this._consumeText(this.textDecoder.write(bytes.subarray(offset, offset + 16384), frame, offset));
                 if (frames.streamEndedAt?.(frame)) {
                     this._consumeText(this.textDecoder.flush());
                     this.textDecoder = new searchTextUtils.MappedTextDecoder(options.encoding);
@@ -231,7 +234,151 @@ class ProtocolFieldSearchSession {
     }
 }
 
-if (typeof module !== 'undefined') module.exports = { parseMonitorSearch, MonitorSearchSession, parseProtocolFieldSearch, ProtocolFieldSearchSession };
+function createMonitorSearchProcessor(task, protocol) {
+    const { orders, values, channels, records, search, start, firstOwned, firstSkip = 0, schema } = task;
+    const frames = {
+        length: orders.length, channelCount: channels?.length,
+        orderAt: index => orders[index],
+        getValue: (channel, index) => values[index * channels.length + channel],
+        rawBytesAt: index => records[index].bytes,
+        rawByteOffsetAt: index => records[index].byteOffset,
+        streamStartByteAt: index => records[index].streamStart,
+        streamEndedAt: index => records[index].ended
+    };
+    let session;
+    if (schema) {
+        const compiled = protocol.compile(schema);
+        session = new ProtocolFieldSearchSession(frames, { ...search,
+            decodeRecord: index => protocol.decode(records[index].bytes, compiled, { maxFields: task.maxFields }) });
+    } else if (values) {
+        session = new MonitorSearchSession(frames, { ...search, channel: -1,
+            valueTransform: (raw, channel) => searchTransform(raw, search.channelSettings?.[channel]) });
+    } else session = new MonitorSearchSession(frames, search);
+
+    return {
+        step(budget) { return session.step(budget === Infinity ? orders.length : Math.max(1, Math.floor(budget / 256))); },
+        result() {
+            return session.matches.filter(match => match.endFrame >= firstOwned).map(match => {
+                if (match.startFrame === 0 && match.startByte !== undefined) match.startByte += firstSkip;
+                if (match.endFrame === 0 && match.endByte !== undefined) match.endByte += firstSkip;
+                match.startFrame += start;
+                match.endFrame += start;
+                if (channels) match.channel = channels[match.channel];
+                return match;
+            });
+        }
+    };
+}
+
+// Overlap preserves matches that start in one byte batch and end in the next.
+function monitorSearchPrefix(frames, start, options) {
+    const text = options.kind === 'text', encoding = options.encoding;
+    const overlapBytes = text ? options.pattern.length * 4 + 4 : options.bytes.length - 1;
+    let first = start, bytes = 0;
+    while (first > 0 && bytes < overlapBytes) {
+        if (text && frames.streamEndedAt?.(first - 1)) break;
+        bytes += frames.rawBytesAt(--first).length;
+    }
+    const legacy = text && ['gbk', 'gb18030', 'big5', 'shift_jis'].includes(encoding);
+    if (!legacy) return { first, skip: 0 };
+    // Legacy encodings can interpret the same byte as a lead or trail byte. Start at
+    // a stream boundary or a byte that cannot be part of a preceding character.
+    const controlLimit = encoding === 'gb18030' ? 0x30 : 0x40;
+    let checked = 0;
+    for (let frame = first; frame > 0 && checked < 65536; frame--) {
+        if (frames.streamEndedAt?.(frame - 1)) return { first: frame, skip: 0 };
+        const record = frames.rawBytesAt(frame - 1);
+        for (let index = record.length - 1; index >= 0 && checked < 65536; index--, checked++) {
+            if (record[index] < controlLimit || record[index] === 0x7f) return { first: frame - 1, skip: index };
+        }
+        if (frame === 1) return { first: 0, skip: 0 };
+    }
+    return first ? null : { first: 0, skip: 0 };
+}
+
+function monitorSearchBatch(frames, start, length, options, channels, batchFrames) {
+    const { schema } = options, records = [];
+    const numeric = channels !== null;
+    const prefix = numeric || schema ? { first: start, skip: 0 } : monitorSearchPrefix(frames, start, options);
+    if (!prefix) return null;
+    const { first, skip } = prefix;
+    let end = start, bytes = 0;
+    const frameLimit = numeric ? Math.max(1, Math.floor(32768 / channels.length)) : schema ? 128 : batchFrames;
+    const maxEnd = Math.min(length, start + Math.min(batchFrames, frameLimit));
+    for (let index = first; index < maxEnd; index++) {
+        if (!numeric) {
+            const raw = frames.rawBytesAt(index);
+            const offset = index === first ? skip : 0;
+            if (index > start && bytes + raw.length > 524288) break;
+            records.push({ bytes: raw.subarray(offset), byteOffset: (frames.rawByteOffsetAt?.(index) ?? 0) + offset,
+                streamStart: frames.streamStartByteAt?.(index) ?? 0, ended: frames.streamEndedAt?.(index) });
+            bytes += raw.length - offset;
+        }
+        if (index >= start) end = index + 1;
+    }
+    const orders = Float64Array.from({ length: end - first }, (_, index) => frames.orderAt(first + index));
+    const values = numeric ? new Float64Array(orders.length * channels.length) : null;
+    if (values) for (let index = 0, slot = 0; index < orders.length; index++)
+        for (const channel of channels) values[slot++] = frames.getValue(channel, first + index);
+    const { valueTransform, decodeRecord, schema: _, maxFields, channelSettings, ...search } = options;
+    if (numeric) search.channelSettings = channels.map(channel => channelSettings?.[channel]);
+    return { end, task: { kind: 'monitor-search', start: first, firstOwned: start - first, firstSkip: skip,
+        orders, values, channels, records, search, schema, maxFields } };
+}
+
+async function searchHistoryInWorkers(pool, frames, options, {
+    batchFrames = 4096, isCurrent = () => true, onProgress = () => {}, signal
+} = {}) {
+    const channels = options.kind === 'number' && !options.schema ? new MonitorSearchSession(frames, options).numericChannels : null;
+    const length = frames.length, jobs = new Map(), matches = [];
+    const concurrency = pool.workerLimit ?? pool.maxWorkers;
+    let position = 0, processed = 0, resultOrder = 0, nextJob = 0, workStarted = performance.now();
+    const completed = new Map();
+    while (position < length || jobs.size) {
+        if (signal?.aborted || !isCurrent()) return null;
+        while (position < length && jobs.size + completed.size < concurrency) {
+            const batch = monitorSearchBatch(frames, position, length, options, channels, batchFrames);
+            if (!batch) return null;
+            const id = nextJob++, count = batch.end - position;
+            const promise = pool.runTask(batch.task, { signal }).then(result => ({ id, count, result }), error => ({ id, error }));
+            jobs.set(id, promise);
+            position = batch.end;
+            if (performance.now() - workStarted >= 8) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                workStarted = performance.now();
+                if (signal?.aborted || !isCurrent()) return null;
+            }
+        }
+        const { id, result, count, error } = await Promise.race(jobs.values());
+        if (signal?.aborted || !isCurrent()) return null;
+        if (error) throw error;
+        jobs.delete(id);
+        completed.set(id, result);
+        while (completed.has(resultOrder)) {
+            for (const match of completed.get(resultOrder)) matches.push(match);
+            completed.delete(resultOrder++);
+        }
+        processed += count;
+        onProgress(processed, length);
+    }
+    return matches;
+}
+
+function scanTimestampRange(timestampAt, target, start, end, scan) {
+    for (let index = start; index < end; index++) {
+        const timestamp = timestampAt(index);
+        if (!Number.isFinite(timestamp)) continue;
+        scan.minimum = Math.min(scan.minimum, timestamp);
+        scan.maximum = Math.max(scan.maximum, timestamp);
+        const distance = Math.abs(target - timestamp);
+        if (distance < scan.distance) { scan.distance = distance; scan.nearest = index; }
+    }
+    return scan;
+}
+
+const monitorSearchApi = { parseMonitorSearch, MonitorSearchSession, parseProtocolFieldSearch, ProtocolFieldSearchSession,
+    createMonitorSearchProcessor, searchHistoryInWorkers, scanTimestampRange };
+if (typeof module !== 'undefined') module.exports = monitorSearchApi;
 globalThis.SerialPlotter ??= {};
-globalThis.SerialPlotter.MonitorSearch = { parseMonitorSearch, MonitorSearchSession, parseProtocolFieldSearch, ProtocolFieldSearchSession };
+globalThis.SerialPlotter.MonitorSearch = monitorSearchApi;
 Object.assign(globalThis.SerialPlotter, { parseProtocolFieldSearch, ProtocolFieldSearchSession });

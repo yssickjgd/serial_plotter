@@ -24,6 +24,46 @@ function validateProtocolHistoryTask(task) {
     }
 }
 function createHistoryTaskProcessor(task, dependencies) {
+    if (task?.kind === 'monitor-search') return dependencies.createMonitorSearchProcessor(task, dependencies.Protocol);
+    if (task?.kind === 'hex-export' || task?.kind === 'csv-export') {
+        const csv = task.kind === 'csv-export', lines = [];
+        const length = csv ? task.rows : task.records.length;
+        const width = task.channelSettings?.length;
+        let position = 0;
+        return {
+            step(budget) {
+                let remaining = budget;
+                while (position < length && remaining > 0) {
+                    const row = position++;
+                    if (csv) {
+                        lines.push(dependencies.formatCsvExportRow(task.start + row, task.times?.[row], task.channelSettings,
+                            channel => task.values[row * width + channel]));
+                        remaining -= width * 8;
+                    } else {
+                        const { bytes, prefix } = task.records[row];
+                        lines.push(dependencies.formatHexExportRecord(bytes, prefix));
+                        remaining -= Math.max(1, bytes.length);
+                    }
+                }
+                return position === length;
+            },
+            result() { return lines.join(''); }
+        };
+    }
+    if (task?.kind === 'time-scan') {
+        const { values, target, start } = task;
+        const scan = { minimum: Infinity, maximum: -Infinity, distance: Infinity, nearest: -1 };
+        let offset = 0;
+        return {
+            step(budget) {
+                const end = Math.min(values.length, offset + Math.max(1, Math.floor(budget / 8)));
+                dependencies.scanTimestampRange(index => values[index - start], target, start + offset, start + end, scan);
+                offset = end;
+                return offset === values.length;
+            },
+            result() { return scan; }
+        };
+    }
     if (task?.kind === 'protocol-stream-check') {
         if (!task.schema || typeof task.schema !== 'object' || Array.isArray(task.schema) ||
             !(task.bytes instanceof Uint8Array) || task.bytes.length > 1048576)
@@ -224,8 +264,16 @@ function historyWorkerDependencies() {
     const spectrum = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
     const phase = typeof module !== 'undefined' ? require('./systemResponse') : globalThis.SerialPlotter;
     const Protocol = typeof module !== 'undefined' ? require('./protocolEngine').Protocol : globalThis.SerialPlotter.Protocol;
+    const search = typeof module !== 'undefined' ? require('./monitorSearch') : globalThis.SerialPlotter.MonitorSearch;
+    const records = typeof module !== 'undefined' ? require('./protocolRecords') : globalThis.SerialPlotter;
+    const channels = typeof module !== 'undefined' ? require('./channelTransform') : globalThis.SerialPlotter;
+    const csv = typeof module !== 'undefined' ? require('./csvExport') : globalThis.SerialPlotter;
+    const hex = typeof module !== 'undefined' ? require('./captureExport') : globalThis.SerialPlotter;
+    const bytes = typeof module !== 'undefined' ? require('./byteUtils') : globalThis.SerialPlotter;
     return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
-        TYPE_LENGTH: parser.TYPE_LENGTH, Protocol };
+        formatCsvExportRow: csv.formatCsvExportRow, formatHexExportRecord: hex.formatHexExportRecord, ByteUtils: bytes.ByteUtils,
+        TYPE_LENGTH: parser.TYPE_LENGTH, Protocol, search, records, searchTransform: channels.transformChannelValue,
+        createMonitorSearchProcessor: search.createMonitorSearchProcessor, scanTimestampRange: search.scanTimestampRange };
 }
 
 /** Self-contained classic worker source; no network requests are needed for file:// use. */
@@ -243,12 +291,23 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
         functions.map(name => dependencies[name].toString()).join('\n') + '\n' +
         `const Protocol = (${dependencies.Protocol.createFactorySource()})(globalThis,
             { normalizeTextEncoding, MappedTextDecoder, CHARSETS: TEXT_CHARSETS });\n` +
+        'const searchTextUtils = { normalizeTextEncoding, MappedTextDecoder };\n' +
+        'const searchTransform = ' + dependencies.searchTransform.toString() + ';\n' +
+        'const transformForExport = searchTransform;\n' +
+        'const captureExportBytes = {' + dependencies.ByteUtils.bytesToHex.toString() + '};\n' +
+        dependencies.formatCsvExportRow.toString() + '\n' + dependencies.formatHexExportRecord.toString() + '\n' +
+        ['unwrapProtocolRecord', 'protocolJsonValue', 'protocolValueText', 'protocolPathContains', 'protocolVisibleFields']
+            .map(name => dependencies.records[name].toString()).join('\n') + '\n' +
+        'const searchProtocolUtils = { unwrapProtocolRecord, protocolValueText, protocolVisibleFields };\n' +
+        ['parseMonitorSearch', 'parseProtocolFieldSearch', 'MonitorSearchSession', 'ProtocolFieldSearchSession', 'createMonitorSearchProcessor', 'scanTimestampRange']
+            .map(name => dependencies.search[name].toString()).join('\n') + '\n' +
         validateProtocolHistoryTask.toString() + '\n' +
         createHistoryTaskProcessor.toString() + `\nself.onmessage = ({ data }) => {
             try {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
-                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees, Protocol });
+                        TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees,
+                        Protocol, createMonitorSearchProcessor, scanTimestampRange, formatCsvExportRow, formatHexExportRecord });
                 if (data.reportProgress) {
                     while (!processor.step(${protocolStreamProgressBytes}))
                         self.postMessage({ id: data.id, processedBytes: processor.processedBytes });
@@ -376,16 +435,41 @@ class HistoryWorkerPool {
         return promise;
     }
 
+    /** Consumer-visible results follow input order even when independent jobs finish out of order. */
+    async *runOrderedTasks(tasks, { check = () => {} } = {}) {
+        const jobs = [], abort = new AbortController();
+        const limit = Math.max(1, this.workerLimit ?? this.maxWorkers);
+        let started = performance.now();
+        const take = async () => {
+            const result = await jobs.shift();
+            check();
+            if (result.error) throw result.error;
+            return result;
+        };
+        try {
+            for (const task of tasks) {
+                check();
+                jobs.push(this.runTask(task, { signal: abort.signal }).then(result => ({ task, result }), error => ({ error })));
+                if (jobs.length >= limit) yield await take();
+                if (performance.now() - started >= 8) {
+                    await new Promise(resolve => this.schedule(resolve));
+                    started = performance.now();
+                }
+            }
+            while (jobs.length) yield await take();
+        } finally { abort.abort(); }
+    }
+
     /** Stream checks can report intermediate byte offsets. The result means the full input was checked. */
-    runTask(task, { onProgress } = {}) {
-        if (this.disposed) return Promise.reject(historyAbortError());
-        if (task?.kind === 'fft' && !(task.values instanceof Float64Array))
-            return Promise.reject(new TypeError('FFT values must be a Float64Array'));
+    runTask(task, { onProgress, signal } = {}) {
+        if (this.disposed || signal?.aborted) return Promise.reject(historyAbortError());
+        if (['fft', 'time-scan', 'csv-export'].includes(task?.kind) && !(task.values instanceof Float64Array))
+            return Promise.reject(new TypeError(task.kind === 'fft' ? 'FFT values must be a Float64Array' : '历史采样必须是双精度浮点数数组'));
         if (task?.kind === 'protocol-decode') {
             try { validateProtocolHistoryTask(task); }
             catch (error) { return Promise.reject(error); }
         }
-        if (!['fft', 'protocol-decode'].includes(task?.kind) && !(task?.bytes instanceof Uint8Array))
+        if (!['fft', 'time-scan', 'csv-export', 'hex-export', 'protocol-decode', 'monitor-search'].includes(task?.kind) && !(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
         if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
             task.parts.some(part => !(part instanceof Uint8Array))))
@@ -397,6 +481,19 @@ class HistoryWorkerPool {
             const reportProgress = task.kind === 'protocol-stream-check' && typeof onProgress === 'function';
             const job = { id: this.nextId++, task, resolve, reject, settled: false,
                 onProgress: reportProgress ? onProgress : null, reportedBytes: 0 };
+            if (signal) {
+                const cancel = () => {
+                    this.queue = this.queue.filter(queued => queued !== job);
+                    if (this.fallbackJob === job) {
+                        this.cancelSchedule(this.fallbackTimer);
+                        this.fallbackJob = this.fallbackTimer = null;
+                    }
+                    this._settle(job, historyAbortError());
+                    this._pump();
+                };
+                signal.addEventListener('abort', cancel, { once: true });
+                job.removeAbortListener = () => signal.removeEventListener('abort', cancel);
+            }
             this.jobs.add(job);
             if (task.kind === 'fft') {
                 const firstOther = this.queue.findIndex(queued => queued.task.kind !== 'fft');
@@ -418,6 +515,7 @@ class HistoryWorkerPool {
         if (job.settled) return;
         job.settled = true;
         this.jobs.delete(job);
+        job.removeAbortListener?.();
         job.task = null;
         if (error) job.reject(error);
         else job.resolve(result);
@@ -445,14 +543,26 @@ class HistoryWorkerPool {
                 const job = this.queue.shift();
                 slot.job = job;
                 try {
-                    const fft = job.task.kind === 'fft', protocol = job.task.kind === 'protocol-decode';
-                    const data = fft ? new Float64Array(job.task.values) : protocol ? null : new Uint8Array(job.task.bytes);
-                    const task = fft ? { ...job.task, values: data } : protocol ? { ...job.task } : { ...job.task, bytes: data };
+                    const kind = job.task.kind, samples = ['fft', 'time-scan', 'csv-export'].includes(kind);
+                    const protocol = kind === 'protocol-decode', search = kind === 'monitor-search', hex = kind === 'hex-export';
+                    const data = samples ? new Float64Array(job.task.values) : protocol || search || hex ? null : new Uint8Array(job.task.bytes);
+                    const task = samples ? { ...job.task, values: data } : data ? { ...job.task, bytes: data } : { ...job.task };
                     const transfer = data ? [data.buffer] : [];
                     if (protocol) task.records = task.records.map(record => {
                         const bytes = new Uint8Array(record instanceof Uint8Array ? record : record.bytes);
                         transfer.push(bytes.buffer); return { bytes };
                     });
+                    if (search) {
+                        task.orders = job.task.orders.slice(); transfer.push(task.orders.buffer);
+                        if (task.values) { task.values = task.values.slice(); transfer.push(task.values.buffer); }
+                    }
+                    if (task.times) { task.times = task.times.slice(); transfer.push(task.times.buffer); }
+                    if (search || hex) {
+                        task.records = job.task.records.map(record => {
+                            const bytes = new Uint8Array(record.bytes); transfer.push(bytes.buffer);
+                            return { ...record, bytes };
+                        });
+                    }
                     if (task.kind === 'hex-assemble') {
                         task.parts = task.parts.map(part => {
                             const copy = new Uint8Array(part);

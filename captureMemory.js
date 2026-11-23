@@ -48,7 +48,7 @@ class CaptureMemoryBudget {
         usedBytes += service.dataEngine?.estimatedMemoryBytes ?? 0;
         for (const job of (ownsPool ? service.workerPool.jobs : null) ?? []) {
             const task = job.task;
-            usedBytes += (task?.values?.byteLength ?? task?.bytes?.byteLength ?? 0) * 4;
+            usedBytes += (task?.values?.byteLength ?? task?.bytes?.byteLength ?? 0) * 4 + ((task?.orders?.byteLength ?? 0) + (task?.times?.byteLength ?? 0)) * 2;
             for (const part of task?.parts ?? []) usedBytes += part.byteLength * 2;
             for (const record of task?.records ?? []) usedBytes += (record.bytes?.byteLength ?? record.byteLength ?? 0) * 4;
         }
