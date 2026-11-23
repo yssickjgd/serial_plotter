@@ -1,28 +1,34 @@
 /** Global parsing drafts and channel editing remain available in an empty workspace. */
 (function(root) {
     class DataEngineView {
-        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onLayout = () => {}, getProtocolReferences = () => [] }) {
-            Object.assign(this, { document, engine, controller, onChange, onApply, onLayout, getProtocolReferences });
-            this.primaryEngine = engine;
+        constructor({ document, engine, controller, onChange = () => {}, onApply = () => {}, onTabChange = () => {}, onProtocolOpen, onProtocolClose, onSaveProtocolDraft, getSourceName, getProtocolReferences = () => [] }) {
+            Object.assign(this, { document, engine, controller, onChange, onApply, getProtocolReferences });
             this.listeners = []; this.mappingPage = 0; this.binding = false;
             this.arrayIds = { dataType: 'data-type', endianness: 'endianness', channelsCount: 'channels-count',
                 enableHeader: 'chk-header', headerHex: 'frame-header', enableFooter: 'chk-footer', footerHex: 'frame-footer', enableChecksum: 'chk-checksum' };
             this.draft = JSON.parse(JSON.stringify(engine.config.draft ?? engine.serialize())); this.draft.draft = null;
             this.timeoutIds = { idleTimeouts: 'engine-idle-timeout', rawIdleTimeouts: 'engine-raw-idle-timeout' };
-            const tabs = [...this.el('data-engine').querySelectorAll('.tab-btn')];
-            tabs[0].parentNode.setAttribute('role', 'tablist');
+            const view = this.el('data-engine'), tabs = [...view.querySelectorAll('.tab-btn')];
+            const tabBar = tabs[0].parentNode, actions = this.el('engine-edit-actions');
+            const desktop = document.defaultView?.matchMedia?.('(min-width: 1680px)');
+            const hasEditActions = tab => ['engine-parsing', 'engine-raw-records'].includes(tab);
+            tabBar.setAttribute('role', 'tablist');
             const selectTab = button => {
+                const overview = Boolean(desktop?.matches);
+                view.classList.toggle('engine-overview', overview);
+                tabBar.hidden = overview;
                 for (const tab of tabs) {
                     const selected = tab === button, panel = this.el(tab.dataset.tab);
                     tab.classList.toggle('active', selected); tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
-                    panel.classList.toggle('active', selected); panel.hidden = !selected;
+                    panel.classList.toggle('active', selected); panel.hidden = !overview && !selected;
+                    panel.setAttribute('role', overview ? 'region' : 'tabpanel');
+                    panel.setAttribute('aria-labelledby', overview ? `${panel.id}-heading` : tab.id);
                 }
-                this.el('engine-edit-actions').hidden = button.dataset.tab === 'engine-channels';
-                this.onLayout();
+                actions.hidden = !overview && !hasEditActions(button.dataset.tab);
+                onTabChange(button.dataset.tab);
             };
             for (const [index, button] of tabs.entries()) {
-                button.id = `engine-tab-${index}`; this.el(button.dataset.tab).setAttribute('role', 'tabpanel');
-                this.el(button.dataset.tab).setAttribute('aria-labelledby', button.id);
+                button.id = index === 0 ? 'engine-tab-communication' : `engine-tab-${index - 1}`;
                 button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', button.dataset.tab);
                 this.listen(button, 'click', () => selectTab(button));
                 this.listen(button, 'keydown', event => {
@@ -32,18 +38,23 @@
                     selectTab(tabs[next]); tabs[next].focus?.();
                 });
             }
-            selectTab(tabs[0]);
+            selectTab(tabs[1]);
+            this.listen(desktop, 'change', () => {
+                const focused = document.activeElement;
+                const focusedPanel = focused?.closest('.tab-content');
+                let tab = tabs.find(button => button.classList.contains('active'));
+                if (!desktop.matches) {
+                    tab = tabs.find(button => button.dataset.tab === focusedPanel?.id) ?? tab;
+                    if (actions.contains(focused) && !hasEditActions(tab.dataset.tab)) tab = tabs[1];
+                }
+                selectTab(tab);
+                if (desktop.matches && tabBar.contains(focused)) this.el(`${tab.dataset.tab}-heading`).focus({ preventScroll: true });
+                if (!desktop.matches && focused?.classList.contains('engine-pane-heading')) tab.focus({ preventScroll: true });
+            });
             this.channels = new root.SerialPlotter.EngineChannelView({ document, root: this.el('engine-channel-panel'), controller,
-                getRegistry: () => controller.getChannelRegistry(), onChange: () => this.changedChannels() });
-            const ResizeObserver = document.defaultView?.ResizeObserver ?? root.ResizeObserver;
-            if (ResizeObserver) {
-                this.layoutObserver = new ResizeObserver(() => { if (!this.disposed) this.onLayout(); });
-                // Wrapped controls and font loading can change the space above the list without a window resize.
-                const enginePanel = this.el('data-engine');
-                for (const node of [enginePanel, enginePanel.children[0], enginePanel.children[1], ...this.channels.root.children])
-                    if (node !== this.channels.list) this.layoutObserver.observe(node);
-            }
+                capture: engine.service, onChange: () => this.changedChannels() });
             this.editor = new root.SerialPlotter.ProtocolEditorView({ document, root: this.el('protocol-editor-host'),
+                embedded: true, onOpen: onProtocolOpen, onClose: onProtocolClose, onSaveDraft: onSaveProtocolDraft, getSourceName,
                 getProtocol: () => this.currentProtocol(), getProtocols: () => this.draft.protocols,
                 getWorkerPool: () => this.engine.service.workerPool,
                 onLibraryChange: (schemas, selectedId) => this.updateProtocolLibrary(schemas, selectedId),
@@ -89,24 +100,11 @@
             this.applyRevision = (this.applyRevision ?? 0) + 1;
             this.editor.close();
             this.engine = engine; this.mappingPage = 0;
+            this.channels.setCapture(engine.service);
             this.draft = JSON.parse(JSON.stringify(engine.config.draft ?? engine.serialize()));
             this.draft.draft = null;
             this.el('engine-apply').disabled = false;
-            this.render(); this.onLayout();
-        }
-        minimumHeight() {
-            if (!this.channels) return 140;
-            const panel = this.el('engine-channels'), engine = this.el('data-engine');
-            // Measure inactive controls at the same width, outside the layout, to keep every tab's split identical.
-            const probe = panel.hidden || !panel.classList.contains('active');
-            if (probe) panel.classList.add('engine-size-probe');
-            try {
-                const controls = Math.max(0, this.channels.list.getBoundingClientRect().top - panel.getBoundingClientRect().top);
-                const style = this.document.defaultView?.getComputedStyle?.(panel);
-                return Math.max(140, Math.ceil(engine.children[0].offsetHeight + engine.children[1].offsetHeight +
-                    (this.el('engine-connection-source-wrap').hidden ? 0 : this.el('engine-connection-source-wrap').offsetHeight) +
-                    controls + this.channels.minimumListHeight + (parseFloat(style?.paddingBottom) || 0)));
-            } finally { if (probe) panel.classList.remove('engine-size-probe'); }
+            this.render();
         }
         listen(node, name, callback) { node?.addEventListener(name, callback); this.listeners.push(() => node?.removeEventListener(name, callback)); }
         node(tag, text, className) { const node = this.document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
@@ -185,21 +183,13 @@
             this.status('草稿待应用；采集仍使用已应用规则'); this.onChange();
         }
         prepareApply() {
+            if (this.draft.mode === 'Self_Defined_Frame' && this.draft.editorState?.navigation?.[this.draft.protocolId]?.unfinishedJson)
+                throw new Error('请先在协议编辑器中修正 JSON 草稿');
             const settings = { ...this.collect(), draft: null };
             let required = Number(this.engine.globals.channelsCount);
             if (settings.mode === 'Data_Array') required = Math.max(required, Number(settings.array.channelsCount));
             for (const mapping of settings.mappings) required = Math.max(required, mapping.channel + 1);
-            const local = this.engine.globals, current = Number(local.channelsCount);
-            let expansion;
-            if (this.engine === this.primaryEngine) expansion = this.controller.prepareRawChannelExpansion(required);
-            else if (required > current) {
-                if (!Number.isInteger(required) || required > 65535) throw new Error('来源通道数不能超过 65535');
-                expansion = {
-                    globals: { ...local, channelsCount: String(required) },
-                    numberMap: new Map(Array.from({ length: current }, (_, index) => [index + 1, index + 1])),
-                    commit: () => { local.channelsCount = String(required); }
-                };
-            }
+            const expansion = this.controller.prepareRawChannelExpansion(required, this.engine.service);
             return { settings, expansion };
         }
         validate() {
@@ -216,13 +206,7 @@
                 const engine = this.engine, previous = engine.config;
                 const ready = engine.apply(settings, { channelExpansion: expansion && {
                     globals: expansion.globals, numberMap: expansion.numberMap,
-                    commit: () => {
-                        if (expansion.commit) expansion.commit();
-                        else {
-                            this.controller.commitChannelRemap(expansion);
-                            this.channels.remapDrafts(expansion.numberMap);
-                        }
-                    }
+                    commit: () => this.controller.commitChannelRemap(expansion)
                 } });
                 if (engine.config !== previous) this.controller.rebindEngineSources(engine.service);
                 await ready;
@@ -260,11 +244,7 @@
                         number++;
                         if (number + this.engine.globals.channelDefinitions.length > 65535) throw new Error('通道总数不能超过 65535');
                         entry = { type: 'raw', number };
-                    } else if (this.engine === this.primaryEngine) entry = this.controller.getChannelRegistry().resolve(channel.value.trim());
-                    else {
-                        const number = Number(/^CH(\d+)$/u.exec(channel.value.trim())?.[1]);
-                        if (number > 0 && number <= Number(this.engine.globals.channelsCount)) entry = { type: 'raw', number };
-                    }
+                    } else entry = this.controller.getChannelRegistry(this.engine.service).resolve(channel.value.trim());
                     if (!entry || entry.type !== 'raw') throw new Error('请选择已有原始字段通道，或新建通道');
                     const mapping = { channel: entry.number - 1, protocolId: this.draft.protocolId,
                         messageId: message.value, path: path.value.trim() };
@@ -309,7 +289,7 @@
         // The channel editor owns row updates; replacing it on every preview
         // removes the input that owns the browser's open native color picker.
         changedChannels() { this.onChange(); }
-        dispose() { this.disposed = true; this.applyRevision++; this.layoutObserver?.disconnect(); this.listeners.forEach(cleanup => cleanup()); this.channels.dispose(); this.editor.dispose(); }
+        dispose() { this.disposed = true; this.applyRevision++; this.listeners.forEach(cleanup => cleanup()); this.channels.dispose(); this.editor.dispose(); }
     }
     root.SerialPlotter ??= {}; root.SerialPlotter.DataEngineView = DataEngineView;
     if (typeof module !== 'undefined') module.exports = { DataEngineView };

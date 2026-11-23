@@ -52,7 +52,7 @@ class SerialEngine {
     /* ── 连接管理 ── */
 
     /** 请求用户选择串口并打开，成功后启动 readLoop 持续读取 */
-    async connect(config) {
+    async connect(config, boundPort = null) {
         if (this._disposed) throw new Error('串口适配器已销毁');
         const serial = globalThis.navigator?.serial;
         if (!serial) throw new Error('当前浏览器不支持 Web Serial API');
@@ -65,7 +65,7 @@ class SerialEngine {
         };
         let reservedPort;
         try {
-            const port = await serial.requestPort();
+            const port = boundPort ?? await serial.requestPort();
             if (generation !== this._generation || this._disposed) throw cancelled();
             if (serialPortOwners.has(port)) throw new Error('该串口已被另一数据来源打开或正在连接');
             serialPortOwners.set(port, this);
@@ -201,5 +201,66 @@ class SerialEngine {
     }
 }
 
+/** Exact port handles stay in memory. USB identifiers restore only unambiguous grants. */
+class SerialPortBindings {
+    constructor(hints) { this.ports = new Map(); this.load(hints); }
+
+    load(hints = []) {
+        const next = new Map(hints.map(({ id, ...hint }) => [id, hint]));
+        for (const id of this.ports.keys()) {
+            if (!next.has(id) || JSON.stringify(next.get(id)) !== JSON.stringify(this.hints?.get(id))) this.ports.delete(id);
+        }
+        this.hints = next;
+    }
+
+    snapshot() { return [...this.hints].map(([id, hint]) => ({ id, ...hint })); }
+    remove(id) { this.hints.delete(id); this.ports.delete(id); }
+
+    static identity(port) {
+        try {
+            const { usbVendorId, usbProductId } = port.getInfo?.() ?? {};
+            if (Number.isInteger(usbVendorId) && Number.isInteger(usbProductId)) return { usbVendorId, usbProductId };
+        } catch { /* A removed device may no longer provide information. */ }
+        return null;
+    }
+
+    static same(a, b) {
+        return a && b && a.usbVendorId === b.usbVendorId && a.usbProductId === b.usbProductId;
+    }
+
+    available(port, id) { return ![...this.ports].some(([owner, item]) => owner !== id && item === port); }
+
+    bind(id, port, grants) {
+        if (!this.available(port, id)) throw new Error('该物理端口已绑定到其他串口来源');
+        const identity = SerialPortBindings.identity(port);
+        if (identity) {
+            const sameModel = hint => SerialPortBindings.same(hint, identity);
+            const ambiguous = this.hints.get(id)?.ambiguous && sameModel(this.hints.get(id)) ||
+                [...this.hints].some(([owner, hint]) => owner !== id && sameModel(hint)) ||
+                (grants ?? []).filter(item => sameModel(SerialPortBindings.identity(item))).length > 1;
+            this.hints.set(id, { ...identity, ambiguous: Boolean(ambiguous) });
+            if (ambiguous) for (const hint of this.hints.values()) if (sameModel(hint)) hint.ambiguous = true;
+        } else this.hints.delete(id);
+        this.ports.set(id, port);
+    }
+
+    resolve(id, grants) {
+        const exact = this.ports.get(id), hint = this.hints.get(id);
+        if (exact) {
+            if (grants === null || grants.includes(exact)) return { port: exact };
+            return { issue: '已绑定的端口不在线或授权已取消' };
+        }
+        if (!hint) return { issue: '待绑定端口' };
+        const sameModel = other => SerialPortBindings.same(other, hint);
+        const matches = (grants ?? []).filter(port => sameModel(SerialPortBindings.identity(port)));
+        const sharedHint = [...this.hints].some(([owner, other]) => owner !== id && sameModel(other));
+        if (sharedHint || matches.length > 1) hint.ambiguous = true;
+        if (hint.ambiguous) return { issue: '同型号端口需要重新确认绑定' };
+        if (!matches.length || !this.available(matches[0], id)) return { issue: '已绑定的端口不在线或授权已取消' };
+        return { port: matches[0] };
+    }
+}
+
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.SerialEngine = SerialEngine;
+globalThis.SerialPlotter.SerialPortBindings = SerialPortBindings;

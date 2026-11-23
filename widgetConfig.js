@@ -12,7 +12,7 @@ const widgetSymbolUtils = () => typeof module !== 'undefined' ? require('./confi
 
 const GLOBAL_DEFAULTS = {
     symbolVersion: 2,
-    connType: 'serial', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
+    connType: 'serial', serialName: '主串口', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
     netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
     maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
     endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
@@ -116,7 +116,8 @@ function legacyWindowPoints(settings = {}) {
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
     const connectionSource = settings.connectionSource ?? 'primary';
-    if (typeof connectionSource !== 'string' || !/^(?:primary|serial-[1-9]\d*)$/.test(connectionSource))
+    if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && type === 'wave') &&
+        !/^(?:primary|serial-[1-9]\d*)$/.test(connectionSource))
         throw new Error('控件接收来源无效');
     if (settings.engineSource !== undefined && settings.engineSource !== null &&
         (typeof settings.engineSource !== 'string' || settings.engineSource.length > 512)) throw new Error('控件数据源无效');
@@ -163,66 +164,79 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     return result;
 }
 
-function normalizeSerialSource(input) {
+function normalizeConnectionName(value) {
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (!name || name.length > 80) throw new Error('来源名称需为 1–80 个字符');
+    return name;
+}
+
+function normalizeConnectionSettings(input) {
+    const { mode = 'serial', baudRate = GLOBAL_DEFAULTS.serialBaud, dataBits = GLOBAL_DEFAULTS.serialData,
+        stopBits = GLOBAL_DEFAULTS.serialStop, parity = GLOBAL_DEFAULTS.serialParity, host = GLOBAL_DEFAULTS.netHost,
+        port = GLOBAL_DEFAULTS.netPort, localPort = GLOBAL_DEFAULTS.netLocalPort, timeOffsetMs = 0 } = input;
+    const name = normalizeConnectionName(input.name);
+    widgetConfigUtils.validateConfig({ connType: mode, serialBaud: baudRate, serialData: String(dataBits),
+        serialStop: String(stopBits), serialParity: parity });
+    if (!['string', 'number'].includes(typeof timeOffsetMs) || String(timeOffsetMs).trim() === '' ||
+        !Number.isSafeInteger(Number(timeOffsetMs))) throw new Error('对齐偏移必须为整数毫秒');
+    const result = { name, mode, baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits),
+        parity, host: typeof host === 'string' ? host.trim() : '', port: String(port).trim(),
+        localPort: String(localPort).trim(), timeOffsetMs: Number(timeOffsetMs) };
+    if (mode !== 'serial') widgetConfigUtils.parsePort(result.port);
+    if ((mode === 'tcp-client' || mode === 'udp') && !result.host) throw new Error('请输入远端地址');
+    if (mode === 'udp' && result.localPort) widgetConfigUtils.parsePort(result.localPort);
+    return result;
+}
+
+function normalizeConnectionSource(input) {
+    // Preserve stored IDs so changing the transport keeps widget, send and export bindings.
     if (!input || typeof input.id !== 'string' || !/^serial-(?:[2-9]|[1-9]\d+)$/.test(input.id))
-        throw new Error('串口来源编号无效');
-    const name = typeof input.name === 'string' ? input.name.trim() : '';
-    if (!name || name.length > 80) throw new Error('串口来源名称需为 1–80 个字符');
-    const baudRate = widgetConfigUtils.parseIntInRange(input.baudRate, 1, Number.MAX_SAFE_INTEGER, '波特率');
-    const dataBits = Number(input.dataBits), stopBits = Number(input.stopBits), parity = input.parity;
-    if (![7, 8].includes(dataBits) || ![1, 2].includes(stopBits) || !['none', 'even', 'odd'].includes(parity))
-        throw new Error('串口来源的串行参数无效');
-    const timeOffsetMs = input.timeOffsetMs === undefined ? 0 : Number(input.timeOffsetMs);
-    if (!Number.isSafeInteger(timeOffsetMs) || input.timeOffsetMs === '' || input.timeOffsetMs === null ||
-        input.timeOffsetMs !== undefined && !['string', 'number'].includes(typeof input.timeOffsetMs))
-        throw new Error('对齐偏移必须为整数毫秒');
-    return { id: input.id, name, baudRate, dataBits, stopBits, parity, timeOffsetMs };
+        throw new Error('接收来源编号无效');
+    return { id: input.id, ...normalizeConnectionSettings(input) };
 }
 
 function serialSourceGlobals(globals, entry) {
     return { ...globals, channelsCount: String(entry.channelCount),
         channelNames: [...(entry.channelNames ?? [])], channelColors: [...(entry.channelColors ?? [])],
-        channelDefinitions: [], channelRecords: [] };
+        channelDefinitions: [...(entry.channelDefinitions ?? [])], channelRecords: [...(entry.channelRecords ?? [])] };
 }
 
-function normalizeSerialSources(input = { nextNumber: 2, entries: [] }, globals, engineApi) {
+function normalizeConnectionSources(input = { nextNumber: 2, entries: [] }, globals, engineApi) {
     if (!input || !Array.isArray(input.entries) || !Number.isSafeInteger(input.nextNumber) || input.nextNumber < 2)
-        throw new Error('串口来源配置无效');
+        throw new Error('接收来源配置无效');
     const entries = input.entries.map(entry => {
-        const settings = normalizeSerialSource(entry);
+        const settings = normalizeConnectionSource(entry);
         const channelCount = widgetConfigUtils.parseIntInRange(entry.channelCount ?? globals.channelsCount, 1, 65535, '来源通道数');
-        const channelNames = entry.channelNames ?? [], channelColors = entry.channelColors ?? [];
-        widgetConfigUtils.validateConfig({ channelNames, channelColors });
-        const local = serialSourceGlobals(globals, { channelCount, channelNames, channelColors });
+        const local = { ...globals, channelsCount: String(channelCount),
+            channelNames: entry.channelNames ?? [], channelColors: entry.channelColors ?? [],
+            channelDefinitions: entry.channelDefinitions ?? [], channelRecords: entry.channelRecords ?? [] };
+        normalizeChannelConfiguration(local, 2);
         const engine = engineApi.normalizeDataEngine(entry.engine === undefined ? { mode: 'Raw_Data' } : entry.engine, local);
         if (Number(engine.array.channelsCount) > channelCount) throw new Error('数组通道数超出来源的通道目录');
         const rebuildHistory = entry.rebuildHistory ?? globals.rebuildHistory;
         if (typeof rebuildHistory !== 'boolean') throw new Error('来源重建历史开关无效');
-        return { ...settings, channelCount, channelNames, channelColors, rebuildHistory, engine };
+        return { ...settings, channelCount, channelNames: local.channelNames, channelColors: local.channelColors,
+            channelDefinitions: local.channelDefinitions, channelRecords: local.channelRecords, rebuildHistory, engine };
     });
     const ids = new Set(entries.map(entry => entry.id));
     if (ids.size !== entries.length || entries.some(entry => Number(entry.id.slice(7)) >= input.nextNumber))
-        throw new Error('串口来源编号重复或超出分配范围');
-    return { nextNumber: input.nextNumber, entries };
+        throw new Error('接收来源编号重复或超出分配范围');
+    const bindings = input.bindings ?? [];
+    if (!Array.isArray(bindings)) throw new Error('串口端口绑定无效');
+    const serialIds = new Set(entries.filter(entry => entry.mode === 'serial').map(entry => entry.id));
+    if (globals.connType === 'serial') serialIds.add('primary');
+    const bound = new Set();
+    const normalizedBindings = bindings.map(binding => {
+        if (!binding || binding.id !== 'primary' && !ids.has(binding.id) || bound.has(binding.id) ||
+            ![binding.usbVendorId, binding.usbProductId].every(value => Number.isInteger(value) && value >= 0 && value <= 65535) ||
+            binding.ambiguous !== undefined && typeof binding.ambiguous !== 'boolean') throw new Error('串口端口绑定无效');
+        bound.add(binding.id);
+        return { id: binding.id, usbVendorId: binding.usbVendorId, usbProductId: binding.usbProductId, ambiguous: binding.ambiguous === true };
+    });
+    return { nextNumber: input.nextNumber, entries, bindings: normalizedBindings.filter(binding => serialIds.has(binding.id)) };
 }
 
-function validateWorkspaceConfig(config) {
-    if (!config || ![2, 3].includes(config.version) || !config.global || typeof config.global !== 'object' ||
-        Array.isArray(config.global) || !Array.isArray(config.widgets))
-        throw new Error('工作区配置版本或结构无效');
-    if (config.global.symbolVersion !== undefined && config.global.symbolVersion !== 2) throw new Error('通道符号版本无效');
-    const globals = pick(config.global, GLOBAL_DEFAULTS);
-    const legacyText = config.widgets.find(widget => widget?.type === 'byte' && widget.settings?.captureMode === 'text') ??
-        config.widgets.find(widget => widget?.type === 'byte');
-    globals.textEncoding = config.global.textEncoding ?? legacyText?.settings?.textEncoding ?? 'utf-8';
-    globals.textBoundary = config.global.textBoundary ?? legacyText?.settings?.textBoundary ?? 'idle';
-    const windowPoints = config.global.plotWindowPoints ??
-        legacyWindowPoints(config.widgets.find(widget => widget?.type === 'wave')?.settings) ?? GLOBAL_DEFAULTS.plotWindowPoints;
-    widgetConfigUtils.validateConfig({ plotWindowPoints: windowPoints });
-    globals.plotWindowPoints = String(Math.min(Number(windowPoints), Number(globals.maxPoints)));
-    widgetConfigUtils.validateConfig(globals);
-    if (!Number.isSafeInteger(globals.maxRawFrameBytes) || globals.maxRawFrameBytes < 64 || globals.maxRawFrameBytes > 64 * 1024 * 1024)
-        throw new Error('原始帧分段上限需为 64–67108864 字节的整数');
+function normalizeChannelConfiguration(globals, symbolVersion) {
     if (!Array.isArray(globals.channelNames) || globals.channelNames.some(name => typeof name !== 'string'))
         throw new Error('通道名称无效');
     if (!Array.isArray(globals.channelColors) || globals.channelColors.some(color =>
@@ -236,14 +250,51 @@ function validateWorkspaceConfig(config) {
             stableIds.has(entry.id) || stableNumbers.has(entry.number)) throw new Error('通道稳定身份或编号重复、无效');
         stableIds.add(entry.id); stableNumbers.add(entry.number);
     }
-    const operations = new widgetChannelUtils.ChannelOperations(Number(globals.channelsCount), globals.channelDefinitions, { names: globals.channelNames, symbolVersion: config.global.symbolVersion });
+    const operations = new widgetChannelUtils.ChannelOperations(Number(globals.channelsCount), globals.channelDefinitions, { names: globals.channelNames, symbolVersion });
     globals.channelDefinitions = operations.definitions;
     const registry = new widgetRegistryUtils.ChannelRegistry({ rawCount: Number(globals.channelsCount), definitions: globals.channelDefinitions, names: globals.channelNames, channels: globals.channelRecords });
     globals.channelRecords = registry.toJSON();
     globals.channelNames = globals.channelNames.map((name, index) => /^CH0*\d+$/.test(name) && Number(name.slice(2)) === index + 1 ? `CH${String(index + 1).padStart(5, '0')}` : name);
+}
+
+function validateWorkspaceConfig(config) {
+    if (!config || ![2, 3].includes(config.version) || !config.global || typeof config.global !== 'object' ||
+        Array.isArray(config.global) || !Array.isArray(config.widgets))
+        throw new Error('工作区配置版本或结构无效');
+    if (config.global.symbolVersion !== undefined && config.global.symbolVersion !== 2) throw new Error('通道符号版本无效');
+    const globals = pick(config.global, GLOBAL_DEFAULTS);
+    globals.serialName = normalizeConnectionName(globals.serialName);
+    const legacyText = config.widgets.find(widget => widget?.type === 'byte' && widget.settings?.captureMode === 'text') ??
+        config.widgets.find(widget => widget?.type === 'byte');
+    globals.textEncoding = config.global.textEncoding ?? legacyText?.settings?.textEncoding ?? 'utf-8';
+    globals.textBoundary = config.global.textBoundary ?? legacyText?.settings?.textBoundary ?? 'idle';
+    const windowPoints = config.global.plotWindowPoints ??
+        legacyWindowPoints(config.widgets.find(widget => widget?.type === 'wave')?.settings) ?? GLOBAL_DEFAULTS.plotWindowPoints;
+    widgetConfigUtils.validateConfig({ plotWindowPoints: windowPoints });
+    globals.plotWindowPoints = String(Math.min(Number(windowPoints), Number(globals.maxPoints)));
+    widgetConfigUtils.validateConfig(globals);
+    if (!Number.isSafeInteger(globals.maxRawFrameBytes) || globals.maxRawFrameBytes < 64 || globals.maxRawFrameBytes > 64 * 1024 * 1024)
+        throw new Error('原始帧分段上限需为 64–67108864 字节的整数');
+    normalizeChannelConfiguration(globals, config.global.symbolVersion);
     const engineApi = typeof module !== 'undefined' ? require('./dataEngine') : globalThis.SerialPlotter;
-    const serialSources = normalizeSerialSources(config.serialSources, globals, engineApi);
-    const serialById = new Map(serialSources.entries.map(entry => [entry.id, entry]));
+    const serialSources = normalizeConnectionSources(config.serialSources, globals, engineApi);
+    const connectionById = new Map(serialSources.entries.map(entry => [entry.id, entry]));
+    const workspaceApi = typeof module !== 'undefined' ? require('./workspaceChannels') : globalThis.SerialPlotter;
+    const workspaceChannels = workspaceApi.normalizeWorkspaceChannels(config.workspaceChannels);
+    const sourceRecords = new Map([['primary', globals.channelRecords], ...serialSources.entries.map(entry => [entry.id, entry.channelRecords])]);
+    const sourceChannels = new Map([...sourceRecords].map(([id, records]) =>
+        [id, new Map(records.filter(record => record.type === 'raw').map(record => [record.id, record.number]))]));
+    for (const [id, timing] of Object.entries(workspaceChannels.timebases)) {
+        if (!sourceChannels.has(id)) throw new Error('来源时间基准引用了不存在的来源');
+        workspaceChannels.timebases[id] = {
+            ...timing, mode: timing.mode === 'fixed' ? 'fixed' : 'receive',
+            sequenceChannelId: null, timestampChannelId: null, sequenceWrap: null, timestampWrap: null
+        };
+    }
+    for (const mapping of workspaceChannels.mappings) {
+        if (sourceChannels.get(mapping.sourceId)?.get(mapping.channelId) !== mapping.number)
+            throw new Error('全局通道引用了不存在的来源通道');
+    }
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
@@ -252,8 +303,9 @@ function validateWorkspaceConfig(config) {
         ids.add(widget.id);
         if (widget.settings?.engineSource !== undefined && widget.settings.engineSource !== null &&
             (typeof widget.settings.engineSource !== 'string' || widget.settings.engineSource.length > 512)) throw new Error('控件数据源无效');
-        const sourceId = widget.settings?.connectionSource ?? 'primary', entry = serialById.get(sourceId);
-        if (sourceId !== 'primary' && !entry) throw new Error('控件引用了不存在的串口来源');
+        const sourceId = widget.settings?.connectionSource ?? 'primary', entry = connectionById.get(sourceId);
+        if (sourceId === 'workspace' ? !workspaceChannels.mappings.length : sourceId !== 'primary' && !entry)
+            throw new Error('控件引用了不存在的接收来源');
         return { id: widget.id, type: widget.type, title: widget.title,
             settings: normalizeWidgetSettings(widget.type, widget.settings, entry ? serialSourceGlobals(globals, entry) : globals) };
     });
@@ -334,7 +386,7 @@ function validateWorkspaceConfig(config) {
         !['string', 'number'].includes(typeof send.interval) || String(send.interval).trim() === '' ||
         !Number.isFinite(Number(send.interval)) || Number(send.interval) < 0 || !['regular', 'commands'].includes(send.tab))
         throw new Error('发送模式、间隔或单位无效');
-    if (send.connectionSource !== 'primary' && !serialById.has(send.connectionSource)) throw new Error('发送目标连接无效');
+    if (send.connectionSource !== 'primary' && !connectionById.has(send.connectionSource)) throw new Error('发送目标连接无效');
     send.commands = widgetCommandUtils().normalizeCommands(send.commands);
     if (send.protocol !== undefined) send.protocol = (typeof module !== 'undefined' ? require('./protocolSendView') : globalThis.SerialPlotter).normalizeProtocolCommand(send.protocol);
     if (!globals.channelColors.length) {
@@ -361,8 +413,8 @@ function validateWorkspaceConfig(config) {
         const renames = [...migration.renamesByProtocol.values()].flat();
         widget.settings.protocolFieldPaths = widget.settings.protocolFieldPaths.map(path => widgetSymbolUtils().migrateSymbolPath(path, renames));
     }
-    if (serialSources.entries.some(entry => ids.has(entry.id))) throw new Error('串口来源与控件编号重复');
-    return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine, serialSources };
+    if (serialSources.entries.some(entry => ids.has(entry.id))) throw new Error('接收来源与控件编号重复');
+    return { version: 3, global: globals, widgets, workspace, nextNumber, tools, send, uiLayout, dataEngine, serialSources, workspaceChannels };
 }
 
 function migrateWorkspaceConfig(legacy, legacyLayout) {
@@ -389,7 +441,7 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
 }
 
 const WidgetConfig = { GLOBAL_DEFAULTS, WAVE_DEFAULTS, BYTE_DEFAULTS,
-    isValidWidgetId, normalizeSerialSource, serialSourceGlobals, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
+    isValidWidgetId, normalizeConnectionSettings, normalizeConnectionSource, serialSourceGlobals, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.WidgetConfig = WidgetConfig;
 if (typeof module !== 'undefined') module.exports = WidgetConfig;

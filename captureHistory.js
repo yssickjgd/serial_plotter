@@ -19,6 +19,16 @@ class CaptureHistory {
     get endByte() { return captureHistoryStates.get(this).endByte; }
     get revision() { return captureHistoryStates.get(this).revision; }
     get streamStartByte() { return captureHistoryStates.get(this).streamStartByte; }
+    streamStartAt(byteOffset) {
+        const state = captureHistoryStates.get(this);
+        let low = state.boundaryHead, high = state.boundaries.length;
+        while (low < high) {
+            const mid = (low + high) >>> 1;
+            if (state.boundaries[mid].byteOffset <= byteOffset) low = mid + 1;
+            else high = mid;
+        }
+        return low > state.boundaryHead ? state.boundaries[low - 1].byteOffset : state.streamStartByte;
+    }
     get estimatedMemoryBytes() {
         const state = captureHistoryStates.get(this);
         return state.storageBytes + (state.chunks.length - state.head) * 256 +

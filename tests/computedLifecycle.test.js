@@ -23,12 +23,12 @@ test('destroying the global engine editor detaches formula and autocomplete call
     const number = controller.addChannel('formula');
     f.app.engineView.channels.expanded.add(number); f.app.engineView.channels.refresh();
     const expression = f.get('engine-channel-panel').querySelector('[data-role="channel-expression"]');
-    const apply = f.get('engine-channel-panel').querySelector('[data-role="channel-apply"]');
-    assert.ok(expression); assert.ok(apply);
+    const editor = expression.closest('.channel-definition');
+    assert.ok(expression); assert.ok(editor);
     assert.equal(f.document.querySelectorAll('.channel-autocomplete').length, 1);
     f.app.dispose(); expression.value = 'CH01*3'; expression.dispatchEvent({ type: 'change' });
     expression.dispatchEvent({ type: 'input' });
-    apply.click();
+    editor.dispatchEvent({ type: 'pointerleave' });
     assert.equal(controller.globals.channelDefinitions[0].expression, 'CH00001');
     assert.equal(f.document.querySelectorAll('.channel-autocomplete').length, 0);
 });

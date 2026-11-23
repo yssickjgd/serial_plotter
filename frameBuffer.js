@@ -22,6 +22,7 @@ class FrameBuffer {
         this.version = 0;
         this.timestampsMonotonic = true;
         this.rawMode = false;
+        this.appendedFrames = 0;
         this.rawBytesWritten = 0;
         this.retainedByteLength = 0;
     }
@@ -138,7 +139,12 @@ class FrameBuffer {
         chunk.timestamps[offset] = timestamp;
         chunk.byteOffsets[offset] = metadata.byteOffset ?? this.rawBytesWritten;
         chunk.endBytes[offset] = metadata.endByte ?? chunk.byteOffsets[offset] + bytes.length;
+        if (metadata.integer64Layout || chunk.integer64Layouts) {
+            chunk.integer64Layouts ??= new Array(this.chunkSize);
+            chunk.integer64Layouts[offset] = metadata.integer64Layout;
+        }
         this.rawBytesWritten = chunk.endBytes[offset];
+        this.appendedFrames++;
         if (this.length === this.capacity) this.head = (this.head + 1) % this.storageCapacity;
         else this.length++;
         this.version++;
@@ -192,6 +198,7 @@ class FrameBuffer {
         chunk.streamStartBytes[offset] = streamStartByte;
         chunk.byteOffsets[offset] = byteOffset ?? this.rawBytesWritten;
         this.rawBytesWritten = endByte ?? chunk.byteOffsets[offset] + bytes.length;
+        this.appendedFrames++;
         if (this.length === this.capacity) this.head = (this.head + 1) % this.storageCapacity;
         else this.length++;
         this.version++;
@@ -209,6 +216,19 @@ class FrameBuffer {
         if (this.rawMode) return undefined;
         const slot = (this.head + index) % this.storageCapacity;
         return this.values[channel]?.[Math.floor(slot / this.chunkSize)]?.[slot % this.chunkSize] ?? NaN;
+    }
+
+    getTimingValue(channel, index) {
+        const numeric = this.getValue(channel, index);
+        if (!Number.isFinite(numeric) || Number.isSafeInteger(numeric)) return numeric;
+        const slot = (this.head + index) % this.storageCapacity, within = slot % this.chunkSize;
+        const chunk = this.frames[Math.floor(slot / this.chunkSize)];
+        const layout = chunk?.integer64Layouts?.[within];
+        if (!layout || channel >= layout.channelsCount) return numeric;
+        const offset = layout.payloadOffset + channel * 8;
+        if (offset + 8 > chunk.lengths[within]) return numeric;
+        const view = new DataView(chunk.raw.buffer, chunk.raw.byteOffset + within * chunk.stride + offset, 8);
+        return layout.signed ? view.getBigInt64(0, layout.littleEndian) : view.getBigUint64(0, layout.littleEndian);
     }
 
     /** Copy a chronological column in contiguous chunks, without per-sample lookup. */
@@ -251,7 +271,8 @@ class FrameBuffer {
             time: chunk.times[offset],
             order: chunk.orders[offset],
             timestamp: chunk.timestamps[offset],
-            kind: 'rx', byteOffset: chunk.byteOffsets[offset], endByte: chunk.endBytes[offset]
+            kind: 'rx', byteOffset: chunk.byteOffsets[offset], endByte: chunk.endBytes[offset],
+            ...(chunk.integer64Layouts?.[offset] ? { integer64Layout: chunk.integer64Layouts[offset] } : {})
         };
     }
 
@@ -262,6 +283,10 @@ class FrameBuffer {
     }
 
     get originTimestamp() { return this.timestampAt(0); }
+
+    frameOrdinalAt(index) {
+        return index >= 0 && index < this.length ? this.appendedFrames - this.length + index : NaN;
+    }
 
     orderAt(index) {
         if (index < 0 || index >= this.length) return NaN;
@@ -407,12 +432,13 @@ class FrameBuffer {
         if (other === this) return;
         const nextVersion = this.version + 1;
         for (const key of ['channelCount', 'capacity', 'storageCapacity', 'values', 'frames',
-            'head', 'length', 'timestampsMonotonic', 'rawMode', 'rawBytesWritten', 'retainedByteLength']) this[key] = other[key];
+            'head', 'length', 'timestampsMonotonic', 'rawMode', 'rawBytesWritten', 'retainedByteLength', 'appendedFrames']) this[key] = other[key];
         this.version = nextVersion;
         other.clear();
     }
 
     clear() {
+        this.appendedFrames = 0;
         this.rawBytesWritten = 0;
         this.retainedByteLength = 0;
         this.values = [];

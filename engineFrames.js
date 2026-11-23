@@ -18,7 +18,7 @@
             this.events = new Map(); this.origins = []; this.segments = []; this.columns = new Map(); this.length = 0;
             this.head = 0; this.next = 0; this.active = null; this.version = (this.version ?? 0) + 1;
             this.timestampsMonotonic = true; this.lastTimestamp = -Infinity;
-            this.firstTimestamp = NaN;
+            this.firstTimestamp = NaN; this.formulaInputEngine = null; this.formulaInputs = null;
             this.expiryRules = [{ time: -Infinity, expiry: { ...this.expiry } }];
             this.engine = new deps.ChannelOperations(this.baseChannelCount, this.definitions, { names: this.names, symbolVersion: this.symbolVersion });
             this.definitions = this.engine.definitions; this.symbolVersion = 2;
@@ -56,37 +56,58 @@
             this.advance(timestamp, false);
             const lastTick = this.active.time + (this.active.count - 1) * this.active.step;
             if (this.active.count && timestamp <= lastTick + 1e-8) timestamp = lastTick + this.active.step;
-            this.origins.push({ timestamp, origin });
+            this.recordValues(timestamp, values, origin);
+            this.advance(samplingTime);
+        }
+        recordValues(timestamp, values, origin) {
+            if (origin !== null) this.origins.push({ timestamp, origin });
             for (const [channel, value] of values) {
                 if (!Number.isInteger(channel) || channel < 0 || channel >= this.rawChannelCount) throw new RangeError('字段映射超出原始通道目录');
                 const events = this.events.get(channel) ?? [];
                 events.push({ timestamp, value: Number.isFinite(value) ? value : NaN, origin });
                 this.events.set(channel, events);
             }
-            this.advance(samplingTime);
         }
-        advance(timestamp, inclusive = true) {
+        advance(timestamp, inclusive = true, maxWorkMs = Infinity) {
             if (!this.active || !Number.isFinite(timestamp)) return 0;
             const segment = this.active, step = segment.step;
-            const count = Math.max(segment.count, Math.floor((timestamp - segment.time) / step + (inclusive ? 1e-8 : -1e-8)) + 1);
-            const added = count - segment.count;
-            if (!added) return 0;
+            let count = Math.max(segment.count, Math.floor((timestamp - segment.time) / step + (inclusive ? 1e-8 : -1e-8)) + 1);
+            if (count === segment.count) return 0;
             if (this.definitions.some(d => d.type === 'formula')) {
+                const rawInputs = this.useFormulaInputsOnly ? this._formulaInputs(this.engine) : null;
+                const samples = rawInputs ? new Float64Array(this.rawChannelCount).fill(NaN) : null;
+                const deadline = maxWorkMs === Infinity ? Infinity : performance.now() + maxWorkMs;
                 for (let tick = segment.count; tick < count; tick++) {
                     const time = segment.time + tick * step;
-                    const values = Array.from({ length: this.rawChannelCount }, (_, channel) => this._eventValue(channel, time));
+                    if (samples) for (const channel of rawInputs) samples[channel] = this._eventValue(channel, time);
+                    const values = samples ?? Array.from({ length: this.rawChannelCount }, (_, channel) => this._eventValue(channel, time));
                     const result = this.engine.push(values), index = segment.first + tick;
                     for (const d of this.definitions) if (d.type === 'formula') {
                         const column = this.columns.get(d.number - 1) ?? new Map(), key = Math.floor(index / this.chunkSize);
                         if (!column.has(key)) column.set(key, new Float64Array(this.chunkSize).fill(NaN));
                         column.get(key)[index % this.chunkSize] = result[d.number - 1]; this.columns.set(d.number - 1, column);
                     }
+                    if (deadline !== Infinity && (tick - segment.count) % 32 === 31 && performance.now() >= deadline) {
+                        count = tick + 1;
+                        break;
+                    }
                 }
             }
+            const added = count - segment.count;
             segment.count = count; this.next = segment.first + count; this.length += added;
             this.lastTimestamp = segment.time + (count - 1) * step; this.version++;
             if (this.length > this.capacity) this.discardOldest(this.length - this.capacity);
             return added;
+        }
+        _formulaInputs(engine) {
+            if (this.formulaInputEngine !== engine) {
+                const inputs = new Set();
+                for (const entry of engine.entries.values()) for (const number of entry.dependencies)
+                    if (number <= engine.rawCount) inputs.add(number - 1);
+                this.formulaInputEngine = engine;
+                this.formulaInputs = [...inputs];
+            }
+            return this.formulaInputs;
         }
         _event(channel, timestamp) {
             const events = this.events.get(channel); if (!events?.length) return null;
@@ -202,7 +223,7 @@
                 if (!Number.isFinite(this._eventValue(task.number - 1, sample.time))) { expired = true; continue; }
                 newestInputTime = Math.max(newestInputTime, event.timestamp);
                 const origin = event.origin; if (!origin) continue;
-                const originKey = `${origin.order}:${origin.byteOffset}:${origin.endByte}`;
+                const originKey = `${origin.sourceId ?? ''}:${origin.epoch ?? ''}:${origin.order}:${origin.byteOffset}:${origin.endByte}`;
                 if (!originKeys.has(originKey) && origins.length < originCapacity) { originKeys.add(originKey); origins.push(origin); }
                 else if (!originKeys.has(originKey)) originLimit = true;
                 if (event.timestamp > representativeTime || event.timestamp === representativeTime && (origin.order ?? 0) > (representative?.order ?? 0)) {
@@ -387,6 +408,7 @@
             if (origins) this.origins.splice(0, origins);
             for (const events of this.events.values()) {
                 let remove = 0; while (remove < events.length - 1 && events[remove + 1].timestamp <= time) remove++;
+                remove = Math.max(0, remove - ((this.retainedPredecessors ?? 1) - 1));
                 if (remove) events.splice(0, remove);
             }
             for (const column of this.columns.values()) for (const key of column.keys())

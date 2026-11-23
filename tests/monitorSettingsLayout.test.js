@@ -76,7 +76,7 @@ test('sidebar export settings use peer cards with conditional format settings an
     assert.match(widgetExport, /id="widget-export-output-encoding"/);
     assert.match(panel('frame-text-settings'), /id="frame-text-settings"[^>]*class="sidebar-stack"/);
     assert.match(panel('wrap-response-options'), /id="wrap-response-options"[^>]*class="sidebar-stack"/);
-    assert.match(panel('config-serial'), /id="config-serial"[^>]*class="sidebar-stack"/);
+    assert.match(panel('serial-manager-workspace'), /id="serial-source-nav"[^>]*>[\s\S]*?id="serial-source-add"[^>]*>[\s\S]*?id="config-serial"[^>]*class="serial-source-details"/);
     assert.match(panel('config-net'), /id="config-net"[^>]*class="sidebar-stack"/);
     assert.doesNotMatch(html, /margin-top:\s*-4px/);
     assert.match(css, /--ui-group-gap:\s*6px/);

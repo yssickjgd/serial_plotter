@@ -19,6 +19,16 @@ const plotterLimits = typeof module !== 'undefined'
 const PlotWaveGpuRenderer = typeof module !== 'undefined'
     ? require('./waveGpuRenderer').WaveGpuRenderer : globalThis.SerialPlotter.WaveGpuRenderer;
 
+function sampleTimeBounds(plot, start, end) {
+    if (plot.frames.liveTimeBounds && plot.vp?.time.autoFollow)
+        return plot.frames.liveTimeBounds(plot.vp.time.displayCount);
+    if (plot.frames.timeBounds) return plot.frames.timeBounds(start, end, false);
+    if (!plot.receiveTimeAxis || plot.timeXUnit !== 's' || plot.frames.responseMode || end <= start ||
+        plot.frames.timestampsMonotonic === false) return null;
+    const first = plot.frames.timestampAt?.(start), last = plot.frames.timestampAt?.(end - 1);
+    return Number.isFinite(first) && Number.isFinite(last) && last >= first ? { first, last } : null;
+}
+
 class Plotter {
     /** 初始化画布、通道数组、视口状态、事件监听与滚动条 */
     constructor(canvasId, frames, options = {}) {
@@ -596,7 +606,8 @@ class Plotter {
     _formatTimeIndex(index, unit = this.timeXUnit, samplePrecision = 0) {
         if (unit !== 's') return String(index);
         if (!(this.sampleRateHz > 0)) return '-- s';
-        const seconds = index / this.sampleRateHz;
+        const first = this.fixedTimeRate ? this.frames.frameOrdinalAt?.(0) : 0;
+        const seconds = ((Number.isFinite(first) ? first : 0) + index) / this.sampleRateHz;
         if (!samplePrecision) return `${this._formatAxisNumber(seconds)} s`;
         // Keep fractional samples visible even when a full sample is under a millisecond.
         const decimals = Math.max(3, Math.min(15, Math.ceil(Math.log10(this.sampleRateHz)) + samplePrecision));
@@ -902,14 +913,15 @@ class Plotter {
      *   - 时域模式：取视口范围 [startIdx, actualEnd) 内的数据
      *   - 频域模式：取预计算的 FFT 结果中 [startIdx, actualEnd) 范围的频谱 bins
      */
-    _collectWindowSeries(startIdx, actualEnd, fftResults) {
+    _collectWindowSeries(startIdx, actualEnd, fftResults, aligned) {
         const cached = this._timeSeriesCache;
+        const receiveSeconds = this.receiveTimeAxis && this.timeXUnit === 's';
         if (this.displayMode === 'time' && cached?.frames === this.frames && cached.version === this.frames.version &&
-            cached.start === startIdx && cached.end === actualEnd) return cached.series;
+            cached.start === startIdx && cached.end === actualEnd && cached.receiveSeconds === receiveSeconds) return cached.series;
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
-            if (!ch.visible || this.frames.length === 0) continue;
+            if (!ch.visible || (!this.frames.length && !this.frames.hasPendingTrace)) continue;
             if (this.displayMode !== 'time') {
                 const freq = fftResults.get(idx);
                 if (!freq || freq.mags.length === 0) continue;
@@ -923,13 +935,20 @@ class Plotter {
                     fftSize: freq.fftSize
                 });
             } else {
-                const rawValues = this._transformedChannelSlice(idx, startIdx, actualEnd);
+                const direct = this.frames.rawTraceAt?.(idx, startIdx, actualEnd, aligned);
+                const synchronized = aligned && this.frames.indexAtTimeBoundary && !direct;
+                const start = synchronized ? this.frames.indexAtTimeBoundary(aligned.first) : startIdx;
+                const end = synchronized ? this.frames.indexAtTimeBoundary(aligned.last, true) : actualEnd;
+                const rawValues = !direct ? this._transformedChannelSlice(idx, start, end)
+                    : ch.gainEnabled || ch.offsetEnabled ? direct.values.map(value => globalThis.SerialPlotter.transformChannelValue(value, ch)) : direct.values;
                 if (rawValues.length === 0) continue;
-                series.push({ channelIndex: idx, ch, rawValues, mags: rawValues, dominantBin: 0, fftSize: rawValues.length });
+                const times = direct?.times ?? (aligned
+                    ? Float64Array.from({ length: rawValues.length }, (_, i) => this.frames.timestampAt(start + i)) : null);
+                series.push({ channelIndex: idx, ch, rawValues, mags: rawValues, times, direct, dominantBin: 0, fftSize: rawValues.length });
             }
         }
         if (this.displayMode === 'time') this._timeSeriesCache = {
-            frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd, series
+            frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd, receiveSeconds, series
         };
         return series;
     }
@@ -953,9 +972,22 @@ class Plotter {
         for (const item of series) {
             if (this.displayMode === 'time') {
                 if (item.points && item.pointWidth === width) continue;
-                item.points = globalThis.SerialPlotter.bucketTraceExtrema(item.rawValues, width);
-                const step = width / Math.max(1, end - start - 1);
-                for (const point of item.points) point.x = point.index * step;
+                if (item.times) {
+                    const { first, last } = sampleTimeBounds(this, start, end);
+                    const span = Math.max(Number.EPSILON, last - first);
+                    const xs = Float64Array.from(item.times, time => (time - first) / span * width);
+                    item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.rawValues, xs);
+                    for (const point of item.points) {
+                        point.x = xs[point.index];
+                        point.synthetic = point.index === 0 && item.direct?.syntheticStart ||
+                            point.index === item.rawValues.length - 1 && item.direct?.syntheticEnd;
+                        if (item.direct?.recoveredIndices?.has(point.index)) point.recovered = true;
+                    }
+                } else {
+                    item.points = globalThis.SerialPlotter.bucketTraceExtrema(item.rawValues, width);
+                    const step = width / Math.max(1, end - start - 1);
+                    for (const point of item.points) point.x = point.index * step;
+                }
                 item.pointWidth = width;
             } else {
                 item.points = globalThis.SerialPlotter.bucketAxisExtrema(item.mags, positions, maxStep);
@@ -1162,7 +1194,11 @@ class Plotter {
     /* ── 滚动条 ── */
 
     /** 返回所有通道中的最大数据长度 */
-    _total() { return this.frames.rawMode ? 0 : this.frames.length; }
+    _total() {
+        if (this.frames.rawMode) return 0;
+        // Raw samples can be drawn before the first formula tick is finalized.
+        return this.frames.length || (this.displayMode === 'time' && this.frames.hasPendingTrace ? 1 : 0);
+    }
 
     /** 返回当前模式下可滚动的总范围（频域含 Nyquist，时域为数据长度） */
     _scrollTotal() {
@@ -1422,7 +1458,8 @@ class Plotter {
         }
         const dataStart = Math.max(0, startIdx);
         const dataEnd = Math.min(scrollTotal, actualEnd);
-        const series = this._collectWindowSeries(dataStart, dataEnd, fftResults);
+        const aligned = this.displayMode === 'time' ? sampleTimeBounds(this, startIdx, actualEnd) : null;
+        const series = this._collectWindowSeries(dataStart, dataEnd, fftResults, aligned);
         if (series.length === 0) {
             const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(null);
             if (gpuAvailable && !this.gpuRenderer.render([], W, H, plotW, plotH))
@@ -1521,29 +1558,10 @@ class Plotter {
             this.ctx.strokeStyle = '#888'; this.ctx.lineWidth = 1; this.ctx.stroke();
         }
 
-        // —— X 轴标签 ——
-        this.ctx.textAlign = 'center'; this.ctx.textBaseline = 'top';
-        const tickSpacing = this.frames.responseMode && this.freqXUnit === 'hz' && !this.responseSampleRate ? 220 : 110;
-        const xTicks = this.displayMode !== 'time'
-            ? Math.max(1, Math.min(5, Math.floor(plotW / tickSpacing))) : Math.min(10, Math.max(1, visibleCnt - 1));
-        for (let i = 0; i <= xTicks; i++) {
-            const px  = (i/xTicks) * plotW;
-            const idx = xScale === 'log' && visibleCnt > 1
-                ? Math.round(globalThis.SerialPlotter.axisValueAtFraction(
-                    i / xTicks, startIdx, actualEnd - 1, 'log'))
-                : startIdx + Math.round((i/xTicks) * Math.max(0, visibleCnt - 1));
-            this.ctx.fillStyle = '#aaaaaa';
-            if (this.displayMode !== 'time')
-                this.ctx.textAlign = i === 0 ? 'left' : i === xTicks ? 'right' : 'center';
-            const label = this.displayMode !== 'time'
-                ? this._formatFrequencyBin(idx, series[0].fftSize)
-                : this.frames.responseMode ? `[${Math.max(0, idx - startIdx)}]`
-                    : idx >= 0 && idx < total ? this._formatTimeIndex(idx) : '';
-            this.ctx.fillText(label, px, plotH + 3);
-        }
+        this._drawXAxisLabels(plotW, plotH, startIdx, actualEnd, visibleCnt, total, xScale, series[0], aligned);
 
         // —— 波形绘制：稀疏窗口显示点标记，密集窗口保留像素极值 ——
-        const traces = [];
+        const traces = [], recoveredTraces = [];
         const { axisFraction } = globalThis.SerialPlotter;
         for (const item of series) {
             for (const point of item.points) {
@@ -1551,13 +1569,16 @@ class Plotter {
                     logY ? Math.max(point.value, min) : point.value, min, max, yScale);
                 point.y = plotH - yRatio * plotH;
             }
-            traces.push({ points: item.points, color: item.ch.color,
-                dots: item.mags.length <= plotW || item.points.length === 1 });
+            const trace = { points: item.points, color: item.ch.color,
+                dots: item.mags.length <= plotW || item.points.length === 1 };
+            traces.push(trace);
+            if (trace.dots && item.direct?.recoveredIndices?.size) recoveredTraces.push(trace);
         }
         if (!gpuAvailable || !this.gpuRenderer.render(traces, W, H, plotW, plotH)) {
             if (gpuAvailable) this._drawGrid2D(plotW, plotH);
             for (const trace of traces) this._drawTrace2D(trace);
         }
+        if (recoveredTraces.length) this._drawRecoveredMarkers(recoveredTraces, plotW, plotH);
 
         // —— 十字光标 ——
         this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
@@ -1593,8 +1614,63 @@ class Plotter {
         this.ctx.stroke();
         if (dots) {
             this.ctx.fillStyle = color;
-            for (const { x, y } of points) if (Number.isFinite(x) && Number.isFinite(y))
-                this.ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+            for (const { x, y, synthetic, recovered } of points) {
+                if (!synthetic && !recovered && Number.isFinite(x) && Number.isFinite(y))
+                    this.ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+            }
+        }
+    }
+
+    _drawRecoveredMarkers(traces, plotW, plotH) {
+        const ctx = this.ctx, radius = 3.5;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, plotW, plotH);
+        ctx.clip();
+        ctx.lineWidth = 1.2;
+        for (const { points, color } of traces) {
+            ctx.beginPath();
+            ctx.strokeStyle = color;
+            for (const { x, y, recovered } of points) {
+                if (!recovered || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+                ctx.moveTo(x + radius, y);
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+            }
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    _drawXAxisLabels(width, height, start, end, count, total, scale, series, aligned) {
+        const ctx = this.ctx;
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#aaaaaa';
+        const frequency = this.displayMode !== 'time';
+        const divisions = frequency ? 5 : Math.min(10, Math.max(1, count - 1));
+        const labels = [];
+        for (let i = 0; i <= divisions; i++) {
+            const fraction = i / divisions;
+            const index = scale === 'log' && count > 1
+                ? Math.round(globalThis.SerialPlotter.axisValueAtFraction(fraction, start, end - 1, 'log'))
+                : start + Math.round(fraction * Math.max(0, count - 1));
+            const text = frequency ? this._formatFrequencyBin(index, series.fftSize)
+                : this.frames.responseMode ? `[${Math.max(0, index - start)}]`
+                    : aligned ? `${this._formatAxisNumber((aligned.first - this.frames.originTimestamp + (aligned.last - aligned.first) * fraction) / 1000)} s`
+                        : index >= 0 && index < total ? this._formatTimeIndex(index) : '';
+            if (!text || labels.at(-1)?.text === text) continue;
+            const pixels = ctx.measureText(text).width;
+            if (pixels > width) continue;
+            const left = Math.max(0, Math.min(width - pixels, fraction * width - pixels / 2));
+            labels.push({ text, left, pixels });
+        }
+        ctx.textAlign = 'left';
+        const last = labels.at(-1);
+        let boundary = -Infinity;
+        for (const label of labels) {
+            if (label.left < boundary || (label !== last && boundary !== -Infinity &&
+                label.left + label.pixels + 8 > last.left)) continue;
+            ctx.fillText(label.text, label.left, height + 3);
+            boundary = label.left + label.pixels + 8;
         }
     }
 
@@ -1607,12 +1683,15 @@ class Plotter {
         const { timeOrder, matches, currentMatch } = this.navigationMarkers;
         const firstOrder = this.frames.orderAt(first);
         const lastOrder = this.frames.orderAt(last);
+        const aligned = sampleTimeBounds(this, first, last + 1);
         const pixelAtOrder = order => {
             if (order == null || order < firstOrder || order > lastOrder) return null;
             const index = this.frames.indexAtOrAfterOrder(order);
             if (this.frames.orderAt(index) !== order) return null;
-            return Math.max(0.5, Math.min(plotW - 0.5,
-                Math.round((index - startIdx) * plotW / (visibleCnt - 1)) + 0.5));
+            const fraction = aligned ? (this.frames.timestampAt(index) - aligned.first) / Math.max(Number.EPSILON, aligned.last - aligned.first)
+                : (index - startIdx) / (visibleCnt - 1);
+            if (fraction < 0 || fraction > 1) return null;
+            return Math.max(0.5, Math.min(plotW - 0.5, Math.round(fraction * plotW) + 0.5));
         };
         const ctx = this.ctx;
         ctx.save();
@@ -1639,7 +1718,7 @@ class Plotter {
             while (next < end) {
                 const mid = Math.floor((next + end) / 2);
                 const order = matches[mid].startOrder;
-                if (order <= lastOrder && pixelAtOrder(order) <= x) next = mid + 1;
+                if (order <= lastOrder && (pixelAtOrder(order) ?? Infinity) <= x) next = mid + 1;
                 else end = mid;
             }
             i = next;
@@ -1711,11 +1790,14 @@ class Plotter {
         const unit = this._phaseSuffix() || (this.displayMode === 'frequency' && this.magnitudeUnit === 'db' ? ' dB' : '');
 
         const validSample = cursorIndex >= 0 && cursorIndex < total;
+        const aligned = this.displayMode === 'time' && sampleTimeBounds(this, startIdx, startIdx + visibleCnt);
+        const cursorTime = aligned ? aligned.first + (aligned.last - aligned.first) * mx / Math.max(1, plotW) : NaN;
         const tipLines = this.displayMode !== 'time'
             ? [`Freq: ${this._formatFrequencyBin(cursorIndex, series[0].fftSize, 'hz')} (Bin ${this._formatAxisNumber(cursorIndex)})`,
                 `${this.displayMode === 'phase' ? 'Phase' : 'Mag'}: ${logY ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}${unit}`]
             : [this.frames.responseMode ? `Sample: [${this._formatAxisNumber(cursorIndex - startIdx)}]`
-                : `Time: ${validSample ? this._formatTimeIndex(cursorIndex, 's', 3) : '-- s'} (Sample ${validSample ? this._formatAxisNumber(cursorIndex) : '--'})`,
+                : aligned ? `Time: ${this._formatAxisNumber((cursorTime - this.frames.originTimestamp) / 1000)} s`
+                    : `Time: ${validSample ? this._formatTimeIndex(cursorIndex, 's', 3) : '-- s'} (Sample ${validSample ? this._formatAxisNumber(cursorIndex) : '--'})`,
                 `Value: ${yVal.toFixed(6)}`];
         ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;
@@ -1739,14 +1821,22 @@ class Plotter {
         const weight = exact ? 0 : axisFraction(cursorIndex, leftIndex, rightIndex, xScale);
         const maxStep = this._maxPhaseStep;
         const yRatioFor = value => axisFraction(logY ? Math.max(value, min) : value, min, max, yScale);
-        for (const { ch, mags } of series) {
-            const left = mags[leftIndex - startIdx], right = mags[rightIndex - startIdx];
+        for (const { ch, mags, times } of series) {
+            let leftAt = leftIndex - startIdx, rightAt = rightIndex - startIdx, fraction = weight;
+            if (times) {
+                let lo = 0, hi = times.length;
+                while (lo < hi) { const mid = (lo + hi) >>> 1; if (times[mid] <= cursorTime) lo = mid + 1; else hi = mid; }
+                leftAt = lo - 1;
+                rightAt = times[leftAt] === cursorTime ? leftAt : lo;
+                fraction = leftAt === rightAt ? 0 : (cursorTime - times[leftAt]) / (times[rightAt] - times[leftAt]);
+            }
+            const left = mags[leftAt], right = mags[rightAt], onPoint = leftAt === rightAt;
             if (!Number.isFinite(left) || !Number.isFinite(right) ||
                 (Number.isFinite(maxStep) && Math.abs(right - left) > maxStep)) continue;
             const leftRatio = yRatioFor(left);
-            const ratio = exact ? leftRatio : leftRatio + (yRatioFor(right) - leftRatio) * weight;
-            const val = exact || left === right ? left
-                : logY ? axisValueAtFraction(ratio, min, max, yScale) : left * (1 - weight) + right * weight;
+            const ratio = onPoint ? leftRatio : leftRatio + (yRatioFor(right) - leftRatio) * fraction;
+            const val = onPoint || left === right ? left
+                : logY ? axisValueAtFraction(ratio, min, max, yScale) : left * (1 - fraction) + right * fraction;
             if (!Number.isFinite(val) || !Number.isFinite(ratio)) continue;
             const origY = plotH - ratio * plotH;
             labels.push({ ch, val, origY, labelY: origY });

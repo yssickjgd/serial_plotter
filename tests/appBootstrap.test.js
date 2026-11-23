@@ -470,7 +470,7 @@ test('disposing during serial selection prevents a late connection and retains d
     const f = boot(t);
     let release, opened = 0;
     f.context.navigator.serial = { requestPort: () => new Promise(resolve => { release = resolve; }) };
-    f.click('btn-connect');
+    f.click('serial-manager-open'); f.click('serial-primary-bind');
     f.app.dispose();
     release({ open: async () => { opened++; }, close: async () => {} });
     for (let i = 0; i < 30; i++) await Promise.resolve();
@@ -769,24 +769,32 @@ test('widget file encoding and metadata survive a configuration reload independe
     assert.equal(restored.get('widget-export-markers').checked, true);
 });
 
-test('network mode reveals its controls and connects with the requested remote and local ports', async t => {
+test('primary network mode is configured in the dialog and connects with the requested ports', async t => {
     const f = boot(t, config([]));
+    assert.ok(f.get('conn-type').closest('#serial-config-dialog'));
+    f.click('serial-manager-open'); f.selectConnection('primary');
     f.change('conn-type', 'udp');
-    assert.equal(f.get('config-net').hidden, false);
-    assert.notEqual(f.get('config-net').style.display, 'none');
-    assert.notEqual(f.get('wrap-local-port').style.display, 'none');
+    assert.equal(f.get('connection-network-parameters').hidden, false);
+    assert.equal(f.get('wrap-local-port').hidden, false);
     f.change('net-port', '9001'); f.change('net-local', '9002');
+    f.get('serial-config-form').dispatchEvent({ type: 'submit' });
     let received;
     f.app.netAdapter.connect = async value => { received = value; f.app.netAdapter.onConnectStatusChange(true); };
-    f.click('btn-connect'); await f.tick();
+    f.click('serial-manager-close'); f.click('btn-connect'); await f.tick();
     assert.equal(received.mode, 'udp'); assert.equal(received.port, 9001); assert.equal(received.localPort, 9002);
+    f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('conn-type').disabled, true);
-    f.click('btn-connect'); await f.tick();
+    f.click('serial-config-reset'); f.click('serial-manager-close');
+    f.click('serial-disconnect-all'); await f.tick();
+    f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('conn-type').disabled, false);
 });
 
 test('connection failures reenable controls and send repetition stops after disconnection', async t => {
     const f = boot(t, config([]));
+    f.context.navigator.serial = { requestPort: async () => ({}) };
+    f.click('serial-manager-open'); f.click('serial-primary-bind'); await f.tick();
+    f.click('serial-manager-close');
     f.app.serialAdapter.connect = async () => { throw new Error('permission denied'); };
     f.click('btn-connect'); await f.tick();
     assert.match(f.get('connection-status').textContent, /permission denied/);

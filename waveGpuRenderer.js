@@ -158,21 +158,28 @@ class WaveGpuRenderer {
         ];
         let cursor = grid.vertices.length / 2;
         for (const trace of traces) {
-            const first = cursor, strips = [];
-            let stripStart = cursor;
+            const first = cursor, strips = [], dots = [];
+            const drawDots = trace.dots || trace.points.length === 1;
+            let stripStart = cursor, dotStart = -1;
             for (const point of trace.points) {
                 if (point.break || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
                     if (cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
                     stripStart = cursor;
                 }
                 if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+                if (drawDots) {
+                    if (point.synthetic || point.recovered) {
+                        if (dotStart >= 0) dots.push([dotStart, cursor - dotStart]);
+                        dotStart = -1;
+                    } else if (dotStart < 0) dotStart = cursor;
+                }
                 this.vertices[cursor * 2] = point.x;
                 this.vertices[cursor * 2 + 1] = point.y;
                 cursor++;
             }
             if (cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
-            commands.push({ first, count: cursor - first, strips, color: trace.color,
-                dots: trace.dots || cursor - first === 1 });
+            if (dotStart >= 0) dots.push([dotStart, cursor - dotStart]);
+            commands.push({ count: cursor - first, strips, color: trace.color, dots });
         }
         gl.disable(gl.SCISSOR_TEST);
         gl.viewport(0, 0, this.pixelWidth, this.pixelHeight);
@@ -198,7 +205,7 @@ class WaveGpuRenderer {
                 parseInt(color.slice(3, 5), 16) / 255,
                 parseInt(color.slice(5, 7), 16) / 255, 1);
             for (const [first, count] of command.strips) gl.drawArrays(command.mode ?? gl.LINE_STRIP, first, count);
-            if (command.dots) gl.drawArrays(gl.POINTS, command.first, command.count);
+            if (command.dots) for (const [first, count] of command.dots) gl.drawArrays(gl.POINTS, first, count);
         }
         gl.disable(gl.SCISSOR_TEST);
         return true;

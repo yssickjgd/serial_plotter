@@ -63,6 +63,8 @@ class DataParser {
         this.dataType = type;
         this.littleEndian = isLittleEndian !== false;
         this.channelsCount = count;
+        this.integer64Layout = type === 'int64' || type === 'uint64'
+            ? { signed: type === 'int64', littleEndian: this.littleEndian, payloadOffset: header.length, channelsCount: count } : null;
         this.reset();
     }
 
@@ -184,6 +186,7 @@ class DataParser {
             this.frameCount++;
             if (this.onFrameParsed) {
                 const metadata = this._sourceMetadata(start, frameLen);
+                if (this.integer64Layout) metadata.integer64Layout = this.integer64Layout;
                 this._notify(this.onFrameParsed, values, _fmtTime(new Date(metadata.timestamp)),
                     frame, metadata.timestamp, metadata);
             }

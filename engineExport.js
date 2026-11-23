@@ -103,7 +103,8 @@ function* synchronizedCsvChunks(frames, channels, options = {}) {
     const field = value => /[",\r\n]/.test(String(value)) ? '"' + String(value).replace(/"/g, '""') + '"' : String(value);
     const indices = options.channelIndices ?? channels.map((_, index) => index), count = frames.length;
     const first = frames.timestampAt(0), columns = ['Index', ...(options.timestamps ? ['Timestamp'] : []), ...indices.flatMap(index =>
-        options.syncStates ? [channels[index]?.name ?? `CH${String(index + 1).padStart(5, '0')}`, `Status:${index + 1}`, `SourceByte:${index + 1}`]
+        options.syncStates ? [channels[index]?.name ?? `CH${String(index + 1).padStart(5, '0')}`, `Status:${index + 1}`, `SourceByte:${index + 1}`,
+                ...(frames.multipleSources ? [`Source:${index + 1}`] : [])]
             : [channels[index]?.name ?? `CH${String(index + 1).padStart(5, '0')}`])];
     yield columns.map(field).join(',') + '\r\n';
     let rows = [];
@@ -114,7 +115,11 @@ function* synchronizedCsvChunks(frames, channels, options = {}) {
         if (options.timestamps) row.push(new Date(frames.timestampAt(index)).toISOString());
         for (const channel of indices) {
             const value = frames.getValue(channel, index); row.push(Number.isFinite(value) ? value : '');
-            if (options.syncStates) row.push(frames.statusAt(channel, index), frames.provenanceAt(channel, index)?.byteOffset ?? '');
+            if (options.syncStates) {
+                const origin = frames.provenanceAt(channel, index);
+                row.push(frames.statusAt(channel, index), origin?.byteOffset ?? '');
+                if (frames.multipleSources) row.push(origin?.sourceId ?? '');
+            }
         }
         rows.push(row.map(field).join(','));
         if (rows.length === 1024) { yield rows.join('\r\n') + '\r\n'; rows = []; }

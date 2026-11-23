@@ -315,25 +315,7 @@
                 this.service._safeNotify(this.service.onChange, this.recordsSource);
                 return;
             }
-            const values = new Map();
-            const fields = new Map(record.flatFields.map(field => [field.path, field]));
-            const fieldIds = new Map();
-            for (const field of record.flatFields) if (field.fieldId) {
-                if (!fieldIds.has(field.fieldId)) fieldIds.set(field.fieldId, []);
-                fieldIds.get(field.fieldId).push(field);
-            }
-            const messages = [];
-            for (let message = this.compiled.messageById.get(record.messageId); message; message = message.parent) messages.unshift(message.id);
-            if (!messages.length) messages.push(record.messageId);
-            const mappings = messages.flatMap(id => this.mappingsByMessage.get(id) ?? []);
-            for (const mapping of mappings) {
-                const indexed = path => (path.match(/\[\d+\]/g) ?? []).join('');
-                const item = mapping.fieldId ? fieldIds.get(mapping.fieldId)?.find(field => indexed(field.path) === indexed(mapping.path)) : fields.get(mapping.path);
-                const value = item?.value;
-                values.set(mapping.channel, typeof value === 'bigint'
-                    ? value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : NaN
-                    : typeof value === 'boolean' ? Number(value) : Number.isFinite(value) ? value : Number.isFinite(item?.numeric) ? item.numeric : NaN);
-            }
+            const { values, messages } = this.projectRecord(record);
             for (const id of messages) {
                 const source = this.outputs.get(`message:${id}`); if (!source) continue;
                 const samples = new Array(this.channelCount).fill(NaN); for (const [channel, value] of values) samples[channel] = value;
@@ -349,6 +331,30 @@
                 this.service._safeNotify(this.service.onChange, this.syncSource);
             }
             this.service._safeNotify(this.service.onChange, this.recordsSource);
+        }
+        projectRecord(record, timingChannel = -1) {
+            const values = new Map();
+            let marker;
+            const fields = new Map(record.flatFields.map(field => [field.path, field]));
+            const fieldIds = new Map();
+            for (const field of record.flatFields) if (field.fieldId) {
+                if (!fieldIds.has(field.fieldId)) fieldIds.set(field.fieldId, []);
+                fieldIds.get(field.fieldId).push(field);
+            }
+            const messages = [];
+            for (let message = this.compiled.messageById.get(record.messageId); message; message = message.parent) messages.unshift(message.id);
+            if (!messages.length) messages.push(record.messageId);
+            const mappings = messages.flatMap(id => this.mappingsByMessage.get(id) ?? []);
+            for (const mapping of mappings) {
+                const indexed = path => (path.match(/\[\d+\]/g) ?? []).join('');
+                const item = mapping.fieldId ? fieldIds.get(mapping.fieldId)?.find(field => indexed(field.path) === indexed(mapping.path)) : fields.get(mapping.path);
+                const value = item?.value;
+                if (mapping.channel === timingChannel) marker = typeof value === 'bigint' || typeof value === 'number' ? value : item?.numeric;
+                values.set(mapping.channel, typeof value === 'bigint'
+                    ? value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : NaN
+                    : typeof value === 'boolean' ? Number(value) : Number.isFinite(value) ? value : Number.isFinite(item?.numeric) ? item.numeric : NaN);
+            }
+            return { values, messages, marker };
         }
         receive(bytes, stamp) {
             if (this.mode !== 'Self_Defined_Frame' || this.rebuilding || this.disposed) return;

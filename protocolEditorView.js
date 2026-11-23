@@ -18,16 +18,17 @@
     typeNames.checksum = '校验';
     let nextInstance = 0;
     class ProtocolEditorView {
-        constructor({ document, root: host, getProtocol, onApply, onDraft, onClose, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool }) {
-            Object.assign(this, { document, getProtocol, onApply, onDraft, onClose, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool });
+        constructor({ document, root: host, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded = false, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool }) {
+            Object.assign(this, { document, getProtocol, onApply, onDraft, onClose, onOpen, onSaveDraft, getSourceName, embedded, getProtocols, onLibraryChange, getReferences, getEditorState, onEditorState, getWorkerPool });
             this.editorState = clone(getEditorState?.() ?? {}); this.editorState.samples ??= {};
             this.history = []; this.future = []; this.collapsed = new Set(); this.leftTab = 'outline'; this.bottomTab = 'layout';
             this.propertyTab = 'basic'; this.pristine = new Map();
             this.host = host ?? document.body;
-            this.ownsDialog = this.host.tagName !== 'DIALOG';
+            this.ownsDialog = !embedded && this.host.tagName !== 'DIALOG';
             this.dialog = this.ownsDialog ? document.createElement('dialog') : this.host;
             this.dialog.classList.add('protocol-editor');
-            this.dialog.setAttribute('aria-modal', 'true');
+            if (embedded) this.dialog.classList.add('is-embedded');
+            else this.dialog.setAttribute('aria-modal', 'true');
             this.dialog.setAttribute('aria-label', '自定义协议编辑器');
             this.prefix = 'protocol-editor-' + ++nextInstance;
             this.panels = new Map(); this.tabButtons = new Map(); this.cleanups = []; this.expressionCompletions = [];
@@ -96,15 +97,20 @@
         _build() {
             const header = this._node('header', 'protocol-editor-header');
             const heading = this._node('h2', '', '协议编辑器'); heading.id = this.prefix + '-heading';
-            heading.append(this._node('span', 'scope-badge', '全局共用'));
-            heading.title = '应用后，当前协议解析规则由所有使用该协议的数据源和控件共用；未应用的草稿不改变采集。';
+            if (!this.embedded) heading.append(this._node('span', 'scope-badge', '全局共用'));
+            else heading.className = 'protocol-embedded-heading';
             this.dialog.setAttribute('aria-labelledby', heading.id);
             this.libraryHost = this._node('div', 'protocol-edit-actions');
             this.libraryPanel = this._node('div','protocol-edit-panel');
             this.libraryFooter = this._node('div','protocol-template-footer');
             this.libraryPanel.append(this.libraryHost,this.libraryFooter);
             this.applyButton = this._button('应用协议', 'apply', () => { void this.apply(); }, 'btn-primary');
-            header.append(heading, this.applyButton, this._button('关闭', 'close', () => this.close()));
+            header.append(heading);
+            if (this.embedded) {
+                this.saveDraftButton = this._button('保存协议草稿', 'save-draft', () => { void this.saveDraft(); });
+                header.append(this._node('p', 'hint-text protocol-apply-hint',
+                    '编辑自动保存为草稿。返回数据引擎后，可校验草稿并应用到当前来源。'));
+            } else header.append(this.applyButton, this._button('关闭', 'close', () => this.close()));
             this.workspace = this._node('div', 'protocol-editor-workspace');
             this.leftHost = this._node('aside', 'protocol-editor-components');
             this.leftHost.append(this._node('div','sidebar-section-header config-pane-heading','协议配置'));
@@ -170,8 +176,18 @@
             });
             this._listen(this.dialog, 'keydown', event => {
                 event.stopPropagation();
-                if (event.key === 'Escape' && (this.dragged || this.draggedBranch)) { event.preventDefault(); this._cancelDrag(); }
-                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void this.apply(); }
+                if (event.key === 'Escape' && !event.defaultPrevented) {
+                    if (this.dragged || this.draggedBranch) {
+                        event.preventDefault(); this._cancelDrag();
+                    } else if (this.embedded && event.target.closest?.('dialog') === this.host.closest('dialog')) {
+                        event.preventDefault();
+                        if (!event.repeat) this.close();
+                    }
+                }
+                if (this.embedded && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+                    event.preventDefault(); void this.saveDraft();
+                }
+                if (!this.embedded && (event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void this.apply(); }
                 if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !['INPUT', 'TEXTAREA'].includes(event.target?.tagName)) { event.preventDefault(); this._undo(event.shiftKey); }
             });
             this._listen(this.dialog, 'keyup', event => event.stopPropagation());
@@ -320,18 +336,41 @@
             this.pristine.clear();this.outlineSelection=null;
             this.leftTab=this._navigation().leftTab === 'edit'?'edit':'outline';this.propertyTab=this._navigation().propertyTab ?? 'basic';
             const navigation=clone(this._navigation());
+            if (this.embedded) {
+                const item = this._outlineNodes().find(node => node.key === navigation.selection);
+                if (item) {
+                    this.outlineSelection = item.key;
+                    this.framingSelected = item.kind === 'frame';
+                    this.selectedField = item.owner ?? null;
+                }
+            }
             this.canvas = null; this.propertyHost.scrollTop = 0; this.body.scrollTop = 0;
             this._render(); this.selectTab('messages'); this.selectBottom(this.editorState.bottomTab ?? 'layout'); this._applySizes();
-            if (!this.dialog.open) this.dialog.showModal();
+            if (this.embedded) {
+                this.applyButton.textContent = '应用到 ' + (this.getSourceName?.() || '当前来源');
+                this.onOpen?.(); this.dialog.hidden = false;
+            } else if (!this.dialog.open) this.dialog.showModal();
             this._restoreNavigationScroll(navigation);
-            this.tabButtons.get('messages').focus();
+            if (this.embedded) {
+                this.body.scrollTop = navigation.canvasScroll ?? 0;
+                if (typeof navigation.unfinishedJson === 'string') {
+                    this.selectTab('json');
+                    this.jsonInput.value = navigation.unfinishedJson;
+                    this.jsonInvalid = true; this.applyButton.disabled = true;
+                    this._error(new Error('JSON 草稿尚未写完，请修正后应用'));
+                }
+            }
+            this.tabButtons.get(this.activeTab).focus({ preventScroll: true });
         }
         close() {
             if (!this.opened) return;
             this.opened = false; this.generation++;
             this.expressionCompletions.forEach(item => item.close());
-            if (this.deleteDialog.open) this.deleteDialog.close();this.pendingDelete=null;this._saveState();
-            if (this.dialog.open) this.dialog.close();
+            if (this.deleteDialog.open) this.deleteDialog.close();
+            this.pendingDelete = null;
+            this._rememberEditorLocation(); this._saveState();
+            if (this.embedded) this.dialog.hidden = true;
+            else if (this.dialog.open) this.dialog.close();
             this.onClose?.();
         }
         dispose() {
@@ -2212,8 +2251,38 @@
                 : Math.floor(field.bitOffset / 8) * 8 + (byteIndex - field.byteOffset) * 8 + bitIndex;
             return logical >= field.bitOffset && logical < field.bitOffset + field.bitLength;
         }
+        _rememberEditorLocation() {
+            if (!this.embedded) return;
+            const navigation = this._navigation();
+            navigation.selection = this.outlineSelection;
+            if (this.activeTab === 'messages') navigation.canvasScroll = this.body.scrollTop;
+            if (this.jsonInvalid) navigation.unfinishedJson = this.jsonInput.value;
+            else delete navigation.unfinishedJson;
+        }
+        async saveDraft() {
+            if (!this.onSaveDraft || this.disposed || this.busy || this.savingDraft || !this.opened) return false;
+            const generation = this.generation;
+            this.savingDraft = true;
+            this.saveDraftButton.disabled = true;
+            try {
+                this._rememberEditorLocation(); this._saveState();
+                await this.onSaveDraft();
+                if (generation === this.generation) this.status.textContent = this.jsonInvalid
+                    ? 'JSON 草稿已保存，请修正后应用' : '协议草稿已保存；当前采集规则未变';
+                return true;
+            } catch (error) {
+                if (generation === this.generation) {
+                    this.status.textContent = '协议草稿保存失败';
+                    this._error(error);
+                }
+                return false;
+            } finally {
+                this.savingDraft = false;
+                this.saveDraftButton.disabled = this.busy;
+            }
+        }
         async apply() {
-            if (this.disposed || this.busy || !this.opened || this.jsonInvalid || !this._hasActiveProtocol()) return false;
+            if (this.disposed || this.busy || this.savingDraft || !this.opened || this.jsonInvalid || !this._hasActiveProtocol()) return false;
             this._validate(); if (!this.compiled) return false;
             const generation = this.generation, config = clone(this.draft);
             this.busy = true; this.status.textContent = '正在应用协议…';

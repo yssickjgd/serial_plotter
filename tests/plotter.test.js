@@ -5,13 +5,15 @@ const vm = require('node:vm');
 
 test('plotter uses the full sample window for CSV and bounds draw work to pixels', () => {
     let lineToCount = 0;
+    const markerCalls = [];
     const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
         ? () => ({ width: 50 })
         : key === 'lineTo' ? (x, y) => {
             assert.ok(Number.isFinite(x) && Number.isFinite(y)); lineToCount++;
         } : key === 'fillRect' ? (x, y, w, h) => {
             assert.ok([x, y, w, h].every(Number.isFinite));
-        } : () => {} });
+            markerCalls.push(['fillRect', x, y, w, h]);
+        } : key === 'arc' ? (...args) => markerCalls.push(['arc', ...args]) : () => {} });
     const element = () => ({ style: {}, offsetHeight: 12, clientWidth: 800,
         addEventListener() {}, getBoundingClientRect: () => ({ width: 800, height: 400 }) });
     const elements = new Map();
@@ -85,6 +87,14 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     plotter.setChannelVisible(0, true);
     plotter.draw();
     assert.equal(summary.mean, 1);
+
+    const trace = { points: [{ x: 5, y: 5, synthetic: true }, { x: 15, y: 10 },
+        { x: 25, y: 20, recovered: true }, { x: 35, y: 30 }], color: '#112233', dots: true };
+    markerCalls.length = 0;
+    plotter._drawTrace2D(trace);
+    assert.deepEqual(markerCalls, [['fillRect', 13.5, 8.5, 3, 3], ['fillRect', 33.5, 28.5, 3, 3]]);
+    plotter._drawRecoveredMarkers([trace], 100, 80);
+    assert.deepEqual(markerCalls.at(-1).slice(0, 3), ['arc', 25, 20]);
 
     const drawsBefore = plotter.completedDraws;
     plotter.draw();

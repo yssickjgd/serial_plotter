@@ -71,10 +71,9 @@ test('engine channel editing works without an active widget and validates names 
     rows()[2].children[0].click();
     const expression = role(rows()[2], 'channel-expression'); expression.value = '气温+CH2'; expression.dispatchEvent(new Event('input'));
     assert.equal(f.calls.filter(call => call[0] === 'update').length, 0);
-    const actions = role(rows()[2], 'channel-apply').parentNode;
-    assert.equal(actions.children[0].getAttribute('data-role'), 'channel-apply');
-    assert.equal(actions.children[1].getAttribute('data-role'), 'channel-delete');
-    role(rows()[2], 'channel-apply').click(); await Promise.resolve();
+    const actions = role(rows()[2], 'channel-delete').parentNode;
+    assert.equal(actions.children.length, 1);
+    actions.parentNode.dispatchEvent(new Event('pointerleave')); await Promise.resolve();
     assert.equal(f.calls.find(call => call[0] === 'update')[1].expression, 'CH00001+CH00002');
     const invalid = role(rows()[2], 'channel-expression'); invalid.value = 'CH999'; invalid.dispatchEvent(new Event('input'));
     assert.match(role(rows()[2], 'channel-error').textContent, /不存在/);
@@ -103,7 +102,7 @@ test('expanded formula constant and system rows fit their contents instead of re
     view.refresh();
     for (const row of all(view.list, node => node.dataset.channelNumber)) {
         assert.equal(row.style.minHeight, `${view.rowHeight}px`);
-        if (Number(row.dataset.channelNumber) > 2) assert.ok(role(row, 'channel-apply'));
+        if (Number(row.dataset.channelNumber) > 2) assert.ok(role(row, 'channel-expression'));
     }
     view.dispose();
 });

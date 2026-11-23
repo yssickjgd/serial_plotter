@@ -10,9 +10,9 @@ async function startSerialPlotterApplication() {
     const cleanups = [], progressRows = new Map(), rates = new Map(), draws = new Map();
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
     let boundExportSourceId = null, boundExportFormat = null, bindingExport = false;
-    let activeEngine = null, connecting = false, widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
-    const serialSources = new Map();
-    let nextSerialSourceNumber = 2;
+    let widgets = null, tools = null, exportView = null, uiFrame = null, engineView = null;
+    const connectionSources = new Map();
+    let nextConnectionSourceNumber = 2;
     const captureQuota = (global, count) => Math.floor(Number(global.captureMemoryMiB) * 1048576 / (count + 1));
     let previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: 0 };
     const listen = (target, name, fn) => { target?.addEventListener(name, fn); cleanups.push(() => target?.removeEventListener(name, fn)); };
@@ -26,7 +26,13 @@ async function startSerialPlotterApplication() {
         return config;
     };
     function preflightWorkspaceEngines(config) {
-        const memoryLimitBytes = captureQuota(config.global, config.serialSources.entries.length);
+        const mapped = config.workspaceChannels.mappings.length;
+        const memoryLimitBytes = captureQuota(config.global, config.serialSources.entries.length + Number(mapped > 0));
+        if (mapped) {
+            const operations = new S.ChannelOperations(mapped, config.workspaceChannels.channelDefinitions,
+                { names: config.workspaceChannels.channelNames, symbolVersion: 2 });
+            if (operations.requiredMemoryBytes > memoryLimitBytes) throw new Error('全局通道状态超过内存预算');
+        }
         S.preflightDataEngine(config.dataEngine, config.global, { memoryLimitBytes });
         for (const source of config.serialSources.entries)
             S.preflightDataEngine(source.engine, S.WidgetConfig.serialSourceGlobals(config.global, source), { memoryLimitBytes });
@@ -110,11 +116,12 @@ async function startSerialPlotterApplication() {
         uiFrame = requestAnimationFrame(() => {
             uiFrame = null;
             if (disposed) return;
-            showProgress(null, null); tools?.syncPaused(); syncExportAvailability();
+            pumpWorkspaceChannels();
+            showProgress(null, null); tools?.syncPaused(); syncExportAvailability(); renderAlignmentTimebaseStatus();
         });
     }
     const service = new S.CaptureService({ capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes,
-        memoryLimitBytes: captureQuota(globals, initial.serialSources.entries.length),
+        memoryLimitBytes: captureQuota(globals, initial.serialSources.entries.length + Number(initial.workspaceChannels.mappings.length > 0)),
         rebuildHistory: globals.rebuildHistory, numericFormat: { ...globals, ...initial.dataEngine.array }, channelNames: globals.channelNames, channelDefinitions: globals.channelDefinitions,
         onChange(source, { pendingRaw = false } = {}) {
             if (disposed) return;
@@ -136,69 +143,273 @@ async function startSerialPlotterApplication() {
         }
     });
     const dataEngine = new S.DataEngine(service, initial.dataEngine, globals, { onProgress: showProgress });
+    const workspaceChannels = new S.WorkspaceChannelCapture(initial.workspaceChannels, Number(globals.maxPoints), {
+        memoryLimit: () => captureQuota(globals, connectionSources.size + 1),
+        resolveFrame(origin) {
+            const capture = origin.sourceId === 'primary' ? service : connectionSources.get(origin.sourceId)?.capture;
+            if (!capture || capture.epoch !== origin.epoch) return null;
+            const engine = capture.dataEngine, source = engine.mode === 'Self_Defined_Frame' ? engine.recordsSource : engine.arraySource;
+            if (!source || source.generation !== origin.generation) return null;
+            const frames = source.frames, index = frames.indexAtOrAfterOrder(origin.order);
+            return index >= 0 && frames.orderAt(index) === origin.order ? frames.frameAt(index, { copyBytes: false }) : null;
+        }
+    });
+    workspaceChannels.onChange = () => {
+        if (!disposed) widgets?.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
+    };
+    let workspaceChannelTimer = null, workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null;
+    function scheduleWorkspaceReplay() { replayWorkspace = true; scheduleSourceUi(); }
+    function restartAlignmentReplay(settings) {
+        const capture = workspaceChannels.createAlignmentReplay(settings);
+        alignmentReplay?.capture.dispose();
+        alignmentReplay = { epoch: workspaceChannels.epoch, definitions: workspaceChannels.settings.channelDefinitions, capture };
+    }
+    function realignWorkspaceChannels(sourceId) {
+        if (!workspaceChannels.mappings.some(entry => entry.sourceId === sourceId)) return;
+        restartAlignmentReplay();
+        scheduleSourceUi();
+    }
+    function pumpWorkspaceChannels(flush = false) {
+        if (alignmentReplay && alignmentReplay.epoch !== workspaceChannels.epoch) {
+            alignmentReplay.capture.dispose(); alignmentReplay = null;
+        }
+        if (!workspaceChannels.mappings.length || service.paused && !flush && !replayWorkspace && !alignmentReplay || disposed) return;
+        const inputs = allConnections();
+        const cutoff = service.paused || flush ? Infinity : Date.now();
+        let next;
+        try {
+            if (alignmentReplay && alignmentReplay.definitions !== workspaceChannels.settings.channelDefinitions)
+                restartAlignmentReplay();
+            const replay = alignmentReplay?.capture;
+            if (replay) {
+                if (replay.capacity !== workspaceChannels.capacity) replay.resize(workspaceChannels.capacity);
+                next = replay.collect(inputs, cutoff);
+                const caughtUp = !Number.isFinite(next) || next > cutoff;
+                alignmentReplay.waitingForInput = caughtUp && !replay.numericSource.frames.length;
+                if (caughtUp && (replay.numericSource.frames.length || !workspaceChannels.numericSource.frames.length)) {
+                    workspaceChannels.finishAlignmentReplay(replay);
+                    alignmentReplay = null;
+                    tools?.invalidate();
+                    renderAlignmentTimebaseStatus();
+                }
+            } else next = workspaceChannels.collect(inputs, cutoff);
+        } catch (error) {
+            alignmentReplay?.capture.dispose(); alignmentReplay = null;
+            report(error); replayWorkspace = false; return;
+        }
+        const pending = Number.isFinite(next);
+        replayWorkspace = (replayWorkspace || flush) && pending;
+        if (pending && workspaceChannelTimer === null) workspaceChannelTimer = setTimeout(() => {
+            workspaceChannelTimer = null; pumpWorkspaceChannels();
+        }, Math.max(0, Math.min(1000, next - cutoff)));
+    }
     const serialAdapter = new S.SerialEngine(), netAdapter = new S.NetEngine();
+    const portBindings = new S.SerialPortBindings(initial.serialSources.bindings);
+    const primaryFields = { mode: 'connType', name: 'serialName', baudRate: 'serialBaud', dataBits: 'serialData',
+        stopBits: 'serialStop', parity: 'serialParity', host: 'netHost', port: 'netPort', localPort: 'netLocalPort' };
+    function primaryConnectionSettings() {
+        const settings = Object.fromEntries(Object.entries(primaryFields).map(([key, globalKey]) => [key, globals[globalKey]]));
+        // Older configurations could keep a separate local port in TCP server mode.
+        if (settings.mode === 'tcp-server' && settings.localPort) settings.port = settings.localPort;
+        return { id: 'primary', ...settings };
+    }
+    const primarySource = { adapter: globals.connType === 'serial' ? serialAdapter : netAdapter, capture: service,
+        connected: false, pending: false, error: '', bindingMessage: '', settings: primaryConnectionSettings() };
+    let connectionBusy = false;
+    function primaryConnectionName() { return primarySource.settings.name; }
     function connectionChoices() {
-        return [...serialSources.values()].map(source => ({ id: source.settings.id, name: source.settings.name, capture: source.capture }));
+        return [...connectionSources.values()].map(source => ({ id: source.settings.id, name: source.settings.name, capture: source.capture }));
     }
     function hasCaptureSource(source) {
-        return service.sources.has(source) || [...serialSources.values()].some(item => item.capture.sources.has(source));
+        return service.sources.has(source) || [...connectionSources.values()].some(item => item.capture.sources.has(source));
     }
-    function renderEngineConnections() {
-        const select = el('engine-connection-source'), choices = [{ id: 'primary', name: '主连接' }, ...connectionChoices()];
-        const selected = choices.some(choice => choice.id === select.value) ? select.value : 'primary';
-        const multiple = choices.length > 1;
-        el('engine-connection-source-wrap').hidden = !multiple;
-        el('engine-channel-scope').hidden = !multiple;
-        for (const id of ['engine-parsing', 'engine-raw-records']) for (const badge of el(id).querySelectorAll('.scope-badge'))
-            badge.textContent = multiple ? '来源共用' : '全局共用';
-        select.replaceChildren(...choices.map(choice => {
-            const option = document.createElement('option'); option.value = choice.id; option.textContent = choice.name; return option;
+    const sidebarAlignmentSource = el('sidebar-alignment-source');
+    const alignmentPanel = (container, prefix, offset, source) => ({
+        container: el(container), source, offset: el(offset),
+        mode: el(prefix + '-timebase-mode'), rate: el(prefix + '-timebase-rate'), fixed: el(prefix + '-timebase-fixed'),
+        method: el(prefix + '-grid-method'), errorId: prefix + '-alignment-status', statusId: prefix + '-timebase-state',
+        resync: el(prefix + '-resync-enabled'), delay: el(prefix + '-resync-delay'), batches: el(prefix + '-resync-batches'),
+        confirmation: el(prefix + '-resync-confirmation')
+    });
+    const dialogAlignment = alignmentPanel('serial-config-alignment', 'channel', 'serial-config-offset', () => connectionView.selectedSource);
+    const sidebarAlignment = alignmentPanel('sidebar-source-alignment', 'sidebar', 'sidebar-config-offset',
+        () => sidebarAlignmentSource.value === 'primary' ? primarySource : connectionSources.get(sidebarAlignmentSource.value));
+    const alignmentPanels = [dialogAlignment, sidebarAlignment];
+
+    function showTimebaseFields(panel) {
+        panel.fixed.hidden = panel.mode.value !== 'fixed';
+        panel.delay.disabled = panel.batches.disabled = panel.confirmation.disabled = !panel.resync.checked;
+    }
+    function renderAlignmentTimebaseStatus() {
+        for (const panel of alignmentPanels) {
+            const source = panel.source();
+            const id = source?.settings.id;
+            if (!id || workspaceChannels.timebases[id]?.mode !== 'fixed') { status(panel.statusId, ''); continue; }
+            const live = workspaceChannels.cursors.get(id);
+            const mapped = workspaceChannels.mappings.some(entry => entry.sourceId === id);
+            status(panel.statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay?.waitingForInput
+                ? '等待有效时基样点，当前波形仍可查看。' : alignmentReplay ? '正在按新时基重新对齐保留历史…'
+                    : !live ? '等待可解析的帧。' : live.invalidLatest ? '最近的帧缺少有效的时基值，已保留原始记录。'
+                        : live.lastResync ? '最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。' : '');
+        }
+    }
+    function renderAlignmentTimebase(panel, source = panel.source()) {
+        panel.currentSource = source;
+        panel.offset.disabled = !source || source === primarySource;
+        panel.offset.value = String(source?.settings.timeOffsetMs ?? 0);
+        const timing = S.normalizeSourceTimebase(source && workspaceChannels.timebases[source.settings.id]);
+        panel.mode.value = timing.mode;
+        panel.rate.value = String(timing.sampleRate);
+        panel.resync.checked = timing.resyncEnabled;
+        panel.delay.value = String(timing.resyncDelayMs);
+        panel.batches.value = String(timing.resyncBatches);
+        panel.confirmation.value = String(timing.resyncConfirmationMs);
+        panel.method.value = workspaceChannels.methods[source?.settings.id] ?? 'hold';
+        status(panel.errorId, '');
+        showTimebaseFields(panel); renderAlignmentTimebaseStatus();
+    }
+    function commitAlignment(panel, source = panel.source()) {
+        if (!source) return true;
+        try {
+            const id = source.settings.id, saved = workspaceChannels.timebases[id];
+            const previous = S.normalizeSourceTimebase(saved);
+            const fixed = panel.mode.value === 'fixed', resyncEnabled = fixed ? panel.resync.checked : previous.resyncEnabled;
+            const resyncActive = fixed && resyncEnabled;
+            const timing = S.normalizeSourceTimebase({ ...previous, mode: panel.mode.value, resyncEnabled,
+                sampleRate: fixed ? Number(panel.rate.value) : previous.sampleRate,
+                resyncDelayMs: resyncActive ? Number(panel.delay.value.trim() || NaN) : previous.resyncDelayMs,
+                resyncBatches: resyncActive ? Number(panel.batches.value) : previous.resyncBatches,
+                resyncConfirmationMs: resyncActive ? Number(panel.confirmation.value.trim() || NaN) : previous.resyncConfirmationMs });
+            const originalSettings = source.settings;
+            const nextSettings = source === primarySource ? originalSettings : S.WidgetConfig.normalizeConnectionSource({
+                ...originalSettings, timeOffsetMs: panel.offset.value
+            });
+            const oldMethod = workspaceChannels.methods[id];
+            const method = panel.method.value;
+            if (JSON.stringify(previous) === JSON.stringify(timing) && method === (oldMethod ?? 'hold') &&
+                originalSettings.timeOffsetMs === nextSettings.timeOffsetMs) { status(panel.errorId, ''); return true; }
+            source.settings = nextSettings;
+            workspaceChannels.methods[id] = method;
+            workspaceChannels.timebases[id] = timing;
+            try {
+                realignWorkspaceChannels(id);
+            } catch (error) {
+                source.settings = originalSettings;
+                if (oldMethod === undefined) delete workspaceChannels.methods[id];
+                else workspaceChannels.methods[id] = oldMethod;
+                if (saved) workspaceChannels.timebases[id] = saved;
+                else delete workspaceChannels.timebases[id];
+                throw error;
+            }
+            for (const widget of widgets.widgets.values()) {
+                if (widget.type === 'wave' && widget.capture === source.capture) widgets.applySettings(widget);
+            }
+            if (widgets.active?.type === 'wave' && widgets.active.capture === source.capture) widgets.activate(widgets.active.id);
+            for (const view of alignmentPanels) {
+                if (view.source() === source) renderAlignmentTimebase(view, source);
+            }
+            connectionView.refresh(source); tools?.invalidate(); saveSoon();
+            return true;
+        } catch (error) { status(panel.errorId, error.message); return false; }
+    }
+    for (const panel of alignmentPanels) {
+        listen(panel.mode, 'change', () => showTimebaseFields(panel));
+        listen(panel.resync, 'change', () => showTimebaseFields(panel));
+        S.bindAutoApply(panel.container, () => commitAlignment(panel), listen);
+    }
+    listen(sidebarAlignmentSource, 'change', () => {
+        const previous = sidebarAlignment.currentSource;
+        if (previous && !commitAlignment(sidebarAlignment, previous)) {
+            sidebarAlignmentSource.value = previous.settings.id;
+            return;
+        }
+        renderAlignmentTimebase(sidebarAlignment);
+    });
+    function refreshAlignmentSources() {
+        const saved = sidebarAlignmentSource.value;
+        sidebarAlignmentSource.replaceChildren(...allConnections().map(({ settings }) => {
+            const option = document.createElement('option');
+            option.value = settings.id; option.textContent = settings.name;
+            return option;
         }));
-        select.value = selected;
-        engineView?.setEngine(serialSources.get(selected)?.capture.dataEngine ?? dataEngine);
+        sidebarAlignmentSource.value = connectionSources.has(saved) ? saved : 'primary';
+        for (const panel of alignmentPanels) renderAlignmentTimebase(panel);
     }
     function refreshConnectionChoices() {
-        renderEngineConnections(); renderSendConnections();
+        renderSendConnections(); renderWorkspaceChannels(); renderEngineScope(); refreshAlignmentSources();
         if (widgets?.active) widgets.activate(widgets.active.id);
         else syncExportSources();
-        syncEngineSplit();
     }
-    listen(el('engine-connection-source'), 'change', renderEngineConnections);
-    const serialSourceView = new S.SerialSourceView(el('serial-source-list'), {
-        onConnect: source => { void toggleAdditionalSerial(source); },
+    function renderEngineScope() {
+        const multiple = connectionSources.size > 0;
+        for (const id of ['engine-parsing', 'engine-raw-records']) for (const badge of el(id).querySelectorAll('.scope-badge'))
+            badge.textContent = multiple && badge.getAttribute('data-global-scope') === null ? '来源共用' : '全局共用';
+    }
+    const connectionView = new S.SerialSourceView(el('serial-source-list'), {
+        dialog: el('serial-config-dialog'),
+        onConnect: source => { void changeConnections([source], !source.connected); },
+        onBind: source => { void bindSerialPort(source); },
+        onEngine(source, tab, focus = true) {
+            connectionView.showEngine(source, () => {
+                if (disposed) return;
+                if (engineView.engine === dataEngine) engineView.editor.close();
+                else engineView.setEngine(dataEngine);
+            });
+            renderEngineScope();
+            engineView.setEngine(source.capture.dataEngine);
+            engineView.channels.allowDerived = false; engineView.channels.refresh();
+            connectionView.restoreEnginePosition(connectionView.enginePositions.get(source.settings.id), focus, tab);
+        },
         onRemove(source) {
-            if (source.connected || source.pending) return;
+            if (source.connected || source.pending || connectionBusy) return;
             if ([...widgets.widgets.values()].some(widget => widget.capture === source.capture)) {
-                source.error = '仍有控件使用该来源，请先更改控件的接收来源。'; serialSourceView.refresh(source); return;
+                source.error = '仍有控件使用该来源，请先更改控件的接收来源。'; connectionView.refresh(source); return;
             }
             if (source.capture.history.endByte > source.capture.history.startByte &&
                 !window.confirm('删除「' + source.settings.name + '」及其接收记录？')) return;
-            dropSerialSource(source); applyCaptureQuotas(); refreshConnectionChoices(); saveSoon();
-        },
-        onEdit(source, key, value) {
-            if (!['name', 'timeOffsetMs'].includes(key) && (source.connected || source.pending)) return;
             try {
-                source.settings = S.WidgetConfig.normalizeSerialSource({ ...source.settings, [key]: value });
-                source.error = '';
-                if (key === 'timeOffsetMs') tools?.invalidate();
-                else refreshConnectionChoices();
-                saveSoon();
-            } catch (error) { source.error = error.message; }
-            serialSourceView.apply(source); serialSourceView.refresh(source);
+                const mappings = workspaceChannels.mappings.filter(entry => entry.sourceId !== source.settings.id);
+                if (mappings.length !== workspaceChannels.mappings.length) applyWorkspaceMappings(mappings);
+            } catch (error) { source.error = error.message; connectionView.refresh(source); return; }
+            delete workspaceChannels.methods[source.settings.id];
+            dropConnectionSource(source); applyCaptureQuotas(); refreshConnectionChoices(); syncConnection(); saveSoon();
+        },
+        onSelect: source => renderAlignmentTimebase(dialogAlignment, source),
+        onSave(source, draft) {
+            const previous = source.settings;
+            if (source === primarySource) {
+                const normalized = S.WidgetConfig.normalizeConnectionSettings({ ...previous, ...draft });
+                for (const [key, globalKey] of Object.entries(primaryFields))
+                    if (Object.hasOwn(draft, key)) globals[globalKey] = String(normalized[key]);
+                if (draft.mode === 'tcp-server') globals.netLocalPort = '';
+                replaceConnectionSettings(source, primaryConnectionSettings());
+            } else {
+                replaceConnectionSettings(source, S.WidgetConfig.normalizeConnectionSource({ ...previous, ...draft }));
+            }
+            source.error = '';
+            if (previous.name !== source.settings.name) refreshConnectionChoices();
+            syncConnection(); saveSoon();
         }
     });
+    connectionView.add(primarySource);
+    listen(el('serial-manager-open'), 'click', () => { syncConnection(); connectionView.showManager(); });
     function applyCaptureQuotas() {
-        const limit = captureQuota(globals, serialSources.size);
+        const limit = captureQuota(globals, connectionSources.size + Number(workspaceChannels.mappings.length > 0));
+        workspaceChannels.trim();
         if (service.memory.limitBytes !== limit) service.setMemoryLimit(limit);
-        for (const { capture } of serialSources.values()) if (capture.memory.limitBytes !== limit) capture.setMemoryLimit(limit);
+        for (const { capture } of connectionSources.values()) if (capture.memory.limitBytes !== limit) capture.setMemoryLimit(limit);
     }
-    function createSerialSource(settings, limit) {
-        const adapter = new S.SerialEngine();
+    function createTransport(mode) {
+        return mode === 'serial' ? new S.SerialEngine() : new S.NetEngine();
+    }
+    function createConnectionSource(settings, limit) {
+        const adapter = createTransport(settings.mode);
         const local = S.WidgetConfig.serialSourceGlobals(globals, settings);
         local.rebuildHistory = settings.rebuildHistory ?? globals.rebuildHistory;
         const capture = new S.CaptureService({
             workerPool: service.workerPool, ownsWorkerPool: false,
-            numericFormat: { ...local, ...settings.engine.array }, catalogCount: Number(local.channelsCount), channelNames: local.channelNames,
+            numericFormat: { ...local, ...settings.engine.array }, catalogCount: Number(local.channelsCount),
+            channelNames: local.channelNames, channelDefinitions: local.channelDefinitions,
             capacity: Number(globals.maxPoints), maxRawFrameBytes: globals.maxRawFrameBytes, memoryLimitBytes: limit,
             rebuildHistory: local.rebuildHistory,
             onChange(output, options) { widgets?.syncData(output, options, capture); scheduleSourceUi(); },
@@ -206,85 +417,276 @@ async function startSerialPlotterApplication() {
             onError(error, output) { widgets?.appendExtra(error, output, capture); scheduleSourceUi(); },
             onMemoryPressure(state) {
                 if (state.blocked) source.error = state.blockedReason;
-                serialSourceView.refresh(source); scheduleSourceUi();
+                connectionView.refresh(source); scheduleSourceUi();
             }
         });
-        const source = { settings, adapter, capture, connected: false, pending: false, error: '' };
-        serialSources.set(settings.id, source);
+        const source = { settings, adapter, capture, connected: false, pending: false, error: '', bindingMessage: '' };
+        connectionSources.set(settings.id, source);
         new S.DataEngine(capture, settings.engine, local, { onProgress: showProgress });
         capture.pause(service.paused);
-        adapter.onData((bytes, stamp) => capture.receive(bytes, stamp));
-        adapter.onStatusChange((connected, error) => {
-            if (disposed || serialSources.get(settings.id) !== source) return;
-            if (!connected) {
-                capture.endStream();
-                if (sendConnectionId === settings.id) { sendController.stop(); commandRunner.stop(); }
-            }
-            source.connected = connected;
-            source.error = error?.message ?? '';
-            serialSourceView.refresh(source); renderSendConnections(); scheduleSourceUi();
-        });
-        serialSourceView.add(source);
+        watchTransport(source, adapter);
+        connectionView.add(source);
         return source;
     }
-    async function toggleAdditionalSerial(source) {
-        if (source.pending || disposed) return;
-        source.pending = true; source.error = ''; serialSourceView.refresh(source);
+    function allConnections() { return [primarySource, ...connectionSources.values()]; }
+
+    function renderWorkspaceChannels() {
+        if (!workspaceChannelView) return;
+        const ranges = new Map();
+        for (const [index, entry] of workspaceChannels.mappings.entries()) {
+            if (!ranges.has(entry.sourceId)) ranges.set(entry.sourceId, [index, index]);
+            else ranges.get(entry.sourceId)[1] = index;
+        }
+        el('workspace-channel-ranges').replaceChildren(...[...ranges].map(([id, [first, last]]) => {
+            const row = document.createElement('p');
+            const name = id === 'primary' ? primaryConnectionName() : connectionSources.get(id)?.settings.name ?? id;
+            row.textContent = name + ' · ' + S.formatChannelId(first) + (last === first ? '' : '–' + S.formatChannelId(last));
+            return row;
+        }));
+        el('workspace-sample-rate').value = String(workspaceChannels.sampleRate);
+        el('workspace-wait-ms').value = String(workspaceChannels.waitMs);
+        el('workspace-hold-ms').value = String(workspaceChannels.holdMs);
+        el('workspace-channel-panel').hidden = !workspaceChannels.mappings.length;
+        workspaceChannelView.refresh();
+    }
+
+    function applyWorkspaceMappings(mappings, legacy = []) {
+        if (!mappings.length && [...widgets.widgets.values()].some(widget => widget.capture === workspaceChannels))
+            throw new Error('仍有波形使用全局通道，请先更改其接收来源');
+        const local = workspaceChannels.dataEngine.globals;
+        const plan = S.planWorkspaceChannels(workspaceChannels.settings, mappings, legacy);
+        const { channelNames, channelColors, channelDefinitions } = plan.globals;
+        workspaceChannels.configure(plan.globals, () => widgets.commitChannelRemap({
+            globals: { channelsCount: String(Math.max(1, mappings.length)), channelNames, channelColors, channelDefinitions, channelRecords: [] },
+            numberMap: plan.numberMap, previous: local.channelDefinitions, previousRawCount: local.channelsCount, capture: workspaceChannels
+        }));
+        applyCaptureQuotas(); renderWorkspaceChannels(); widgets.rebindEngineSources(workspaceChannels);
+        if (widgets.active) widgets.activate(widgets.active.id);
+        scheduleWorkspaceReplay(); saveSoon();
+    }
+
+    listen(el('workspace-channel-auto-map'), 'click', () => {
         try {
-            if (source.connected) await source.adapter.disconnect();
-            else await source.adapter.connect(source.settings);
+            const mappings = [], legacy = [];
+            for (const { settings, capture } of allConnections()) {
+                const engine = capture.dataEngine, local = engine.globals;
+                if (engine.mode === 'Raw_Data') continue;
+                for (const entry of widgets.getChannelRegistry(capture).getChannels()) if (entry.type === 'raw')
+                    mappings.push({ sourceId: settings.id, channelId: entry.id, number: entry.number, name: entry.name,
+                        color: widgets.channelColor(entry.number - 1, local.channelColors) });
+                if (!workspaceChannels.mappings.length) legacy.push({ id: settings.id,
+                    definitions: local.channelDefinitions, names: local.channelNames, colors: local.channelColors });
+            }
+            if (!mappings.length) throw new Error('请先为至少一路来源应用数组或自定义帧解析');
+            applyWorkspaceMappings(mappings, legacy);
+            el('workspace-channel-status').classList.remove('is-error');
+            status('workspace-channel-status', '已映射 ' + mappings.length + ' 路原始通道');
         } catch (error) {
-            if (error.name !== 'AbortError') source.error = '连接失败：' + error.message;
-        } finally {
-            source.pending = false; serialSourceView.refresh(source); scheduleSourceUi();
+            el('workspace-channel-status').classList.add('is-error'); status('workspace-channel-status', error.message);
+        }
+    });
+    S.bindAutoApply(el('workspace-grid-settings'), () => {
+        const rate = el('workspace-sample-rate').value, hold = el('workspace-hold-ms').value;
+        try {
+            if (!rate.trim() || !hold.trim()) throw new Error('请输入同步采样率和样点有效期');
+            const wait = el('workspace-wait-ms').value;
+            if (!wait.trim()) throw new Error('请输入最多等待时间');
+            const settings = { ...workspaceChannels.settings, sampleRate: Number(rate), holdMs: Number(hold), waitMs: Number(wait) };
+            if (settings.sampleRate === workspaceChannels.sampleRate && settings.holdMs === workspaceChannels.holdMs &&
+                settings.waitMs === workspaceChannels.waitMs) return;
+            if (workspaceChannels.mappings.length) restartAlignmentReplay(settings);
+            else workspaceChannels.configure(settings);
+            Object.assign(workspaceChannels, { sampleRate: settings.sampleRate, holdMs: settings.holdMs, waitMs: settings.waitMs });
+            scheduleSourceUi();
+            status('workspace-grid-state', '同步表设置已应用'); el('workspace-grid-state').classList.remove('is-error'); saveSoon();
+        } catch (error) {
+            el('workspace-grid-state').classList.add('is-error'); status('workspace-grid-state', error.message);
+        }
+    }, listen);
+    function endConnectionStream(source) {
+        source.connected = false;
+        source.capture.endStream();
+        if (sendConnectionId === source.settings.id) { sendController.stop(); commandRunner.stop(); }
+    }
+    function watchTransport(source, adapter) {
+        const current = () => !disposed && source.adapter === adapter &&
+            (source === primarySource || connectionSources.get(source.settings.id) === source);
+        adapter.onData((bytes, stamp) => {
+            if (current()) source.capture.receive(bytes, stamp);
+        });
+        adapter.onStatusChange((connected, error) => {
+            if (!current()) return;
+            if (connected) source.connected = true;
+            else endConnectionStream(source);
+            source.error = error?.message ?? '';
+            syncConnection(); scheduleSourceUi();
+        });
+    }
+    function releaseTransport(adapter) {
+        adapter.onData(null); adapter.onStatusChange(null);
+        void (adapter.dispose ? adapter.dispose() : adapter.disconnect());
+    }
+    function replaceConnectionSettings(source, settings) {
+        const previous = source.settings, adapter = source.adapter;
+        const serial = settings.mode === 'serial';
+        source.settings = settings;
+        if (serial !== (previous.mode === 'serial')) {
+            if (source.connected) endConnectionStream(source);
+            if (!serial) portBindings.remove(settings.id);
+            source.bindingMessage = '';
+            if (source === primarySource) {
+                source.adapter = serial ? serialAdapter : netAdapter;
+                void adapter.disconnect();
+            } else {
+                source.adapter = createTransport(settings.mode);
+                watchTransport(source, source.adapter);
+                releaseTransport(adapter);
+            }
+        } else {
+            const keys = serial ? ['baudRate', 'dataBits', 'stopBits', 'parity']
+                : ['mode', 'host', 'port', 'localPort'];
+            if (source.connected && keys.some(key => previous[key] !== settings[key])) void adapter.disconnect();
         }
     }
-    function dropSerialSource(source) {
-        const { id } = source.settings;
-        serialSources.delete(id); serialSourceView.remove(id);
-        source.capture.dispose(); void source.adapter.dispose();
+    async function authorizedPorts() {
+        const serial = navigator.serial;
+        if (!serial) throw new Error('当前浏览器不支持 Web Serial API');
+        return typeof serial.getPorts === 'function' ? await serial.getPorts() : null;
     }
-    function installSerialSources(config) {
-        nextSerialSourceNumber = config.nextNumber;
+    function isCurrentConnection(source, revision) {
+        return !disposed && revision === importRevision &&
+            (source === primarySource || connectionSources.get(source.settings.id) === source);
+    }
+    async function bindSerialPort(source) {
+        if (connectionBusy || source.settings.mode !== 'serial' || source.connected || source.pending || disposed) return;
+        const revision = importRevision, id = source.settings.id;
+        connectionBusy = source.pending = true;
+        source.error = ''; syncConnection();
+        try {
+            if (!navigator.serial?.requestPort) throw new Error('当前浏览器不支持 Web Serial API');
+            const port = await navigator.serial.requestPort();
+            const grants = await authorizedPorts().catch(() => null);
+            if (!isCurrentConnection(source, revision)) return;
+            portBindings.bind(id, port, grants);
+            source.bindingMessage = '已绑定端口';
+            saveSoon();
+        } catch (error) {
+            if (isCurrentConnection(source, revision) && error.name !== 'NotFoundError' && error.name !== 'AbortError')
+                source.error = '绑定失败：' + error.message;
+        } finally {
+            connectionBusy = source.pending = false;
+            if (!disposed) syncConnection();
+        }
+    }
+    function networkOptions({ mode, host, port, localPort }) {
+        const remote = S.parsePort(port);
+        if (mode === 'tcp-server') return { mode, port: remote, localPort: remote };
+        const address = typeof host === 'string' ? host.trim() : '';
+        if (!address) throw new Error('请输入远端地址');
+        const local = String(localPort ?? '').trim();
+        return mode === 'udp' ? { mode, host: address, port: remote, localPort: local ? S.parsePort(local) : remote }
+            : { mode, host: address, port: remote };
+    }
+    async function changeConnections(sources, connect) {
+        if (connectionBusy || disposed) return;
+        const revision = importRevision, selected = sources.filter(source => source.connected !== connect && !source.pending);
+        if (!selected.length) return;
+        const savedHints = JSON.stringify(portBindings.snapshot());
+        connectionBusy = true;
+        for (const source of selected) { source.pending = true; source.error = ''; }
+        syncConnection();
+        try {
+            const grants = connect && selected.some(source => source.settings.mode === 'serial') ? authorizedPorts() : null;
+            await Promise.all(selected.map(async source => {
+                if (!isCurrentConnection(source, revision)) return;
+                const { adapter, settings } = source;
+                try {
+                    if (!connect) {
+                        await adapter.disconnect();
+                        if (isCurrentConnection(source, revision) && source.connected) endConnectionStream(source);
+                        return;
+                    }
+                    if (settings.mode !== 'serial') {
+                        await adapter.connect(networkOptions(settings));
+                        return;
+                    }
+                    const authorized = await grants;
+                    if (!isCurrentConnection(source, revision)) return;
+                    const { id, baudRate, dataBits, stopBits, parity } = settings;
+                    const match = portBindings.resolve(id, authorized);
+                    source.bindingMessage = match.issue ?? '已绑定端口';
+                    if (!match.port) return;
+                    await adapter.connect({ baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits), parity },
+                        match.port);
+                    if (isCurrentConnection(source, revision)) portBindings.ports.set(id, match.port);
+                } catch (error) {
+                    if (error.name !== 'AbortError' && isCurrentConnection(source, revision))
+                        source.error = (connect ? '连接失败：' : '断开失败：') + error.message;
+                }
+            }));
+            if (connect && revision === importRevision && savedHints !== JSON.stringify(portBindings.snapshot())) saveSoon();
+        } finally {
+            connectionBusy = false;
+            for (const source of selected) source.pending = false;
+            if (!disposed) { syncConnection(); scheduleSourceUi(); }
+        }
+    }
+    function dropConnectionSource(source) {
+        const { id } = source.settings;
+        connectionSources.delete(id); portBindings.remove(id); connectionView.remove(id);
+        delete workspaceChannels.timebases[id];
+        source.capture.dispose(); releaseTransport(source.adapter);
+    }
+    function installConnectionSources(config) {
+        replaceConnectionSettings(primarySource, primaryConnectionSettings());
+        nextConnectionSourceNumber = config.nextNumber;
         const ids = new Set(config.entries.map(entry => entry.id));
         const limit = captureQuota(globals, ids.size);
-        for (const source of serialSources.values()) if (!ids.has(source.settings.id)) dropSerialSource(source);
+        for (const source of connectionSources.values()) if (!ids.has(source.settings.id)) dropConnectionSource(source);
         for (const settings of config.entries) {
-            const source = serialSources.get(settings.id);
-            if (!source) createSerialSource(settings, limit);
+            const source = connectionSources.get(settings.id);
+            if (!source) createConnectionSource(settings, limit);
             else {
-                const previous = source.settings;
-                source.settings = settings;
-                serialSourceView.apply(source);
-                if (['baudRate', 'dataBits', 'stopBits', 'parity'].some(key => previous[key] !== settings[key]))
-                    void source.adapter.disconnect();
+                replaceConnectionSettings(source, settings);
+                connectionView.refresh(source);
                 const { capture } = source;
                 capture.rebuildHistory = settings.rebuildHistory;
                 capture.setCapacity(Number(globals.maxPoints));
                 void capture.setMaxRawFrameBytes(globals.maxRawFrameBytes);
                 const engine = capture.dataEngine, next = S.WidgetConfig.serialSourceGlobals(globals, settings);
-                const changed = Number(engine.globals.channelsCount) !== Number(next.channelsCount) ||
+                const changed = engine.globals.channelsCount !== next.channelsCount ||
+                    JSON.stringify(engine.globals.channelDefinitions) !== JSON.stringify(next.channelDefinitions) ||
                     JSON.stringify(engine.serialize()) !== JSON.stringify(settings.engine);
                 Object.assign(engine.globals, next, { rebuildHistory: settings.rebuildHistory });
+                capture.channelNames = next.channelNames;
                 if (changed) void engine.apply(settings.engine, { force: true }).catch(report);
+                else for (const output of capture.sources) if (output.kind === 'numeric') {
+                    output.frames.channelNames = next.channelNames; output.frames.names = next.channelNames;
+                }
             }
         }
+        portBindings.load(config.bindings);
+        for (const source of allConnections()) source.bindingMessage = '';
         applyCaptureQuotas();
     }
     listen(el('serial-source-add'), 'click', () => {
-        let number = nextSerialSourceNumber;
+        let number = nextConnectionSourceNumber;
         while (Number.isSafeInteger(number + 1) && widgets.widgets.has('serial-' + number)) number++;
+        status('serial-source-add-status', '');
         try {
-            if (!Number.isSafeInteger(number + 1)) throw new Error('串口来源编号已达上限');
-            const limit = captureQuota(globals, serialSources.size + 1);
-            S.preflightDataEngine(dataEngine.serialize(), globals, { memoryLimitBytes: limit });
-            const settings = S.WidgetConfig.normalizeSerialSource({ id: 'serial-' + number, name: '串口 ' + number,
-                baudRate: globals.serialBaud, dataBits: globals.serialData, stopBits: globals.serialStop, parity: globals.serialParity });
-            createSerialSource({ ...settings, channelCount: Number(globals.channelsCount),
-                engine: { ...dataEngine.serialize(), mode: 'Raw_Data', draft: null } }, limit);
-            nextSerialSourceNumber = number + 1;
-            applyCaptureQuotas(); refreshConnectionChoices(); saveSoon();
-        } catch (error) { status('connection-status', error.message); }
+            if (!Number.isSafeInteger(number + 1)) throw new Error('接收来源编号已达上限');
+            const { netHost, netPort, netLocalPort } = S.WidgetConfig.GLOBAL_DEFAULTS;
+            const settings = S.WidgetConfig.normalizeConnectionSource({ ...primaryConnectionSettings(), id: 'serial-' + number,
+                mode: 'serial', name: '来源 ' + number, host: netHost, port: netPort, localPort: netLocalPort, timeOffsetMs: 0 });
+            const limit = captureQuota(globals, connectionSources.size + 1);
+            const engine = dataEngine.serialize();
+            S.preflightDataEngine(engine, globals, { memoryLimitBytes: limit });
+            createConnectionSource({ ...settings, channelCount: Number(globals.channelsCount),
+                engine: { ...engine, mode: 'Raw_Data', draft: null } }, limit);
+            nextConnectionSourceNumber = number + 1;
+            applyCaptureQuotas(); refreshConnectionChoices(); syncConnection(); saveSoon();
+            connectionView.revealSource(settings.id);
+        } catch (error) { status('serial-source-add-status', error.message); }
     });
     const workspace = new S.WidgetWorkspace({ document, window, viewport: el('workspace-viewport'), surface: el('workspace-surface'),
         step: initial.workspace.step, zoom: initial.workspace.zoom,
@@ -295,24 +697,46 @@ async function startSerialPlotterApplication() {
         },
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
         onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
-    widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices,
+    widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices, getPrimaryConnectionName: primaryConnectionName,
+        getWorkspaceCapture: () => workspaceChannels,
         onChange() {
             if (!widgets || disposed) return;
             tools?.syncSources(); syncExportSources(); showProgress(null, null); saveSoon();
         },
         onRulesChange() { tools?.invalidate(); rates.clear(); syncExportSources(); },
-        onChannelMetadataChange(index, patch) { engineView?.channels.updateMetadata(index, patch); },
-        onBeforeChannelRenumber(numberMap) {
-            saveExportProfile(); boundExportSourceId = null;
-            for (const settings of Object.values(exportProfiles)) for (const profile of Object.values(settings.formats))
-                if (profile.channelIndices !== null) profile.channelIndices = profile.channelIndices
-                    .filter(index => numberMap.has(index + 1)).map(index => numberMap.get(index + 1) - 1);
-            if (tools?.selectedChannels) tools.selectedChannels = new Set([...tools.selectedChannels]
+        onChannelMetadataChange(index, patch, capture) {
+            if (engineView?.engine.service === capture) engineView.channels.updateMetadata(index, patch);
+            if (capture === workspaceChannels) workspaceChannelView?.updateMetadata(index, patch);
+        },
+        onBeforeChannelRenumber(numberMap, capture) {
+            if (capture === workspaceChannels) workspaceChannelView?.remapDrafts(numberMap, capture);
+            else engineView?.channels.remapDrafts(numberMap, capture);
+            if (capture === service) {
+                saveExportProfile(); boundExportSourceId = null;
+                for (const settings of Object.values(exportProfiles)) for (const profile of Object.values(settings.formats))
+                    if (profile.channelIndices !== null) profile.channelIndices = profile.channelIndices
+                        .filter(index => numberMap.has(index + 1)).map(index => numberMap.get(index + 1) - 1);
+            }
+            if (tools?.selectedChannels && widgets.active?.capture === capture) tools.selectedChannels = new Set([...tools.selectedChannels]
                 .filter(index => numberMap.has(index + 1)).map(index => numberMap.get(index + 1) - 1));
         },
         onActivate() { tools?.syncSources(); syncExportSources(); }
     });
     engineView = new S.DataEngineView({ document, engine: dataEngine, controller: widgets, onChange: saveSoon,
+        onTabChange: tab => connectionView.handleTab(tab),
+        getSourceName: () => allConnections().find(source => source.capture.dataEngine === engineView.engine)?.settings.name,
+        onProtocolOpen() {
+            const opener = el('engine-protocol-edit');
+            if (!connectionView.enginePage) {
+                const source = allConnections().find(source => source.capture.dataEngine === engineView.engine) ?? primarySource;
+                connectionView.showEngine(source, () => engineView.editor.close());
+            }
+            connectionView.showProtocol(opener, () => engineView.editor.close());
+        },
+        onProtocolClose: () => connectionView.returnFromProtocol(),
+        async onSaveProtocolDraft() {
+            if (!await saveNow()) throw new Error('未能写入配置存储');
+        },
         getProtocolReferences(id) {
             const references = [], visit = nodes => {
                 for (const node of nodes) {
@@ -325,15 +749,43 @@ async function startSerialPlotterApplication() {
                 references.push({ kind: 'regular-send', id: 'regular', label: '常规发送 · 协议消息' });
             return references;
         },
-        onLayout: syncEngineSplit,
         onApply(engine) {
+            if (workspaceChannels.mappings.length) { workspaceChannels.clear(); scheduleWorkspaceReplay(); }
             tools?.invalidate(); rates.clear(); syncExportSources();
             if (engine === sendingEngine()) { regularProtocolView.refresh(); commandView.render(); }
         } });
-    tools = new S.WorkspaceTools({ document, service, getWidgets: () => widgets.widgets,
+    workspaceChannelView = new S.EngineChannelView({ document, root: el('workspace-channel-panel'), controller: widgets,
+        capture: workspaceChannels, onChange: saveSoon });
+    function resolveAlignedIndex({ target, origin, timestamp, byteOffset, originIndex }) {
+        const sourceId = widget => widget?.settings.connectionSource ?? 'primary';
+        const from = sourceId(origin), to = sourceId(target), shared = workspaceChannels.numericSource.frames;
+        const active = workspaceChannels.appliedTimebases;
+        const projected = id => Boolean(active[id]?.mode && active[id].mode !== 'receive');
+        const merged = from === 'workspace' || to === 'workspace';
+        if (!projected(from) && !projected(to) && !merged) return undefined;
+        const originalFrames = origin?.source.frames;
+        const sourceOffset = Number.isFinite(byteOffset) ? byteOffset : originalFrames?.rawByteOffsetAt?.(originIndex);
+        const time = from === 'workspace' ? timestamp : projected(from) ? shared.locateOrigin(from, sourceOffset, true)?.origin.alignedTime
+            : workspaceChannels.plotTime(timestamp) + (connectionSources.get(from)?.settings.timeOffsetMs ?? 0);
+        const targetFrames = target?.source.frames;
+        if (!targetFrames?.length || !Number.isFinite(time)) return -1;
+        if (projected(to)) {
+            const match = shared.locateOrigin(to, time);
+            if (!match) return -1;
+            const offset = match.origin.byteOffset;
+            const index = S.FrameNavigation.frameIndexAtByteOffset(targetFrames, offset);
+            const frame = targetFrames.frameAt(index, { copyBytes: false });
+            return frame && frame.byteOffset <= offset && offset < frame.endByte ? index : -1;
+        }
+        const targetTime = to === 'workspace' ? time : workspaceChannels.receiveTime(time - (connectionSources.get(to)?.settings.timeOffsetMs ?? 0));
+        if (targetTime < targetFrames.timestampAt(0) || targetTime > targetFrames.timestampAt(targetFrames.length - 1)) return -1;
+        return targetFrames.nearestTimestampIndex(targetTime);
+    }
+    tools = new S.WorkspaceTools({ document, service, getWidgets: () => widgets.widgets, getAlignedIndex: resolveAlignedIndex,
+        toCaptureTime: time => workspaceChannels.plotTime(time), toWallTime: time => workspaceChannels.receiveTime(time),
         getActiveWidget: () => widgets.active,
         getChannelNames: () => widgets.active?.capture.dataEngine.globals.channelNames ?? globals.channelNames,
-        getTimeOffset: widget => serialSources.get(widget?.settings.connectionSource)?.settings.timeOffsetMs ?? 0,
+        getTimeOffset: widget => connectionSources.get(widget?.settings.connectionSource)?.settings.timeOffsetMs ?? 0,
         onStateChange: saveSoon });
     exportView = new S.ExportSettingsView(document, { onChange: exportSettingsChanged });
     const widgetExportView = new S.ExportSettingsView(document, { widget: true, onChange(key) {
@@ -346,8 +798,9 @@ async function startSerialPlotterApplication() {
     } });
 
     function exportSources() {
-        const items = [{ id: 'base', title: '基础原始记录', source: service.baseSource, aliases: ['base'], associated: [] }];
-        for (const { settings, capture } of serialSources.values())
+        const title = primaryConnectionName() + ' · 原始记录';
+        const items = [{ id: 'base', title, source: service.baseSource, aliases: ['base'], associated: [] }];
+        for (const { settings, capture } of connectionSources.values())
             items.push({ id: settings.id, title: settings.name + ' · 原始记录', source: capture.baseSource, capture, aliases: [settings.id], associated: [] });
         for (const widget of widgets.widgets.values()) {
             if (widget.type !== 'byte' || widget.source.kind !== 'raw') continue;
@@ -422,6 +875,8 @@ async function startSerialPlotterApplication() {
     function widgetExportIssue(format, selected) {
         if (!selected) return format === 'text' ? '请选择显示「文本」的字节流控件。'
             : '请选择有解析数据的波形、位姿或显示「数据引擎」的字节流控件。';
+        if (selected.widget.capture === workspaceChannels && (format === 'binary' || format === 'hex-text'))
+            return '请在左侧「导出数据」中按通讯来源导出原始字节。此处可导出全局通道的 TXT 或 CSV。';
         if (selected.source.rebuilding || selected.source.frames.rebuilding) return '当前控件正在重建历史。';
         if (!selected.source.frames.length) return '当前控件没有可导出的记录。';
         if ((format === 'csv' || format === 'engine-text' || selected.source.frames.provenanceAt) &&
@@ -447,7 +902,7 @@ async function startSerialPlotterApplication() {
             : !rxCount && !txCount ? '所选缓冲区没有可导出的记录。' : '';
         exportView.sync({ busy: exporting, available: !rawIssue });
         el('export-source').disabled = exporting;
-        el('wrap-export-source').hidden = direction === 'tx' && !serialSources.size;
+        el('wrap-export-source').hidden = direction === 'tx' && !connectionSources.size;
         const buffers = source ? [direction !== 'tx' && source.frames, direction !== 'rx' && tx].filter(Boolean) : [];
         const byteCount = buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, 0);
         el('export-range-summary').textContent = source ? 'RX ' + rxCount + '，TX ' + txCount + ' 帧，原始字节 ' + byteCount.toLocaleString() + ' B。\n' +
@@ -577,20 +1032,30 @@ async function startSerialPlotterApplication() {
     }
     listen(el('btn-export'), 'click', () => { void exportData(); });
     listen(el('btn-widget-export'), 'click', () => { void exportWidgetData(); });
-    const connectionIds = { connType: 'conn-type', serialBaud: 'serial-baud', serialData: 'serial-data',
-        serialStop: 'serial-stop', serialParity: 'serial-parity', netHost: 'net-host', netPort: 'net-port', netLocalPort: 'net-local' };
     function syncConnection() {
-        el('config-serial').hidden = globals.connType !== 'serial'; el('config-net').hidden = globals.connType === 'serial';
-        el('wrap-local-port').hidden = globals.connType !== 'udp';
-        el('serial-source-add').hidden = globals.connType !== 'serial';
-        for (const id of ['config-serial', 'config-net', 'wrap-local-port']) el(id).style.display = el(id).hidden ? 'none' : '';
-        for (const id of Object.values(connectionIds)) el(id).disabled = connecting || Boolean(activeEngine);
-        el('connection-indicator').classList.toggle('connected', Boolean(activeEngine));
-        el('btn-connect').textContent = activeEngine ? '断开连接' : '连接'; el('btn-connect').disabled = connecting;
+        const sources = allConnections(), connected = sources.filter(source => source.connected).length;
+        el('connection-indicator').classList.toggle('connected', connected > 0);
+        el('btn-connect').disabled = connectionBusy || connected === sources.length;
+        el('serial-disconnect-all').disabled = connectionBusy || connected === 0;
+        el('serial-source-add').disabled = connectionBusy;
+        for (const source of sources) {
+            const { id, mode } = source.settings;
+            source.controlsLocked = connectionBusy;
+            source.hasBinding = mode === 'serial' && (portBindings.ports.has(id) || portBindings.hints.has(id));
+            source.needsConfirmation = source.hasBinding && !portBindings.ports.has(id) && portBindings.hints.get(id)?.ambiguous;
+            connectionView.refresh(source);
+        }
+        const serialOffline = sources.filter(source => !source.connected && source.settings.mode === 'serial');
+        const needsBinding = serialOffline.some(source => !source.hasBinding || source.needsConfirmation || source.bindingMessage.includes('重新确认'));
+        const failed = sources.find(source => !source.connected && source.error);
+        const offline = serialOffline.some(source => source.bindingMessage.includes('不在线'));
+        const detail = connectionBusy ? ' · 正在处理…' : failed ? ' · ' + failed.settings.name + '：' + failed.error
+            : needsBinding ? ' · 请在配置中绑定端口' : offline ? ' · 请在配置中查看端口状态' : '';
+        status('connection-status', '已连接 ' + connected + ' / ' + sources.length + detail);
+        connectionView.syncDialog();
         renderSendConnections();
     }
     function applyGlobalFields() {
-        for (const [key, id] of Object.entries(connectionIds)) el(id).value = globals[key];
         el('max-points').value = globals.maxPoints; el('max-raw-frame-bytes').value = String(globals.maxRawFrameBytes);
         status('engine-raw-limit-status', '');
         el('capture-memory-mib').value = String(globals.captureMemoryMiB);
@@ -598,27 +1063,21 @@ async function startSerialPlotterApplication() {
         updateMemoryStatus();
         widgets.syncGlobals(); syncConnection();
     }
-    for (const [key, id] of Object.entries(connectionIds)) listen(el(id), 'change', () => {
-        const candidate = { ...globals, [key]: el(id).value };
-        try { S.validateConfig(candidate); Object.assign(globals, candidate); syncConnection(); saveSoon(); }
-        catch (error) { report(error); }
-    });
     for (const [key, id] of [['maxPoints', 'max-points'], ['maxRawFrameBytes', 'max-raw-frame-bytes'],
         ['captureMemoryMiB', 'capture-memory-mib']]) listen(el(id), 'change', () => {
         const candidate = getConfig(); candidate.global[key] = key === 'maxPoints' ? el(id).value : Number(el(id).value);
         try {
             const validated = S.WidgetConfig.validateWorkspaceConfig(candidate);
-            if (key === 'captureMemoryMiB' && serialSources.size)
-                S.preflightDataEngine(validated.dataEngine, validated.global, { memoryLimitBytes: captureQuota(validated.global, serialSources.size) });
+            if (key === 'captureMemoryMiB') preflightWorkspaceEngines(validated);
             Object.assign(globals, validated.global);
             if (key === 'maxPoints') {
-                service.setCapacity(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints));
-                for (const { capture } of serialSources.values()) capture.setCapacity(Number(globals.maxPoints));
+                service.setCapacity(Number(globals.maxPoints)); workspaceChannels.resize(Number(globals.maxPoints)); widgets.setCapacity(Number(globals.maxPoints));
+                for (const { capture } of connectionSources.values()) capture.setCapacity(Number(globals.maxPoints));
             }
             else if (key === 'maxRawFrameBytes') {
                 void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
-                for (const { capture } of serialSources.values()) {
-                    capture.rebuildHistory = globals.rebuildHistory;
+                for (const { capture } of connectionSources.values()) {
+                    capture.rebuildHistory = capture.dataEngine.globals.rebuildHistory;
                     void capture.setMaxRawFrameBytes(globals.maxRawFrameBytes);
                 }
                 widgets.syncByteRecordRule();
@@ -633,7 +1092,7 @@ async function startSerialPlotterApplication() {
         }
     });
     let sendConnectionId = initial.send.connectionSource;
-    const sendingEngine = () => sendConnectionId === 'primary' ? dataEngine : serialSources.get(sendConnectionId)?.capture.dataEngine;
+    const sendingEngine = () => sendConnectionId === 'primary' ? dataEngine : connectionSources.get(sendConnectionId)?.capture.dataEngine;
     const protocolSession = new S.ProtocolSendSession({ getProtocols: () => sendingEngine()?.config.protocols ?? [],
         getProtocol: id => sendingEngine()?.config.protocols.find(schema => schema.id === id) });
     const regularProtocolView = new S.ProtocolSendView({ root: el('protocol-send-panel'), session: protocolSession,
@@ -643,8 +1102,9 @@ async function startSerialPlotterApplication() {
     let commandView = null, sendTab = 'regular';
     function renderSendConnections() {
         const select = el('send-connection-source');
-        const items = [{ id: 'primary', name: '主连接', connected: Boolean(activeEngine) }, ...[...serialSources.values()]
-            .map(source => ({ id: source.settings.id, name: source.settings.name, connected: source.connected }))];
+        const items = allConnections().map(source => ({
+            id: source.settings.id, name: source.settings.name, connected: source.connected
+        }));
         if (!items.some(item => item.id === sendConnectionId)) sendConnectionId = 'primary';
         el('send-connection-target').hidden = items.length === 1;
         select.replaceChildren(...items.map(({ id, name, connected }) => {
@@ -655,17 +1115,16 @@ async function startSerialPlotterApplication() {
     }
     function getSendEngine() {
         if (disposed) return null;
-        if (sendConnectionId === 'primary') return activeEngine;
-        const target = serialSources.get(sendConnectionId);
+        const target = sendConnectionId === 'primary' ? primarySource : connectionSources.get(sendConnectionId);
         return target?.connected ? target.adapter : null;
     }
     function captureForTransport(transport = serialAdapter) {
         if (transport === serialAdapter || transport === netAdapter) return service;
-        return [...serialSources.values()].find(source => source.adapter === transport)?.capture;
+        return [...connectionSources.values()].find(source => source.adapter === transport)?.capture;
     }
     listen(el('send-connection-source'), 'change', () => {
         const id = el('send-connection-source').value;
-        if (id === sendConnectionId || id !== 'primary' && !serialSources.has(id)) return;
+        if (id === sendConnectionId || id !== 'primary' && !connectionSources.has(id)) return;
         sendController.stop(); commandRunner.stop();
         sendConnectionId = id;
         regularProtocolView.refresh(); commandView?.render(); saveSoon();
@@ -691,8 +1150,8 @@ async function startSerialPlotterApplication() {
             const capture = captureForTransport(transport), timestamp = Date.now();
             if (capture) widgets.appendExtra({ kind: 'tx-error', bytes, reason: error.message, order: capture.nextOrder++, timestamp,
                 time: S.RawFrameParser.formatTime(timestamp) }, undefined, capture);
-            const slot = [...serialSources.values()].find(source => source.adapter === transport);
-            if (slot) { slot.error = error.message; serialSourceView.refresh(slot); }
+            const slot = allConnections().find(source => source.adapter === transport);
+            if (slot) { slot.error = error.message; connectionView.refresh(slot); }
             else status('connection-status', error.message);
         }
     });
@@ -729,37 +1188,15 @@ async function startSerialPlotterApplication() {
     }
     listen(el('send-mode'), 'change', syncProtocolSend);
     for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) listen(el(id), 'change', saveSoon);
-    function stopPrimarySend() { if (sendConnectionId === 'primary') { sendController.stop(); commandRunner.stop(); } }
-    for (const adapter of [serialAdapter, netAdapter]) {
-        adapter.onData((bytes, stamp) => service.receive(bytes, stamp));
-        adapter.onStatusChange((connected, error) => {
-            if (disposed) return;
-            if (connected) activeEngine = adapter;
-            else if (activeEngine === adapter || connecting) { activeEngine = null; stopPrimarySend(); service.endStream(); }
-            status('connection-status', error ? error.message : connected ? '已连接' : '已断开'); syncConnection();
-        });
-    }
-    listen(el('btn-connect'), 'click', async () => {
-        if (connecting || disposed) return;
-        connecting = true; syncConnection();
-        try {
-            if (activeEngine) {
-                const adapter = activeEngine;
-                try { await adapter.disconnect(); } catch { await adapter.forceDisconnect?.(); }
-                activeEngine = null; stopPrimarySend(); service.endStream(); status('connection-status', '已断开');
-            } else if (globals.connType === 'serial') {
-                await serialAdapter.connect({ baudRate: S.parseIntInRange(globals.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率'),
-                    dataBits: Number(globals.serialData), stopBits: Number(globals.serialStop), parity: globals.serialParity });
-            } else {
-                const port = S.parsePort(globals.netPort), localText = globals.netLocalPort.trim();
-                await netAdapter.connect({ mode: globals.connType, host: globals.netHost, port, localPort: localText ? S.parsePort(localText) : port });
-            }
-        } catch (error) { if (!disposed) { activeEngine = null; status('connection-status', '连接失败：' + error.message); } }
-        finally { connecting = false; if (!disposed) syncConnection(); }
-    });
+    for (const adapter of [serialAdapter, netAdapter]) watchTransport(primarySource, adapter);
+    listen(el('serial-disconnect-all'), 'click', () => { void changeConnections(allConnections(), false); });
+    listen(el('btn-connect'), 'click', () => { void changeConnections(allConnections(), true); });
     function setPaused(paused) {
+        workspaceChannels.setPaused(Boolean(paused), service.wallNow());
         service.pause(paused);
-        for (const { capture } of serialSources.values()) capture.pause(paused);
+        if (!paused) scheduleSourceUi();
+        for (const { capture } of connectionSources.values()) capture.pause(paused);
+        if (paused) pumpWorkspaceChannels(true);
         if (service.paused) tools.invalidate(); else tools.resetNavigation();
         widgets.setPaused(service.paused); tools.syncPaused();
         for (const widget of widgets.widgets.values()) { widget.view.draw?.(); widget.view.render?.(); }
@@ -776,7 +1213,10 @@ async function startSerialPlotterApplication() {
     });
     listen(el('btn-clear'), 'click', () => {
         service.clear();
-        for (const { capture } of serialSources.values()) capture.clear();
+        for (const { capture } of connectionSources.values()) capture.clear();
+        workspaceChannels.clear();
+        workspaceChannels.pauses.length = 0;
+        if (workspaceChannels.paused) workspaceChannels.pauseStarted = service.wallNow();
         tools.invalidate(); rates.clear(); draws.clear();
         for (const widget of widgets.widgets.values()) widget.view.clear();
         previousStats = { time: performance.now(), rx: 0, tx: 0, epoch: service.epoch };
@@ -785,11 +1225,12 @@ async function startSerialPlotterApplication() {
     });
     function updateMemoryStatus() {
         const state = service.memoryUsage();
-        for (const { capture } of serialSources.values()) {
+        for (const { capture } of connectionSources.values()) {
             const other = capture.memoryUsage();
             state.usedBytes += other.usedBytes; state.evictedFrames += other.evictedFrames;
             state.blockedReason ||= other.blockedReason;
         }
+        if (workspaceChannels.mappings.length) state.usedBytes += workspaceChannels.numericSource.frames.estimatedMemoryBytes;
         const used = (state.usedBytes / 1048576).toFixed(1), limit = Number(globals.captureMemoryMiB);
         let message = `采集估算：${used} / ${limit} MiB`;
         if (state.evictedFrames) message += `；已按预算淘汰 ${state.evictedFrames.toLocaleString()} 条来源记录`;
@@ -799,14 +1240,14 @@ async function startSerialPlotterApplication() {
     function updateStats() {
         if (disposed) return;
         service.memory.enforce();
-        for (const source of serialSources.values()) { source.capture.memory.enforce(); serialSourceView.refresh(source); }
+        for (const source of connectionSources.values()) { source.capture.memory.enforce(); connectionView.refresh(source); }
         updateMemoryStatus();
         const now = performance.now(), elapsed = Math.max(0.001, (now - previousStats.time) / 1000);
         const sameEpoch = previousStats.epoch === service.epoch;
         const rxRate = sameEpoch ? Math.max(0, service.stats.rxBytes - previousStats.rx) / elapsed : 0;
         const txRate = sameEpoch ? Math.max(0, service.stats.txBytes - previousStats.tx) / elapsed : 0;
         const sourceRates = new Map(), captures = [service];
-        for (const slot of serialSources.values()) {
+        for (const slot of connectionSources.values()) {
             const { capture } = slot, previous = slot.previousStats, interval = Math.max(.001, (now - (previous?.time ?? now)) / 1000);
             const same = previous?.epoch === capture.epoch;
             slot.rates = { rxRate: same ? (capture.stats.rxBytes - previous.rx) / interval : 0,
@@ -834,11 +1275,11 @@ async function startSerialPlotterApplication() {
                         ? `实际 WebGL 渲染器：${gpu.rendererName || '浏览器未提供设备名称'}。\n已请求高性能显卡，实际选择由浏览器和系统决定。`
                         : '波形曲线使用 Canvas 2D；显卡不可用时自动回退。';
                 }
-                const rate = widget.source.sampleRate?.rate;
+                const rate = widget.view.fixedTimeRate || widget.source.sampleRate?.rate;
                 if (widget.type === 'wave' && !service.paused && rate > 0 && !widget.view.frames.responseMode) widget.view.setSampleRateHz(rate);
             } else {
                 const capture = widget.capture;
-                const local = capture === service ? { rxRate, txRate } : serialSources.get(widget.settings.connectionSource)?.rates ?? { rxRate: 0, txRate: 0 };
+                const local = capture === service ? { rxRate, txRate } : connectionSources.get(widget.settings.connectionSource)?.rates ?? { rxRate: 0, txRate: 0 };
                 widget.refs['stat-rx-value'].textContent = bytesLabel(local.rxRate) + '/s (' + bytesLabel(capture.stats.rxBytes) + ')';
                 widget.refs['stat-tx-value'].textContent = bytesLabel(local.txRate) + '/s (' + bytesLabel(capture.stats.txBytes) + ')';
                 const text = widget.settings.captureMode === 'text';
@@ -859,12 +1300,13 @@ async function startSerialPlotterApplication() {
         saveExportProfile(); saveWidgetExportProfile();
         return { version: 3, global: { ...globals, channelNames: [...globals.channelNames], channelRecords: widgets.getChannelRegistry().toJSON() }, widgets: widgets.serialize(),
             workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
-            dataEngine: dataEngine.serialize(), serialSources: { nextNumber: nextSerialSourceNumber,
-                entries: [...serialSources.values()].map(({ settings, capture }) => {
+            dataEngine: dataEngine.serialize(), workspaceChannels: workspaceChannels.settings, serialSources: { nextNumber: nextConnectionSourceNumber, bindings: portBindings.snapshot(),
+                entries: [...connectionSources.values()].map(({ settings, capture }) => {
                     const engine = capture.dataEngine;
-                    const { channelsCount, channelNames, channelColors } = engine.globals;
-                    return { ...settings, channelCount: Number(channelsCount), channelNames, channelColors,
-                        rebuildHistory: engine.globals.rebuildHistory, engine: engine.serialize() };
+                    const { channelsCount, channelNames, channelColors, channelDefinitions, rebuildHistory } = engine.globals;
+                    return { ...settings, channelCount: Number(channelsCount), channelNames: [...channelNames], channelColors: [...channelColors],
+                        channelDefinitions: channelDefinitions.map(definition => ({ ...definition })),
+                        channelRecords: widgets.getChannelRegistry(capture).toJSON(), rebuildHistory, engine: engine.serialize() };
                 }) },
             tools: { ...tools.serialize(), exportSourceId: exportRecordSourceId, exportRecordSourceId, exportFormat, widgetExport,
                 exportProfiles: JSON.parse(JSON.stringify(exportProfiles)) },
@@ -872,9 +1314,10 @@ async function startSerialPlotterApplication() {
                 tab: sendTab, connectionSource: sendConnectionId, protocol: regularProtocolView.getDraft(), commands: commandLibrary.serialize() } };
     }
     function installWidgets(config) {
-        installSerialSources(config.serialSources);
+        installConnectionSources(config.serialSources);
+        scheduleWorkspaceReplay();
         sendConnectionId = config.send.connectionSource;
-        renderEngineConnections(); renderSendConnections();
+        renderSendConnections(); renderWorkspaceChannels(); refreshAlignmentSources();
         exportProfiles = config.tools.exportProfiles; boundExportSourceId = null;
         exportFormat = bufferFormat(config.tools.exportFormat);
         exportRecordSourceId = bufferSourceId(config.tools.exportRecordSourceId); exportRecordSource = null;
@@ -896,15 +1339,20 @@ async function startSerialPlotterApplication() {
     function applyConfig(input) {
         const config = S.WidgetConfig.migrateWorkspaceConfig(input);
         preflightWorkspaceEngines(config);
+        connectionView.close(false);
+        connectionView.clearFormDrafts();
         const wasRestoring = restoring, revision = ++importRevision; restoring = true;
         try {
+            for (const source of allConnections()) if (source.pending && !source.connected)
+                void source.adapter.disconnect();
             tools.invalidate();
             sendController.stop(); commandRunner.stop();
             for (const id of [...widgets.widgets.keys()]) widgets.remove(id);
             Object.assign(globals, config.global); service.rebuildHistory = globals.rebuildHistory;
-            service.setMemoryLimit(captureQuota(globals, config.serialSources.entries.length));
+            workspaceChannels.resize(Number(globals.maxPoints)); workspaceChannels.configure(config.workspaceChannels);
+            service.setMemoryLimit(captureQuota(globals, config.serialSources.entries.length + Number(config.workspaceChannels.mappings.length > 0)));
             // Install validated definitions against the incoming raw count atomically.
-            service.channelDefinitions = globals.channelDefinitions; service.channelNames = globals.channelNames; widgets.channelRegistry = null;
+            service.channelDefinitions = globals.channelDefinitions; service.channelNames = globals.channelNames;
             service.setCapacity(Number(globals.maxPoints)); void service.setMaxRawFrameBytes(globals.maxRawFrameBytes);
             const ready = dataEngine.apply(config.dataEngine, { rebuild: globals.rebuildHistory, force: true });
             installWidgets(config); rates.clear(); draws.clear();
@@ -978,36 +1426,7 @@ async function startSerialPlotterApplication() {
         el('workspace-zoom-percent').value = String(Math.round(workspace.zoom * 100));
     });
     let panelDrag = null;
-    let engineSplitDrag = null;
-    function syncEngineSplit() {
-        const sidebar = el('sidebar'), title = sidebar.querySelector('.app-title');
-        const available = Math.max(0, sidebar.clientHeight - (title?.offsetHeight ?? 40) - 8);
-        const preferred = uiLayout.leftSplitRatio ?? .5;
-        const upperMinimum = Math.min(100, available / 3);
-        const engineMinimum = Math.min(engineView?.minimumHeight() ?? 140, available - upperMinimum);
-        const height = Math.max(upperMinimum, Math.min(available - engineMinimum, available * preferred));
-        sidebar.style.setProperty('--sidebar-upper-height', height + 'px');
-        el('engine-splitter').setAttribute('aria-valuenow', String(Math.round(preferred * 100)));
-    }
-    listen(el('engine-splitter'), 'pointerdown', event => {
-        if (event.button !== 0) return;
-        engineSplitDrag = { pointerId: event.pointerId }; el('engine-splitter').setPointerCapture?.(event.pointerId); event.preventDefault();
-    });
-    listen(el('engine-splitter'), 'pointermove', event => {
-        if (!engineSplitDrag || event.pointerId !== engineSplitDrag.pointerId) return;
-        const rect = el('sidebar').getBoundingClientRect(), title = el('sidebar').querySelector('.app-title')?.offsetHeight ?? 40;
-        uiLayout.leftSplitRatio = Math.max(.15, Math.min(.85, (event.clientY - rect.top - title) / Math.max(160, rect.height - title - 8)));
-        syncEngineSplit();
-    });
-    const finishEngineSplit = () => { if (!engineSplitDrag) return; engineSplitDrag = null; saveSoon(); };
-    listen(el('engine-splitter'), 'pointerup', finishEngineSplit); listen(el('engine-splitter'), 'pointercancel', finishEngineSplit);
-    listen(el('engine-splitter'), 'keydown', event => {
-        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault(); uiLayout.leftSplitRatio = event.key === 'Home' ? .15 : event.key === 'End' ? .85 :
-            Math.max(.15, Math.min(.85, uiLayout.leftSplitRatio + (event.key === 'ArrowUp' ? -.025 : .025)));
-        syncEngineSplit(); saveSoon();
-    });
-    const resizeViews = () => { syncEngineSplit(); workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
+    const resizeViews = () => { workspace.refresh(); for (const id of widgets.widgets.keys()) widgets.resize(id); };
     syncSidebarLayout();
     const sendSizeTarget = () => el('global-send');
     const sendMinimum = (target = sendSizeTarget()) => parseFloat(window.getComputedStyle?.(target).minHeight) || 160;
@@ -1034,7 +1453,6 @@ async function startSerialPlotterApplication() {
     }
     function applyUiLayout(layout) {
         Object.assign(uiLayout, layout);
-        syncEngineSplit();
         preferredSidebarOpen.left = layout.leftOpen; preferredSidebarOpen.right = layout.rightOpen;
         el('sidebar').style.setProperty('--sidebar-w', layout.leftWidth + 'px');
         el('channel-sidebar').style.setProperty('--channel-sidebar-w', layout.rightWidth + 'px');
@@ -1111,22 +1529,23 @@ async function startSerialPlotterApplication() {
         if (saveTimer !== null) saveNow();
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
+        if (workspaceChannelTimer !== null) clearTimeout(workspaceChannelTimer);
+        alignmentReplay?.capture.dispose();
+        workspaceChannelView.dispose(); workspaceChannels.dispose();
         clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose(); widgetExportView.dispose();
         engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose();
-        for (const source of serialSources.values()) dropSerialSource(source);
+        connectionView.dispose();
+        for (const source of connectionSources.values()) dropConnectionSource(source);
         service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
-        for (const adapter of [serialAdapter, netAdapter]) {
-            adapter.onData(null); adapter.onStatusChange(null);
-            void (adapter.dispose ? adapter.dispose() : adapter.disconnect());
-        }
+        for (const adapter of [serialAdapter, netAdapter]) releaseTransport(adapter);
         return workspaceStorage.dispose();
     }
     installWidgets(initial); el('history-rebuild-progress').hidden = true; restoring = false; updateStats();
     const statsTimer = setInterval(updateStats, 1000);
-    S.application = { service, widgets, workspace, tools, serialAdapter, serialSources, netAdapter, sendController,
+    S.application = { service, widgets, workspace, tools, serialAdapter, serialSources: connectionSources, netAdapter, sendController,
         protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, exportWidgetData, updateStats,
-        dataEngine, engineView, workspaceStorage, saveNow, saveSoon, flushConfig };
+        dataEngine, engineView, workspaceChannels, workspaceStorage, saveNow, saveSoon, flushConfig };
     listen(window, 'pagehide', dispose);
     return S.application;
 }

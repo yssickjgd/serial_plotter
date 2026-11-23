@@ -19,11 +19,17 @@
     border-radius: 0;
     box-shadow: none;
 }
-.protocol-editor[open] {
+.protocol-editor[open], .protocol-editor.is-embedded:not([hidden]) {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     overflow: hidden;
 }
+.protocol-editor.is-embedded { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.protocol-editor.is-embedded > .protocol-editor-header { flex-wrap: wrap; justify-content: space-between; }
+.protocol-editor.is-embedded .protocol-embedded-heading { display: none; }
+.protocol-editor.is-embedded .protocol-editor-actions { min-width: 0; max-width: 100%; justify-content: flex-end; margin-inline-start: auto; }
+.protocol-editor.is-embedded .protocol-editor-actions > button { max-width: 100%; overflow-wrap: anywhere; }
+.protocol-apply-hint { flex: 1 1 280px; margin: 0; order: -1; }
 .protocol-editor [hidden] { display: none !important; }
 .protocol-editor-header { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--sidebar-bg); }
 .protocol-editor-header h2 { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; flex: 1; margin: 0; font-size: var(--ui-title-size); }

@@ -28,7 +28,7 @@ function widget(id, values, { type = 'wave', offset = 0, settings = {}, timestam
     return { id, type, title: id, source: { frames, generation: 0 }, view,
         settings: { captureMode: 'number', channels: [], ...settings } };
 }
-function fixture(widgets) {
+function fixture(widgets, options = {}) {
     const elements = new Map();
     const document = { ...element(), createElement: element, getElementById(id) {
         if (!elements.has(id)) elements.set(id, element()); return elements.get(id);
@@ -37,7 +37,7 @@ function fixture(widgets) {
     document.getElementById('nav-jump-relative').value = '0';
     const service = { paused: true, epoch: 0 }, map = new Map(widgets.map(w => [w.id, w]));
     let activeId = null;
-    const tools = new WorkspaceTools({ document, service, getWidgets: () => map, getActiveWidget: () => map.get(activeId) });
+    const tools = new WorkspaceTools({ document, service, getWidgets: () => map, getActiveWidget: () => map.get(activeId), ...options });
     const activate = id => { activeId = id; tools.syncSources(); };
     const select = (sourceId, referenceId = sourceId) => {
         activeId = sourceId; tools.syncSources({ referenceId });
@@ -162,6 +162,97 @@ test('time relative zero is the earliest retained timestamp and targets outside 
     assert.match(f.el('nav-jump-status').textContent, /保留/);
     f.el('nav-jump-relative').value = '100';
     assert.equal(f.tools.jumpToTime(), false); assert.deepEqual(a.view.jumps, [100]);
+});
+
+test('cross-source time jumps honor mapped indexes and keep the receive-time fallback', () => {
+    const source = widget('source', [1, 2], { offset: 100 });
+    const aligned = widget('aligned', [3, 4], { offset: 200 });
+    const missing = widget('missing', [5, 6], { offset: 300 });
+    const receive = widget('receive', [7, 8], { offset: 400, timestamps: [10100, 11100] });
+    for (const widget of [aligned, missing, receive]) widget.capture = {};
+    const f = fixture([source, aligned, missing, receive], {
+        getTimeOffset: widget => widget === receive ? -100 : 0,
+        getAlignedIndex: ({ target, origin, timestamp, byteOffset, originIndex }) => {
+            if (origin !== source || timestamp !== 10000 || byteOffset !== 100 || originIndex !== 0) return;
+            if (target === aligned) return 1;
+            if (target === missing) return -1;
+        }
+    });
+    f.select('source');
+
+    assert.equal(f.tools.jumpToTime(), true);
+    assert.deepEqual(source.view.jumps, [100]);
+    assert.deepEqual(aligned.view.jumps, [201]);
+    assert.equal(aligned.view.navigationMarkers.timeOrder, 2);
+    assert.deepEqual(missing.view.jumps, []);
+    assert.deepEqual(receive.view.jumps, [400]);
+});
+
+test('search jumps and highlights use the matched origin frame for cross-source alignment', async () => {
+    const source = widget('source', [0, 7], { offset: 100 });
+    const aligned = widget('aligned', [1, 2], { offset: 200 });
+    aligned.capture = {};
+    const f = fixture([source, aligned], {
+        getAlignedIndex: ({ target, origin, timestamp, byteOffset, originIndex }) => {
+            if (target === aligned && origin === source && timestamp === 11000 && byteOffset === 101 && originIndex === 1) return 0;
+        }
+    });
+    f.select('source');
+    f.el('monitor-search-query').value = '7';
+
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.deepEqual(aligned.view.jumps, [200]);
+    assert.equal(aligned.view.navigationMarkers.matches[0].absoluteStartByte, 200);
+});
+
+test('cross-source nearest search uses the visible frame of a combined reference with repeated byte offsets', async () => {
+    const source = widget('source', [7, 0, 7], { offset: 100 });
+    const reference = widget('reference', [1]);
+    const refFrames = reference.source.frames;
+    refFrames.append([2], Uint8Array.of(2), '', 2, 12000, { byteOffset: 0, endByte: 1 });
+    refFrames.multipleSources = true;
+    reference.capture = {};
+    reference.view.currentFrameIndex = () => 0;
+    const f = fixture([source, reference], {
+        getAlignedIndex: ({ target, origin, timestamp, byteOffset, originIndex }) => {
+            if (target === source && origin === reference && timestamp === 10000 && byteOffset === 0 && originIndex === 0) return 2;
+            if (target === source) return -1;
+        }
+    });
+    f.select('source', 'reference');
+    f.el('monitor-search-query').value = '7';
+
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.deepEqual(source.view.jumps, [102]);
+});
+
+test('combined search ranks overlapping byte offsets by aligned sample position', async () => {
+    const combined = widget('combined', []);
+    combined.capture = {};
+    const frames = combined.source.frames;
+    frames.multipleSources = true;
+    [7, 0, 7, 0, 7].forEach((value, index) => frames.append([value], Uint8Array.of(value), '', index + 1,
+        10000 + index * 1000, { byteOffset: 0, endByte: 1 }));
+    frames.provenanceAt = (channel, index) => ({ order: index + 1, byteOffset: 0, endByte: 1 });
+    frames.resolveFrame = origin => frames.frameAt(origin.order - 1);
+    combined.view.jumpToFrame = index => { combined.view.jumps.push(index); return true; };
+    const reference = widget('reference', [1], { offset: 100 });
+    const f = fixture([combined, reference], {
+        getAlignedIndex: ({ target, origin, originIndex }) => {
+            if (target === combined && origin === reference && originIndex === 0) return 2;
+        }
+    });
+    f.select('combined', 'reference');
+    f.el('monitor-search-query').value = '7';
+
+    assert.equal(await f.tools.requestSearch('nearest'), true);
+    assert.equal(await f.tools.requestSearch('next'), true);
+    assert.equal(await f.tools.requestSearch('prev'), true);
+    f.tools.invalidate();
+    assert.equal(await f.tools.requestSearch('prev'), true);
+    f.tools.invalidate();
+    assert.equal(await f.tools.requestSearch('next'), true);
+    assert.deepEqual(combined.view.jumps, [2, 4, 2, 4, 0]);
 });
 
 test('public tools stay inactive while receiving and default absolute time comes from the chosen source', async () => {

@@ -54,7 +54,7 @@ class ChannelConfigView {
         const symbols = this.document.getElementById(`channel-symbols-${widget.type}`);
         if (symbols && !symbols.children.length) symbols.append(globalThis.SerialPlotter.createReservedNamesHelp(this.document, 'channel'));
         const help = this.document.getElementById(`channel-help-${widget.type}`);
-        if (help) help.textContent = '名称和颜色全局共用；勾选仅控制当前控件的可见性。';
+        if (help) help.textContent = '名称和颜色在同一来源的控件间共用；勾选仅控制当前控件的可见性。';
         const cleanups = []; this.listeners.set(list, cleanups);
         const all = this.controller.channelMeta(widget).filter(channel => !widget.channelCategory || widget.channelCategory === 'all' ||
             (channel.definition?.type ?? 'raw') === widget.channelCategory);
@@ -101,14 +101,14 @@ class ChannelConfigView {
                 const label = this.document.createElement('span'); label.className = 'channel-label';
                 label.textContent = globalThis.SerialPlotter.formatChannelId(index);
                 const color = this.document.createElement('input'); color.type = 'color'; color.value = channel.color;
-                color.setAttribute('data-role', 'channel-color'); color.setAttribute('aria-label', `${label.textContent} 颜色（全局共用）`);
+                color.setAttribute('data-role', 'channel-color'); color.setAttribute('aria-label', `${label.textContent} 颜色（来源共用）`);
                 listenRow(color, 'input', () => {
                     try { this.controller.setChannelColor(index, color.value, widget.capture); channel.color = color.value; }
                     catch (error) { this.showError(widget, error.message); }
                 });
                 const name = this.document.createElement('input'); name.type = 'text'; name.className = 'channel-readonly-name channel-name-editor';
                 name.value = channel.name; name.title = channel.name; name.setAttribute('data-role', 'channel-name');
-                name.setAttribute('aria-label', `${label.textContent} 名称（全局共用）`);
+                name.setAttribute('aria-label', `${label.textContent} 名称（来源共用）`);
                 const clearError = () => { name.removeAttribute('aria-invalid'); name.setCustomValidity?.(''); name.title = channel.name; this.showError(widget, ''); };
                 const commitName = () => {
                     try {

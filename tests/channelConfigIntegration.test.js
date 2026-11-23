@@ -1,6 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
+function commitFormula(row, explicit = false) {
+    const field = row.querySelector('[data-role="channel-expression"]');
+    if (explicit) field.dispatchEvent({ type: 'keydown', key: 'Enter', target: field, bubbles: true });
+    else field.closest('.channel-definition').dispatchEvent({ type: 'pointerleave' });
+}
+
 async function applyEngine(f) { const ready = f.app.engineView.apply(); await f.settle(); await ready; }
 
 function editorList(f, number) {
@@ -437,15 +443,15 @@ test('uniform editor reports invalid formulas below channel without replacing va
     const row = editorRow(f, number);
     const formula = row.querySelector('[data-role="channel-expression"]');
     formula.value = 'diffCH01'; formula.dispatchEvent({ type: 'change' });
-    row.querySelector('[data-role="channel-apply"]').click();
+    commitFormula(row);
     assert.equal(row.querySelector('[data-role="channel-error"]').hidden, false);
     assert.equal(wave.source.frames.definitions[0].expression, 'CH00001');
     formula.value = 'DIFF(CH00001)'; formula.dispatchEvent({ type: 'change' });
-    row.querySelector('[data-role="channel-apply"]').click(); await f.settle();
+    commitFormula(row); await f.settle();
     assert.equal(f.app.getConfig().global.channelDefinitions[0].expression, 'DIFF(CH00001)');
 });
 
-test('formula drafts apply explicitly and update plotted historical values only with rebuild enabled', async t => {
+test('formula drafts apply when leaving the editor or pressing Enter and update plotted historical values only with rebuild enabled', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
     f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
@@ -455,21 +461,18 @@ test('formula drafts apply explicitly and update plotted historical values only 
     f.app.service.pause(true);
     const findRow = () => editorRow(f, number);
     let row = findRow(), expression = row.querySelector('[data-role="channel-expression"]');
-    const apply = row.querySelector('[data-role="channel-apply"]');
-    assert.ok(apply, 'the editor provides an explicit apply button');
-    assert.equal(apply.textContent, '应用公式');
-    assert.equal(apply.parentElement.children[1].textContent, '删除通道');
+    assert.equal(row.querySelector('[data-role="channel-apply"]'), null);
     expression.value = 'CH00001*2'; expression.dispatchEvent({ type: 'input' }); expression.dispatchEvent({ type: 'change' });
     assert.equal(f.app.getConfig().global.channelDefinitions[0].expression, 'CH00001');
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3]);
-    f.change('rebuild-history', false); apply.click(); await f.settle();
+    f.change('rebuild-history', false); commitFormula(row); await f.settle();
     assert.equal(f.app.getConfig().global.channelDefinitions[0].expression, 'CH00001*2');
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3]);
     f.app.service.pause(false); f.app.service.receive(Uint8Array.of(4)); await f.settle(); f.app.service.pause(true);
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [2, 3, 8]);
     // Reapplying the same expression with rebuild enabled must also refresh older samples.
     f.change('rebuild-history', true); row = findRow();
-    row.querySelector('[data-role="channel-apply"]').click(); await f.settle();
+    commitFormula(row, true); await f.settle();
     assert.deepEqual(Array.from(wave.view.frames.channelSlice(number - 1)), [4, 6, 8]);
     assert.equal(wave.view.getChannelMeta()[number - 1].visible, true);
 });
@@ -481,13 +484,13 @@ test('numeric byte editor applies shared constants and system initial state in o
     let row = editorRow(f, kernel);
     const constant = row.querySelector('[data-role="channel-expression"]');
     constant.value = '[0]=2,[1]=-1'; constant.dispatchEvent({ type: 'input' });
-    row.querySelector('[data-role="channel-apply"]').click();
+    commitFormula(row);
     const system = f.app.widgets.addChannel('system');
     row = editorRow(f, system);
     const expression = row.querySelector('[data-role="channel-expression"]'), initial = row.querySelector('[data-role="channel-initial"]');
     expression.value = 'X[0]+Y[-1]'; expression.dispatchEvent({ type: 'input' });
     initial.value = 'Y[-1]=5'; initial.dispatchEvent({ type: 'change' });
-    row.querySelector('[data-role="channel-apply"]').click(); await f.settle();
+    commitFormula(row); await f.settle();
     assert.equal(byte.source.frames.definitions.find(value => value.number === kernel).expression, '[0]=2,[1]=-1');
     assert.equal(byte.source.frames.definitions.find(value => value.number === system).initial, 'Y[-1]=5');
 });

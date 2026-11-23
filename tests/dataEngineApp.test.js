@@ -330,46 +330,24 @@ test('channel names and formulas are global while widget selectors only change v
     f.app.engineView.channels.refresh(); assert.match(f.get('engine-channel-panel').textContent, /CH00001/);
 });
 
-test('left engine split saves keyboard changes without overwriting them in short windows', () => {
-    const f = bootApplication();
-    try {
-        f.get('engine-splitter').dispatchEvent({ type: 'keydown', key: 'ArrowUp' });
-        assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .475);
-        f.get('sidebar').clientHeight = 200; f.window.dispatchEvent({ type: 'resize' });
-        assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .475);
-        f.get('workspace-toggle-left').click();
-        assert.equal(f.get('app-container').classList.contains('left-collapsed'), true);
-    } finally { f.app.dispose(); }
-});
-
-test('channel management reserves five rows when possible and restores the preferred split after a short window', t => {
-    const f = fixture(t), sidebar = f.get('sidebar'), engine = f.get('data-engine');
-    sidebar.clientHeight = 800; sidebar.querySelector('.app-title').offsetHeight = 40;
-    engine.getBoundingClientRect = () => ({ top: 100 });
-    engine.children[0].offsetHeight = 32; engine.children[1].offsetHeight = 32;
-    f.get('engine-channels').getBoundingClientRect = () => ({ top: 164 });
-    f.app.engineView.channels.list.getBoundingClientRect = () => ({ top: 268 });
-    f.window.getComputedStyle = node => ({ paddingBottom: node === f.get('engine-channels') ? '8px' : '0px' });
+test('the primary source dialog exposes parsing, raw records and channel management without widgets', t => {
+    const f = fixture(t);
+    f.click('serial-manager-open'); f.selectConnection('primary', 'engine-parsing');
+    const panel = f.get('connection-engine-panel'), engine = f.get('data-engine');
+    assert.equal(panel.hidden, false);
+    assert.ok(panel.contains(engine));
+    assert.equal(f.get('engine-parsing').hidden, false);
     engine.querySelector('[data-tab="engine-channels"]').click();
-    const splitter = f.get('engine-splitter');
-    splitter.dispatchEvent({ type: 'pointerdown', pointerId: 1, button: 0, clientY: 400 });
-    splitter.dispatchEvent({ type: 'pointermove', pointerId: 1, clientY: 740 });
-    splitter.dispatchEvent({ type: 'pointerup', pointerId: 1 });
-    const upperHeight = () => parseFloat(sidebar.style['--sidebar-upper-height']);
-    assert.ok(752 - upperHeight() >= 357, 'toolbar plus five complete 36px rows and border stay in the engine viewport');
-    assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .85);
-    sidebar.clientHeight = 240; f.window.dispatchEvent({ type: 'resize' });
-    assert.ok(upperHeight() >= 0 && upperHeight() < 192);
-    assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .85, 'temporary constraints do not overwrite the saved split');
-    sidebar.clientHeight = 800; f.window.dispatchEvent({ type: 'resize' });
-    assert.ok(752 - upperHeight() >= 357);
-    const resizedHeight = upperHeight();
-    engine.querySelector('[data-tab="engine-parsing"]').click();
-    assert.equal(upperHeight(), resizedHeight, 'switching to parsing must keep the resized separator in place');
-    f.window.dispatchEvent({ type: 'resize' });
-    assert.equal(upperHeight(), resizedHeight, 'hidden channel controls still use the same height constraint');
-    engine.querySelector('[data-tab="engine-channels"]').click();
-    assert.equal(upperHeight(), resizedHeight);
+    assert.equal(f.get('engine-channel-panel').hidden, false);
+    assert.equal(f.get('engine-edit-actions').hidden, true);
+    engine.querySelector('[data-tab="engine-raw-records"]').click();
+    assert.equal(f.get('engine-raw-records').hidden, false);
+    assert.equal(f.get('engine-edit-actions').hidden, false);
+    f.get('serial-config-dialog').dispatchEvent({ type: 'cancel' });
+    assert.equal(panel.hidden, false);
+    assert.equal(f.get('engine-communication').hidden, false);
+    assert.ok(panel.contains(engine));
+    assert.equal(f.document.activeElement.id, 'engine-tab-communication');
 });
 
 test('causal synchronization lives in parsing and preserves its draft when irrelevant modes hide it', t => {

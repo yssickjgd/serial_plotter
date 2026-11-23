@@ -96,6 +96,7 @@ class NetEngine {
                 }
             };
             ws.onerror = () => {
+                if (this.ws !== ws) return;
                 const error = new Error('Bridge WebSocket 连接意外丢失');
                 finish(error);
                 void this.disconnect(error);

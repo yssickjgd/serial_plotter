@@ -61,6 +61,28 @@ test('memory eviction releases whole chunks and preserves remaining absolute rec
 });
 const { FrameBuffer } = require('../frameBuffer');
 
+test('64-bit array timing channels preserve device ticks across storage resize', () => {
+    const { DataParser } = require('../dataParser');
+    const parser = new DataParser(), frames = new FrameBuffer(1, 2);
+    parser.setFormat({ enableHeader: true, headerHex: 'aa 55', dataType: 'uint64',
+        isLittleEndian: false, channelsCount: 1 });
+    parser.onFrameParsed = (values, time, bytes, timestamp, metadata) => {
+        frames.append(values, bytes, time, 1, timestamp, metadata);
+    };
+    const firstTick = 1700000000000000001n;
+    for (const tick of [firstTick, firstTick + 1n]) {
+        const bytes = Uint8Array.of(0xaa, 0x55, 0, 0, 0, 0, 0, 0, 0, 0);
+        new DataView(bytes.buffer).setBigUint64(2, tick);
+        parser.appendData(bytes, { timestamp: 1 });
+    }
+    assert.equal(frames.length, 2);
+    assert.equal(frames.getValue(0, 0), frames.getValue(0, 1));
+    assert.equal(frames.getTimingValue(0, 0), firstTick);
+    assert.equal(frames.getTimingValue(0, 1), firstTick + 1n);
+    frames.resize(4);
+    assert.equal(frames.getTimingValue(0, 1), firstTick + 1n);
+});
+
 test('bulk channel snapshots preserve chunk boundaries, circular order, invalid values and resizing', () => {
     const frames = new FrameBuffer(2, 5003);
     for (let i = 0; i < 12000; i++) frames.append([i, i % 101 === 0 ? NaN : -i]);

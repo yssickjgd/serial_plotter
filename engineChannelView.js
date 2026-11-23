@@ -1,21 +1,41 @@
-/** Global channel editing, independent of the selected widget. */
+/** Edit one capture's channel catalog independently of the selected widget. */
 const engineChannelHelpers = typeof module !== 'undefined'
-    ? { ...require('./channelTransform'), ...require('./channelRegistry'), ...require('./channelAutocomplete'), ...require('./reservedNames') } : globalThis.SerialPlotter;
+    ? { ...require('./channelTransform'), ...require('./channelRegistry'), ...require('./channelAutocomplete'), ...require('./reservedNames'), ...require('./autoApply') } : globalThis.SerialPlotter;
 
 class EngineChannelView {
-    constructor({ document, root, controller, getRegistry, onChange = () => {} }) {
+    constructor({ document, root, controller, capture, getRegistry, allowDerived = true, onChange = () => {} }) {
         this.document = document; this.root = root; this.controller = controller; this.onChange = onChange;
-        this.getRegistry = getRegistry ?? (() => controller.getChannelRegistry?.() ?? new engineChannelHelpers.ChannelRegistry({
+        this.capture = capture; this.allowDerived = allowDerived;
+        this.sourceStates = new WeakMap();
+        this.getRegistry = getRegistry ?? (() => controller.getChannelRegistry?.(this.capture) ?? new engineChannelHelpers.ChannelRegistry({
             rawCount: Number(controller.globals.channelsCount), definitions: controller.globals.channelDefinitions,
             names: controller.globals.channelNames, channels: controller.globals.channelRegistry
         }));
         this.expanded = new Set(); this.drafts = new Map(); this.errors = new Map(); this.listeners = []; this.rowCleanups = [];
         this.category = 'all'; this.searchText = ''; this.windowSize = 50; this.draggedNumber = null;
-        this.rowHeight = 36; this.minimumListHeight = this.rowHeight * 5 + 1;
+        this.rowHeight = 36;
         this.measuredHeights = new Map(); this.renderedRows = new Map();
         const Observer = document.defaultView?.ResizeObserver ?? globalThis.ResizeObserver;
         this.rowObserver = Observer ? new Observer(entries => this.measureRows(entries)) : null;
         this.build(); this.refresh();
+    }
+
+    setCapture(capture) {
+        if (capture === this.capture) return;
+        if (this.capture) this.sourceStates.set(this.capture, {
+            expanded: this.expanded, drafts: this.drafts, errors: this.errors, category: this.category,
+            searchText: this.searchText, addType: this.addType.value, scrollTop: this.list.scrollTop
+        });
+        const state = this.sourceStates.get(capture);
+        this.capture = capture;
+        this.expanded = state?.expanded ?? new Set(); this.drafts = state?.drafts ?? new Map(); this.errors = state?.errors ?? new Map();
+        this.category = state?.category ?? 'all'; this.search.value = this.searchText = state?.searchText ?? '';
+        this.addType.value = state?.addType ?? 'formula'; this.draggedNumber = null;
+        this.measuredHeights.clear();
+        this.list.scrollTop = state?.scrollTop ?? 0;
+        this.refresh();
+        this.list.scrollTop = state?.scrollTop ?? 0;
+        this.renderWindow();
     }
 
     element(tag, className, role) {
@@ -43,7 +63,7 @@ class EngineChannelView {
     build() {
         this.root.replaceChildren(); this.root.classList.add('engine-channel-view');
         const heading = this.element('div', 'section-title'); heading.textContent = '通道定义 ';
-        const scope = this.element('span', 'scope-badge'); scope.textContent = '全局共用'; heading.append(scope);
+        const scope = this.element('span', 'scope-badge'); scope.textContent = '来源共用'; heading.append(scope);
         const toolbar = this.element('div', 'engine-channel-toolbar');
         const categories = [['all', '全部通道'], ['raw', '原始数据'], ['constant', '常量数组'], ['system', '差分方程系统'], ['formula', '运算通道']];
         this.categoryInput = this.select(categories, 'engine-channel-category'); this.categoryInput.setAttribute('aria-label', '通道类型筛选');
@@ -55,19 +75,24 @@ class EngineChannelView {
         toolbar.append(this.categoryInput, this.search, this.addType, this.add);
         this.status = this.element('div', 'engine-channel-status', 'engine-channel-status'); this.status.setAttribute('role', 'status');
         this.list = this.element('div', 'engine-channel-list', 'engine-channel-list');
-        this.list.setAttribute('aria-label', '全局通道');
+        this.list.setAttribute('aria-label', '来源通道');
         const help = this.element('p', 'hint-text');
-        help.textContent = '原始数据由引擎映射；运算通道支持名称、CH 编号、历史索引及 DIFF / INT / FILTER。常量数组与差分方程系统用于滤波和系统响应。';
-        this.root.append(heading, toolbar, help, engineChannelHelpers.createReservedNamesHelp(this.document, 'channel'), this.status, this.list);
+        this.derivedHelp = '运算通道支持名称、CH 编号、历史索引及 DIFF / INT / FILTER。常量数组与差分方程系统用于滤波和系统响应。';
+        help.textContent = this.derivedHelp;
+        this.root.append(heading, toolbar);
+        this.help = help;
+        this.symbols = engineChannelHelpers.createReservedNamesHelp(this.document, 'channel');
+        this.root.append(help, this.symbols, this.status, this.list);
         this.listen(this.categoryInput, 'change', () => {
             this.category = this.categoryInput.value; this.list.scrollTop = 0; this.refresh();
         });
         this.listen(this.search, 'input', () => { this.searchText = this.search.value; this.list.scrollTop = 0; this.refresh(); });
         this.listen(this.list, 'scroll', () => this.renderWindow());
         this.listen(this.add, 'click', () => {
+            if (!this.allowDerived) return;
             const type = this.category === 'all' ? this.addType.value : this.category;
             if (type === 'raw') return;
-            this.perform(() => this.controller.addChannel(type), null, number => {
+            this.perform(() => this.controller.addChannel(type, this.capture), null, number => {
                 if (Number.isInteger(number)) this.expanded.add(this.keyFor(number));
                 this.refresh(); this.scrollToNumber(number);
             });
@@ -141,8 +166,8 @@ class EngineChannelView {
 
     filteredChannels() {
         const query = String(this.searchText).normalize('NFC').toLocaleLowerCase();
-        return this.controller.channelMeta(null).filter(channel => {
-            if (this.category !== 'all' && (channel.definition?.type ?? 'raw') !== this.category) return false;
+        return this.controller.channelMeta(null, this.capture).filter(channel => {
+            if (!this.allowDerived && channel.definition || this.category !== 'all' && (channel.definition?.type ?? 'raw') !== this.category) return false;
             const canonical = engineChannelHelpers.formatChannelId(channel.index).toLowerCase();
             return !query || String(channel.name).normalize('NFC').toLocaleLowerCase().includes(query) || canonical.includes(query) ||
                 /^ch\d*$/i.test(query) && `ch${channel.number}`.startsWith(query);
@@ -151,9 +176,14 @@ class EngineChannelView {
     refresh() {
         this.registry = this.getRegistry();
         for (const key of this.measuredHeights.keys()) if (!this.registry.get(key)) this.measuredHeights.delete(key);
-        this.derivedOrder = this.controller.globals.channelDefinitions.map(value => value.number).sort((a, b) => a - b);
+        const local = this.controller.channelGlobals?.(this.capture) ?? this.controller.globals;
+        this.derivedOrder = local.channelDefinitions.map(value => value.number).sort((a, b) => a - b);
         this.derivedPositions = new Map(this.derivedOrder.map((number, index) => [number, index]));
         this.channels = this.filteredChannels();
+        this.categoryInput.hidden = this.addType.hidden = this.add.hidden = !this.allowDerived;
+        this.help.textContent = this.allowDerived ? this.derivedHelp : '全局运算通道在「核心配置 → 通道配置」中管理。';
+        this.symbols.hidden = !this.allowDerived;
+        if (!this.allowDerived) this.category = 'all';
         this.categoryInput.value = this.category;
         this.addType.disabled = this.category !== 'all';
         if (['formula', 'constant', 'system'].includes(this.category)) this.addType.value = this.category;
@@ -202,7 +232,9 @@ class EngineChannelView {
     }
 
     perform(action, errorNode, success = () => this.refresh()) {
+        const capture = this.capture;
         const showError = error => {
+            if (this.capture !== capture) return;
             const message = error?.message ?? String(error);
             if (errorNode) {
                 if (errorNode.channelKey !== undefined) this.errors.set(errorNode.channelKey, message);
@@ -216,7 +248,7 @@ class EngineChannelView {
         };
         try {
             const result = action();
-            if (result?.then) result.then(value => { success(value); this.onChange(); }, showError);
+            if (result?.then) result.then(value => { if (this.capture === capture) success(value); this.onChange(); }, showError);
             else { success(result); this.onChange(); }
         } catch (error) { showError(error); }
     }
@@ -243,21 +275,21 @@ class EngineChannelView {
         const error = this.element('div', 'channel-definition-error', 'channel-error'); error.setAttribute('role', 'status');
         error.channelKey = key;
         error.textContent = this.errors.get(key) ?? this.registry?.nameErrors.get(number) ?? ''; error.hidden = !error.textContent;
-        this.listen(color, 'input', () => this.perform(() => this.controller.setChannelColor(index, color.value), error, () => {
+        this.listen(color, 'input', () => this.perform(() => this.controller.setChannelColor(index, color.value, this.capture), error, () => {
             channel.color = color.value;
         }), true);
         this.listen(name, 'change', () => {
             const validation = this.registry?.validateName(name.value, number);
             if (validation && !validation.valid) { this.errors.set(key, validation.error); error.textContent = validation.error; error.hidden = false; return; }
-            this.perform(() => this.controller.setChannelName(index, validation?.name ?? name.value), error, () => {
+            this.perform(() => this.controller.setChannelName(index, validation?.name ?? name.value, this.capture), error, () => {
                 this.errors.delete(key); this.refresh();
             });
         }, true);
         const moves = this.element('div', 'engine-channel-moves');
         if (definition) {
             const order = this.derivedOrder, at = this.derivedPositions.get(number);
-            const up = this.button('', 'channel-up', () => this.perform(() => this.controller.moveChannel(number, order[at - 1]), error));
-            const down = this.button('', 'channel-down', () => this.perform(() => this.controller.moveChannel(number, order[at + 1]), error));
+            const up = this.button('', 'channel-up', () => this.perform(() => this.controller.moveChannel(number, order[at - 1], this.capture), error));
+            const down = this.button('', 'channel-down', () => this.perform(() => this.controller.moveChannel(number, order[at + 1], this.capture), error));
             for (const [button, title, direction] of [[up, '上移', 'up'], [down, '下移', 'down']]) {
                 button.classList.add('reorder-button'); button.title = title; button.setAttribute('aria-label', title);
                 const arrow = this.element('span', `move-arrow move-arrow-${direction}`); arrow.setAttribute('aria-hidden', 'true'); button.append(arrow);
@@ -277,7 +309,7 @@ class EngineChannelView {
             this.listen(row, 'drop', event => {
                 if (this.draggedNumber === null) return;
                 event.preventDefault(); event.stopPropagation(); const from = this.draggedNumber; this.draggedNumber = null;
-                row.classList.remove('channel-drop-target'); this.perform(() => this.controller.moveChannel(from, number), error);
+                row.classList.remove('channel-drop-target'); this.perform(() => this.controller.moveChannel(from, number, this.capture), error);
             }, true);
         }
         row.append(label, color, name, moves);
@@ -286,18 +318,20 @@ class EngineChannelView {
         return row;
     }
 
-    remapDrafts(numberMap) {
+    remapDrafts(numberMap, capture = this.capture) {
+        const state = capture === this.capture ? this : this.sourceStates.get(capture);
+        if (!state) return;
         const drafts = new Map();
-        for (const [key, draft] of this.drafts) {
+        for (const [key, draft] of state.drafts) {
             const number = numberMap.get(draft.number);
             if (number === undefined) continue;
             const newKey = typeof key === 'number' ? number : key;
             const expression = draft.type === 'formula'
                 ? globalThis.SerialPlotter.renumberChannelExpression(draft.expression, numberMap) : draft.expression;
             drafts.set(newKey, { ...draft, number, expression });
-            this.errors.delete(key);
+            state.errors.delete(key);
         }
-        this.drafts = drafts;
+        state.drafts = drafts;
     }
 
     renderEditor(channel, error, key) {
@@ -319,14 +353,22 @@ class EngineChannelView {
             initial.value = draft.initial ?? ''; initial.placeholder = 'Y[-1]=0；有输入延迟时也填写 X[-1]=0';
             initialLabel.append(initial); details.append(initialLabel);
         }
-        const update = apply => {
+        let applying = false;
+        const update = (apply, explicit = false) => {
             const candidate = { ...definition, expression: expression.value, ...(initial ? { initial: initial.value } : {}) };
+            const changed = candidate.expression !== definition.expression || candidate.initial !== definition.initial;
+            if (!changed && !explicit) { this.drafts.delete(key); this.errors.delete(key); error.hidden = true; return; }
             this.drafts.set(key, candidate);
             try {
                 if (definition.type === 'formula') candidate.expression = this.getRegistry().canonicalizeExpression(candidate.expression);
-                this.controller.validateChannelDefinition(candidate); this.errors.delete(key); error.hidden = true; error.textContent = '';
-                if (apply) this.perform(() => this.controller.updateChannelDefinition(candidate, { reapply: true }), error, () => {
-                    this.drafts.delete(key); this.drafts.delete(number); this.refresh();
+                this.controller.validateChannelDefinition(candidate, this.capture); this.errors.delete(key); error.hidden = true; error.textContent = '';
+                if (apply && !applying) this.perform(async () => {
+                    applying = true;
+                    try { await this.controller.updateChannelDefinition(candidate, { reapply: true }, this.capture); }
+                    finally { applying = false; }
+                }, error, () => {
+                    if (this.drafts.get(key) === candidate) { this.drafts.delete(key); this.drafts.delete(number); }
+                    this.refresh();
                 });
             } catch (failure) {
                 this.errors.set(key, failure.message); error.textContent = failure.message; error.hidden = false;
@@ -336,9 +378,9 @@ class EngineChannelView {
             this.listen(input, 'input', () => update(false), true); this.listen(input, 'change', () => update(false), true);
         }
         const actions = this.element('div', 'channel-definition-actions');
-        const apply = this.button('应用公式', 'channel-apply', () => update(true), 'btn btn-primary');
-        const remove = this.button('删除通道', 'channel-delete', () => this.perform(() => this.controller.removeChannel(number), error), 'btn btn-danger channel-delete');
-        actions.append(apply, remove); details.append(actions);
+        engineChannelHelpers.bindAutoApply(details, explicit => update(true, explicit), (node, event, fn) => this.listen(node, event, fn, true));
+        const remove = this.button('删除通道', 'channel-delete', () => this.perform(() => this.controller.removeChannel(number, this.capture), error), 'btn btn-danger channel-delete');
+        actions.append(remove); details.append(actions);
         if (!this.errors.has(key) && (this.drafts.has(key) || this.drafts.has(number))) update(false);
         return details;
     }

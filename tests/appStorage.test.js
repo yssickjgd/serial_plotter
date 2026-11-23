@@ -5,6 +5,12 @@ const { createIndexedDbHarness } = require('./helpers/indexedDbHarness');
 
 const CONFIG_KEY = 'serialplot_v3_config';
 const copy = value => JSON.parse(JSON.stringify(value));
+function saveBaud(f, baud) {
+    if (!f.get('serial-config-dialog').open) f.click('serial-manager-open');
+    f.selectConnection('primary');
+    f.change('serial-baud', baud);
+    f.get('serial-config-form').dispatchEvent({ type: 'submit' });
+}
 async function bootIndexedDb(t, options = {}) {
     const f = bootApplication(options.legacy ?? null);
     const initial = f.S.WidgetConfig.migrateWorkspaceConfig(f.app.getConfig());
@@ -37,7 +43,9 @@ test('IndexedDB startup restores the saved configuration before widgets and layo
         config.global.serialBaud = '57600'; config.uiLayout.leftSplitRatio = .65;
         return config;
     } });
+    f.click('serial-manager-open'); f.selectConnection('primary');
     assert.equal(f.get('serial-baud').value, '57600');
+    f.click('serial-config-reset');
     assert.equal(f.app.getConfig().uiLayout.leftSplitRatio, .65);
     assert.equal(f.app.workspaceStorage.hasIndexedDB, true);
 });
@@ -45,7 +53,7 @@ test('IndexedDB startup restores the saved configuration before widgets and layo
 test('save feedback waits for the IndexedDB transaction and the compatibility mirror retains the old configuration', async t => {
     const { f, database } = await bootIndexedDb(t, { database: { holdWrites: true } });
     const oldMirror = f.storage.get(CONFIG_KEY);
-    f.change('serial-baud', '57600'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
     assert.equal(database.writes.length, 1);
     assert.doesNotMatch(f.get('cfg-save-status').textContent, /配置已保存/);
     assert.equal(f.storage.get(CONFIG_KEY), oldMirror);
@@ -58,8 +66,8 @@ test('save feedback waits for the IndexedDB transaction and the compatibility mi
 
 test('queued application saves cannot commit stale configuration after a newer change', async t => {
     const { f, database } = await bootIndexedDb(t, { database: { holdWrites: true } });
-    f.change('serial-baud', '57600'); await f.tick(200);
-    f.change('serial-baud', '38400'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
+    saveBaud(f, '38400'); await f.tick(200);
     assert.equal(database.writes.length, 1);
     database.writes[0].complete();
     for (let index = 0; index < 15; index++) await Promise.resolve();
@@ -74,7 +82,7 @@ test('failed startup reads show an error and block automatic default overwrites 
     const original = '{broken';
     const f = bootApplication(original); t.after(() => f.app.dispose());
     assert.match(f.get('cfg-save-status').textContent, /读取|加载/);
-    f.change('serial-baud', '57600'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
     assert.equal(f.storage.get(CONFIG_KEY), original);
     const before = JSON.stringify(f.app.getConfig());
     assert.throws(() => f.app.applyConfig({ version: 999 }));
@@ -93,7 +101,7 @@ test('an IndexedDB read failure preserves saved data and keeps subsequent UI cha
     f.document.dispatchEvent({ type: 'DOMContentLoaded' }); await f.S.applicationReady;
     f.app = f.S.application; t.after(() => f.app.dispose());
     assert.match(f.get('cfg-save-status').textContent, /Cannot read workspace/);
-    f.change('serial-baud', '57600'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
     assert.equal(database.writes.length, 0);
     assert.equal(database.records.get(CONFIG_KEY).global.serialBaud, '115200');
 });
@@ -107,18 +115,18 @@ test('conflicting legacy protocol leaves the original saved workspace untouched 
     const original = JSON.stringify(config), f = bootApplication(original); t.after(() => f.app.dispose());
     assert.match(f.get('cfg-save-status').textContent, /旧测试协议.*old\.conflict/);
     assert.match(f.get('cfg-save-status').textContent, /\[0, 1\)/);
-    f.change('serial-baud', '57600'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
     assert.equal(f.storage.get(CONFIG_KEY), original);
 });
 
 test('a transaction abort reports failure, retains old data, and a later save can recover', async t => {
     const { f, database } = await bootIndexedDb(t);
     database.abortNextWrite = new Error('Disk quota exceeded');
-    f.change('serial-baud', '57600'); await f.tick(200);
+    saveBaud(f, '57600'); await f.tick(200);
     await assert.rejects(f.app.flushConfig(), /Disk quota/);
     assert.equal(database.records.get(CONFIG_KEY).global.serialBaud, '115200');
     assert.match(f.get('cfg-save-status').textContent, /Disk quota/);
-    f.change('serial-baud', '38400'); await f.app.flushConfig();
+    saveBaud(f, '38400'); await f.app.flushConfig();
     assert.equal(database.records.get(CONFIG_KEY).global.serialBaud, '38400');
 });
 

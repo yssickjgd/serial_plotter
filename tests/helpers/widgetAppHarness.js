@@ -120,6 +120,7 @@ function bootApplication(config = null, options = {}) {
     }
     document.body = document.querySelector('body');
     const window = new Element('window'); document.defaultView = window;
+    window.matchMedia = options.matchMedia;
     const storage = new Map(config === null ? [] : [['serialplot_v3_config', typeof config === 'string' ? config : JSON.stringify(config)]]);
     if (options.layout) storage.set('serialplot_v3_workspace', JSON.stringify(options.layout));
     const context = vm.createContext({ document, window, navigator: {}, performance: { now: () => clock },
@@ -142,6 +143,12 @@ function bootApplication(config = null, options = {}) {
         change(id, value) { const node = document.getElementById(id); if (typeof value === 'boolean') node.checked = value; else node.value = value;
             node.dispatchEvent({ type: 'change', bubbles: true }); },
         click: id => document.getElementById(id).click(),
+        selectConnection(id = 'primary', tab = 'engine-communication') {
+            const prefix = id === 'primary' ? 'serial-primary' : id;
+            if (!document.getElementById('serial-config-dialog').open) this.click('serial-manager-open');
+            document.querySelector('[aria-controls="' + prefix + '-details"]').click();
+            document.querySelector('[data-tab="' + tab + '"]').click();
+        },
         async tick(ms = 1000) {
             clock += ms;
             for (let i = 0; i < 1000; i++) { const due = [...timers].find(([, timer]) => timer.due <= clock); if (!due) break;

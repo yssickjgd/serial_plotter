@@ -53,6 +53,24 @@ test('GPU trace renderer requests a high-performance adapter and preserves gaps 
     assert.equal(f.calls.some(call => call[0] === 'remove'), true);
 });
 
+test('GPU connects gap estimates with the trace and leaves their markers to the overlay', () => {
+    const { WaveGpuRenderer } = require('../waveGpuRenderer');
+    const f = gpuFixture();
+    const renderer = new WaveGpuRenderer(f.canvas, () => {});
+    renderer.resize(100, 80, 100, 80);
+    renderer.render([{ color: '#ffffff', dots: true, points: [
+        { x: 0, y: 10, synthetic: true },
+        { x: 5, y: 15 },
+        { x: 10, y: 20, recovered: true },
+        { x: 15, y: 25 }
+    ] }], 100, 80, 30, 25);
+    const line = f.calls.find(call => call[0] === 'drawArrays' && call[1] === f.gl.LINE_STRIP);
+    const dots = f.calls.filter(call => call[0] === 'drawArrays' && call[1] === f.gl.POINTS);
+    assert.equal(line[3], 4);
+    assert.deepEqual(dots.map(call => [call[2] - line[2], call[3]]), [[1, 1], [3, 1]]);
+    renderer.dispose();
+});
+
 test('disposing a GPU renderer releases its context and CPU vertex storage immediately', () => {
     const { WaveGpuRenderer } = require('../waveGpuRenderer');
     const f = gpuFixture();
