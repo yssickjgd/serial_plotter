@@ -14,7 +14,7 @@ const GLOBAL_DEFAULTS = {
     symbolVersion: 2,
     connType: 'serial', serialName: '主串口', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
     netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
-    maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: 4096, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
+    maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: 4096, captureVisibleOnly: false, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
     endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
     footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
@@ -171,6 +171,10 @@ function normalizeConnectionName(value) {
     return name;
 }
 
+function isSerialConnectionMode(mode) {
+    return mode === 'serial' || mode === 'bridge-serial';
+}
+
 function normalizeConnectionSettings(input) {
     const { mode = 'serial', baudRate = GLOBAL_DEFAULTS.serialBaud, dataBits = GLOBAL_DEFAULTS.serialData,
         stopBits = GLOBAL_DEFAULTS.serialStop, parity = GLOBAL_DEFAULTS.serialParity, host = GLOBAL_DEFAULTS.netHost,
@@ -183,7 +187,7 @@ function normalizeConnectionSettings(input) {
     const result = { name, mode, baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits),
         parity, host: typeof host === 'string' ? host.trim() : '', port: String(port).trim(),
         localPort: String(localPort).trim(), timeOffsetMs: Number(timeOffsetMs) };
-    if (mode !== 'serial') widgetConfigUtils.parsePort(result.port);
+    if (!isSerialConnectionMode(mode)) widgetConfigUtils.parsePort(result.port);
     if ((mode === 'tcp-client' || mode === 'udp') && !result.host) throw new Error('请输入远端地址');
     if (mode === 'udp' && result.localPort) widgetConfigUtils.parsePort(result.localPort);
     return result;
@@ -224,8 +228,6 @@ function normalizeConnectionSources(input = { nextNumber: 2, entries: [] }, glob
         throw new Error('接收来源编号重复或超出分配范围');
     const bindings = input.bindings ?? [];
     if (!Array.isArray(bindings)) throw new Error('串口端口绑定无效');
-    const serialIds = new Set(entries.filter(entry => entry.mode === 'serial').map(entry => entry.id));
-    if (globals.connType === 'serial') serialIds.add('primary');
     const bound = new Set();
     const normalizedBindings = bindings.map(binding => {
         if (!binding || binding.id !== 'primary' && !ids.has(binding.id) || bound.has(binding.id) ||
@@ -234,7 +236,18 @@ function normalizeConnectionSources(input = { nextNumber: 2, entries: [] }, glob
         bound.add(binding.id);
         return { id: binding.id, usbVendorId: binding.usbVendorId, usbProductId: binding.usbProductId, ambiguous: binding.ambiguous === true };
     });
-    return { nextNumber: input.nextNumber, entries, bindings: normalizedBindings.filter(binding => serialIds.has(binding.id)) };
+    const bridgeBindings = input.bridgeBindings ?? [];
+    if (!Array.isArray(bridgeBindings)) throw new Error('Bridge 串口绑定无效');
+    const bridgeIds = new Set(), bridgePaths = new Set();
+    const normalizedBridgeBindings = bridgeBindings.map(binding => {
+        if (!binding || (binding.id !== 'primary' && !ids.has(binding.id)) || bridgeIds.has(binding.id) ||
+            typeof binding.path !== 'string' || !binding.path || binding.path.length > 512 || bridgePaths.has(binding.path) ||
+            typeof binding.identity !== 'string' || !/^[0-9a-f]{64}$/.test(binding.identity))
+            throw new Error('Bridge 串口绑定无效或端口重复');
+        bridgeIds.add(binding.id); bridgePaths.add(binding.path);
+        return { id: binding.id, path: binding.path, identity: binding.identity };
+    });
+    return { nextNumber: input.nextNumber, entries, bindings: normalizedBindings, bridgeBindings: normalizedBridgeBindings };
 }
 
 function normalizeChannelConfiguration(globals, symbolVersion) {
@@ -442,7 +455,7 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
 }
 
 const WidgetConfig = { GLOBAL_DEFAULTS, WAVE_DEFAULTS, BYTE_DEFAULTS,
-    isValidWidgetId, normalizeConnectionSettings, normalizeConnectionSource, serialSourceGlobals, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
+    isValidWidgetId, isSerialConnectionMode, normalizeConnectionSettings, normalizeConnectionSource, serialSourceGlobals, normalizeWidgetExportSettings, normalizeBufferExportSettings, normalizeWidgetSettings, validateWorkspaceConfig, migrateWorkspaceConfig };
 globalThis.SerialPlotter ??= {};
 globalThis.SerialPlotter.WidgetConfig = WidgetConfig;
 if (typeof module !== 'undefined') module.exports = WidgetConfig;

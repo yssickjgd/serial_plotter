@@ -8,12 +8,13 @@ class SerialSourceView {
         this.formDrafts = new Map();
         this.manager = get('serial-manager-panel');
         this.sourceNav = get('serial-source-nav');
-        this.sourceDetails = get('engine-communication');
+        this.sourceDetails = get('engine-communication').querySelector('.engine-pane-body');
         this.sourceWorkspace = get('serial-manager-workspace');
         this.compact = document.defaultView?.matchMedia?.('(max-width: 600px)');
         this.path = get('serial-config-path');
         this.engineView = get('data-engine');
         this.enginePanels = [...this.engineView.querySelectorAll('.tab-content')];
+        this.engineBodies = this.enginePanels.map(panel => panel.querySelector('.engine-pane-body'));
         this.enginePositions = new Map();
         this.managerClose = get('serial-manager-close');
         this.managerButton = get('serial-manager-open');
@@ -28,14 +29,11 @@ class SerialSourceView {
         this.portLabel = get('net-port-label');
         this.lockedNote = get('serial-config-locked');
         this.error = get('serial-config-error');
-        this.formStatus = get('serial-config-status');
         this.fields = { mode: get('conn-type'), name: get('serial-config-name'),
             baudRate: get('serial-baud'), dataBits: get('serial-data'), stopBits: get('serial-stop'), parity: get('serial-parity'),
             host: get('net-host'), port: get('net-port'), localPort: get('net-local') };
         this.handlers = [
             [this.fields.mode, 'change', () => this.syncDialog()],
-            [this.form, 'input', () => { this.formStatus.textContent = '连接参数待应用'; }],
-            [this.form, 'change', () => { this.formStatus.textContent = '连接参数待应用'; }],
             [this.compact, 'change', () => {
                 if (!this.dialog.open || this.protocolPage) return;
                 const { tab } = this.enginePosition();
@@ -195,14 +193,14 @@ class SerialSourceView {
     enginePosition() {
         return {
             tab: this.enginePanels.find(panel => panel.classList.contains('active'))?.id,
-            scroll: this.enginePanels.map(panel => panel.scrollTop),
+            scroll: this.engineBodies.map(body => body.scrollTop),
             channelScroll: this.enginePanel.querySelector('.engine-channel-list')?.scrollTop
         };
     }
 
     restoreEnginePosition(position, focus = false, tab = position?.tab ?? 'engine-parsing') {
         const button = this.selectTab(tab);
-        for (const [index, panel] of this.enginePanels.entries()) panel.scrollTop = position?.scroll[index] ?? 0;
+        for (const [index, body] of this.engineBodies.entries()) body.scrollTop = position?.scroll[index] ?? 0;
         const list = this.enginePanel.querySelector('.engine-channel-list');
         if (list) list.scrollTop = position?.channelScroll ?? 0;
         if (focus && !this.showingOverview) button?.focus({ preventScroll: true });
@@ -250,7 +248,6 @@ class SerialSourceView {
         this.formBaseline = Object.fromEntries(Object.keys(this.fields).map(key => [key, String(source.settings[key] ?? '')]));
         for (const [key, field] of Object.entries(this.fields)) field.value = changes?.[key] ?? this.formBaseline[key];
         this.error.hidden = true; this.error.textContent = '';
-        this.formStatus.textContent = changes ? '连接参数待应用' : '点击「应用设置」生效。';
         this.syncDialog();
     }
 
@@ -258,7 +255,10 @@ class SerialSourceView {
         const source = this.selectedSource;
         if (!source) return;
         const locked = source.connected || source.pending;
-        const mode = this.fields.mode.value, serial = mode === 'serial', server = mode === 'tcp-server';
+        const mode = this.fields.mode.value, serial = SerialPlotter.WidgetConfig.isSerialConnectionMode(mode), server = mode === 'tcp-server';
+        const row = this.rows.get(this.selectedId), modePending = mode !== source.settings.mode;
+        row.bind.disabled = !SerialPlotter.WidgetConfig.isSerialConnectionMode(source.settings.mode) || locked || source.controlsLocked || modePending;
+        row.connect.disabled = source.pending || source.controlsLocked || modePending;
         this.serialParameters.hidden = !serial;
         this.networkParameters.hidden = serial;
         this.hostWrap.hidden = server;
@@ -290,7 +290,6 @@ class SerialSourceView {
         this.formDrafts.delete(id);
         if (id !== this.selectedId) return;
         this.loadForm();
-        this.formStatus.textContent = '配置已更新';
     }
 
     dismiss() {
@@ -388,7 +387,7 @@ class SerialSourceView {
         if (!row) return;
         const { connected, pending, capture, error, settings } = source;
         row.connect.textContent = connected ? '断开连接' : '连接';
-        const serial = settings.mode === 'serial';
+        const serial = SerialPlotter.WidgetConfig.isSerialConnectionMode(settings.mode);
         row.bind.hidden = row.binding.hidden = !serial;
         row.bind.disabled = !serial || connected || pending || source.controlsLocked;
         row.connect.disabled = pending || source.controlsLocked;
@@ -403,11 +402,13 @@ class SerialSourceView {
         }
         row.navError.hidden = !error;
         if (row.navError.textContent !== (error || '')) row.navError.textContent = error || '';
-        const summary = SerialSourceView.describe(settings) + (settings.timeOffsetMs ?
+        const backend = settings.mode === 'serial' ? '浏览器 Web Serial' :
+            settings.mode === 'bridge-serial' && source.bridgePath ? 'Bridge · ' + source.bridgePath : 'Bridge';
+        const summary = SerialSourceView.describe(settings) + (backend ? ' · ' + backend : '') + (settings.timeOffsetMs ?
             ' · 偏移 ' + (settings.timeOffsetMs > 0 ? '+' : '') + settings.timeOffsetMs + ' ms' : '');
         if (row.summary.textContent !== summary) row.summary.textContent = summary;
         const state = pending ? '处理中…' : connected ? '已连接' : '已断开';
-        const choiceState = (serial ? '串口' : settings.mode === 'udp' ? 'UDP' : 'TCP') + ' · ' + state;
+        const choiceState = (serial ? '串口' : settings.mode === 'udp' ? 'UDP' : 'TCP') + ' · ' + state + (backend ? ' · ' + backend : '');
         if (row.choiceState.textContent !== choiceState) row.choiceState.textContent = choiceState;
         const output = capture.dataEngine?.mode === 'Self_Defined_Frame' ? capture.dataEngine.recordsSource : capture.numericSource;
         const parsed = capture.dataEngine?.mode === 'Raw_Data' ? '' : ' · 解析 ' + output.parser.frameCount.toLocaleString() +

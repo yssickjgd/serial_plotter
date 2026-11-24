@@ -15,6 +15,14 @@ test('the desktop overview applies changes to the selected source and restores t
     const f = communications(t, { wide: true });
     const panels = ['engine-communication', 'engine-parsing', 'engine-raw-records', 'engine-channels'];
     assert.deepEqual(panels.map(id => f.get(id).hidden), [false, false, false, false]);
+    const panelControls = ['conn-type', 'engine-mode', 'engine-raw-idle-timeout', 'engine-channel-panel'];
+    for (const [index, id] of panels.entries()) {
+        const panel = f.get(id);
+        const body = panel.querySelector('.engine-pane-body');
+        assert.ok(body?.contains(f.get(panelControls[index])), id + ' keeps controls inside the scroll body');
+        assert.equal(body.parentElement, panel);
+        assert.equal(f.get(id + '-heading').parentElement, panel);
+    }
     assert.equal(f.get('engine-edit-actions').hidden, false);
 
     f.click('serial-source-add');

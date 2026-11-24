@@ -18,6 +18,9 @@ class SerialEngine {
     constructor() {
         this.port = null;
         this.reader = null;
+        this._captureVisible = true;
+        this._captureRevision = 0;
+        this._readerFlush = null;
         this.keepReading = false;
         this.readTask = null;
         this._closing = null;
@@ -49,6 +52,23 @@ class SerialEngine {
     /** 注册连接状态变化回调 callback(connected: boolean, error?: Error) */
     onStatusChange(callback) { this.onConnectStatusChange = callback; }
 
+    setCaptureVisible(visible) {
+        if (this._captureVisible === visible) return;
+        this._captureVisible = visible;
+        if (visible) {
+            this._captureRevision++;
+            if (this.keepReading && this.reader) this._flushReader();
+        }
+    }
+
+    _flushReader() {
+        // Cancelling Web Serial's readable stream discards buffered RX without touching TX.
+        // Its asynchronous completion must precede acquiring a fresh reader.
+        this._readerFlush ??= { revision: this._captureRevision,
+            result: this.reader.cancel().then(() => null, error => error) };
+        return this._readerFlush;
+    }
+
     /* ── 连接管理 ── */
 
     /** 请求用户选择串口并打开，成功后启动 readLoop 持续读取 */
@@ -70,6 +90,7 @@ class SerialEngine {
             if (serialPortOwners.has(port)) throw new Error('该串口已被另一数据来源打开或正在连接');
             serialPortOwners.set(port, this);
             reservedPort = port;
+            const captureRevision = this._captureRevision;
             await port.open({
                 baudRate: config.baudRate || 115200,
                 dataBits: config.dataBits || 8,
@@ -85,7 +106,7 @@ class SerialEngine {
             }
             this.port = port;
             this.keepReading = true;
-            this.readTask = this.readLoop();
+            this.readTask = this.readLoop(captureRevision);
             this._connected = true;
             if (this.onConnectStatusChange) this.onConnectStatusChange(true);
             return true;
@@ -108,7 +129,10 @@ class SerialEngine {
         if (this._closing) return this._closing;
         const closing = (async () => {
             this.keepReading = false;
-            try { if (this.reader) await this.reader.cancel(); } catch (_) {}
+            try {
+                if (this._readerFlush) await this._readerFlush.result;
+                else if (this.reader) await this.reader.cancel();
+            } catch (_) {}
             try { if (this.readTask) await this.readTask; } catch (_) {}
             await this._closePort(this.port);
             this.port = null;
@@ -155,7 +179,7 @@ class SerialEngine {
     }
 
     /** 持续读取串口数据流，通过 onDataCallback 上报，直到 keepReading 为 false */
-    async readLoop() {
+    async readLoop(flushedRevision = this._captureRevision) {
         let failed = false;
         let failure = null;
         while (this.port && this.port.readable && this.keepReading) {
@@ -164,8 +188,10 @@ class SerialEngine {
             catch (error) { failure = error; failed = true; this.keepReading = false; break; }
             this.reader = reader;
             try {
-                while (this.keepReading) {
+                if (flushedRevision !== this._captureRevision) this._flushReader();
+                while (this.keepReading && !this._readerFlush) {
                     const { value, done } = await reader.read();
+                    if (this._readerFlush) break;
                     if (done) {
                         if (this.keepReading) {
                             failure = new Error('串口读取已结束');
@@ -174,18 +200,31 @@ class SerialEngine {
                         }
                         break;
                     }
-                    if (value && this.onDataCallback) {
+                    if (value && this._captureVisible && this.onDataCallback) {
                         const timestamp = Date.now(), arrival = globalThis.performance?.now() ?? timestamp;
                         this.onDataCallback(value, { timestamp, arrival });
                     }
                 }
+                if (this._readerFlush) {
+                    const { revision, result } = this._readerFlush;
+                    const error = await result;
+                    if (error) throw error;
+                    flushedRevision = revision;
+                }
             } catch (error) {
-                if (this.keepReading) {
+                // A frozen page can overrun the discarded interval. Web Serial supplies a new
+                // readable for recoverable overruns; a real disconnect still closes the port.
+                const skippedOverrun = (!this._captureVisible || this._readerFlush) &&
+                    error?.name === 'BufferOverrunError' && this.port?.readable;
+                if (skippedOverrun) {
+                    if (this._readerFlush) await this._readerFlush.result;
+                } else if (this.keepReading) {
                     failure = error;
                     failed = true;
                     this.keepReading = false;
                 }
             } finally {
+                this._readerFlush = null;
                 reader.releaseLock();
                 if (this.reader === reader) this.reader = null;
             }

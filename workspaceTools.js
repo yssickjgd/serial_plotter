@@ -39,9 +39,10 @@
     class WorkspaceTools {
         constructor({ document = root.document, service, getWidgets, getActiveWidget = () => null, onStateChange = () => {},
             onMessage = () => {}, onSearchProgress = () => {}, onTimeProgress = () => {}, getChannelNames = () => service.channelNames ?? service.numericSource?.format?.channelNames ?? [],
-            getTimeOffset = () => 0, getAlignedIndex = null, toCaptureTime = time => time, toWallTime = time => time }) {
+            getTimeOffset = () => 0, getAlignedIndex = null, toCaptureTime = time => time, toWallTime = time => time,
+            canNavigate = () => true }) {
             Object.assign(this, { document, service, getWidgets, getActiveWidget, onStateChange, onMessage, onSearchProgress, onTimeProgress,
-                getChannelNames, getTimeOffset, getAlignedIndex, toCaptureTime, toWallTime });
+                getChannelNames, getTimeOffset, getAlignedIndex, toCaptureTime, toWallTime, canNavigate });
             this.sourceId = this.referenceId = null;
             this.matches = [];
             this.currentMatch = -1;
@@ -89,7 +90,7 @@
             const ownTime = timestamp + this.getTimeOffset(origin) - this.getTimeOffset(target);
             return timeIndex(framesOf(target), ownTime);
         }
-        _enabled() { return !this.disposed && this.service.paused && !!this._source() && !this._source().view?.frames?.responseMode &&
+        _enabled() { return !this.disposed && this.service.paused && this.canNavigate() && !!this._source() && !this._source().view?.frames?.responseMode &&
             !this._source().source?.rebuilding && !framesOf(this._source())?.rebuilding; }
         _status(id, text) { const element = this._el(id); if (element) element.textContent = text; }
         _searchStatus(text) { this._status('monitor-search-status', text); }

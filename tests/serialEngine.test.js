@@ -3,12 +3,87 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+test('foreground serial resumes on a flushed reader, ignores queued bytes, and keeps the port writable', async () => {
+    const turns = () => new Promise(resolve => setImmediate(resolve));
+    let read, finishFlush, flushCount = 0, closes = 0;
+    const output = [], writes = [], states = [];
+    const port = {
+        open: async () => {}, close: async () => { closes++; },
+        readable: { getReader() {
+            return {
+                read: () => new Promise(resolve => { read = resolve; }),
+                cancel() {
+                    flushCount++;
+                    read?.({ done: true });
+                    if (flushCount === 1) return new Promise(resolve => { finishFlush = resolve; });
+                    return Promise.resolve();
+                },
+                releaseLock() {}
+            };
+        } },
+        writable: { getWriter: () => ({ write: async data => writes.push(...data), releaseLock() {} }) }
+    };
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const Engine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial: {} } });
+    const engine = new Engine();
+    engine.onData(data => output.push(...data));
+    engine.onStatusChange(connected => states.push(connected));
+    await engine.connect({}, port);
+    read({ value: [1] });
+    await turns();
+    engine.setCaptureVisible(false);
+    read({ value: [2] });
+    await turns();
+    await engine.send([6]);
+    read({ value: [3] }); // already fulfilled, but not yet delivered to the JS read loop
+    engine.setCaptureVisible(true);
+    engine.setCaptureVisible(false);
+    engine.setCaptureVisible(true);
+    finishFlush();
+    await turns();
+    assert.equal(flushCount, 2, 'a new foreground interval during an active flush gets a fresh boundary');
+    read({ value: [4] });
+    await turns();
+    assert.deepEqual(output, [1, 4]);
+    assert.deepEqual(writes, [6]);
+    assert.deepEqual(states, [true]);
+    await engine.disconnect();
+    assert.equal(closes, 1);
+});
+
 test('unsupported Web Serial is reported to the caller without showing UI in the transport', async () => {
     const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
     const SerialEngine = vm.runInNewContext(`${source}\nSerialEngine`, {
         navigator: {}, alert() { throw new Error('transport showed an alert'); }
     });
     await assert.rejects(new SerialEngine().connect({}), /不支持 Web Serial/);
+});
+
+test('a recoverable overrun while discarding hidden RX keeps the serial connection alive', async () => {
+    const turn = () => new Promise(resolve => setImmediate(resolve)), received = [];
+    let next, failRead, closes = 0;
+    const port = {
+        open: async () => {}, close: async () => { closes++; },
+        readable: { getReader: () => ({
+            read: () => new Promise((resolve, reject) => { next = resolve; failRead = reject; }),
+            cancel: async () => next({ done: true }), releaseLock() {}
+        }) }
+    };
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const Engine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial: {} } });
+    const engine = new Engine();
+    engine.onData(data => received.push(...data));
+    await engine.connect({}, port);
+    engine.setCaptureVisible(false);
+    failRead(Object.assign(new Error('overrun'), { name: 'BufferOverrunError' }));
+    await turn();
+    assert.equal(closes, 0);
+    engine.setCaptureVisible(true);
+    await turn();
+    next({ value: [9] });
+    await turn();
+    assert.deepEqual(received, [9]);
+    await engine.disconnect();
 });
 
 test('high-speed serial opens with enough receive space for a delayed browser read', async () => {
@@ -108,6 +183,26 @@ test('disconnect cancels pending port selection without opening the selected por
     await assert.rejects(connection, { name: 'AbortError' });
     assert.equal(opened, 0);
     assert.equal(engine.port, null);
+});
+
+test('a foreground boundary during port.open discards queued bytes before the first read', async () => {
+    const calls = [];
+    let finishOpen, finishRead;
+    const port = { open: () => new Promise(resolve => { finishOpen = resolve; }), close: async () => {},
+        readable: { getReader: () => ({
+            read: () => { calls.push('read'); return new Promise(resolve => { finishRead = resolve; }); },
+            cancel: async () => { calls.push('flush'); finishRead?.({ done: true }); }, releaseLock() {}
+        }) } };
+    const source = fs.readFileSync(require.resolve('../serialEngine.js'), 'utf8');
+    const Engine = vm.runInNewContext(`${source}\nSerialEngine`, { navigator: { serial: {} } });
+    const engine = new Engine(), opened = engine.connect({}, port);
+    engine.setCaptureVisible(false);
+    engine.setCaptureVisible(true);
+    finishOpen();
+    await opened;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, ['flush', 'read']);
+    await engine.disconnect();
 });
 
 test('dispose closes a port opened after cancellation and removes the serial listener', async () => {

@@ -496,18 +496,17 @@ class CaptureService {
         return Promise.all(pending);
     }
 
-    pause(paused = true) {
+    pause(paused = true, boundary) {
         if (this.paused === Boolean(paused)) return;
         if (!paused) this.memory.blockedReason = '';
-        this.endStream();
+        this.endStream(boundary);
         this.paused = Boolean(paused);
         if (!this.paused) for (const source of this.sources)
             if (!source.rebuilding) source.parser.resumeTimers?.();
     }
 
-    endStream() {
+    endStream(boundary = { timestamp: this.wallNow(), arrival: this.now() }) {
         if (this.disposed) return;
-        const boundary = { timestamp: this.wallNow(), arrival: this.now() };
         this.history.markBoundary(boundary);
         this.dataEngine?.endStream(boundary);
         this.receiving = true;

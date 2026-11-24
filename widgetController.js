@@ -3,13 +3,15 @@ class WidgetController {
     constructor({ document, service, globals, workspace, onChange = () => {}, onRulesChange = () => {}, onActivate = () => {},
         onBeforeChannelRenumber = () => {}, onChannelMetadataChange = () => {}, getConnections = () => [],
         getPrimaryConnectionName = () => '主连接', getWorkspaceCapture = () => null, getSourcePlotTimeline = () => null,
-        onTextPreparation = null }) {
+        onTextPreparation = null, projectReceiveTime = null }) {
         this.document = document;
         this.service = service;
         this.getConnections = getConnections;
         this.getPrimaryConnectionName = getPrimaryConnectionName;
         this.getWorkspaceCapture = getWorkspaceCapture;
         this.getSourcePlotTimeline = getSourcePlotTimeline;
+        this.projectReceiveTime = projectReceiveTime;
+        this.captureHidden = false;
         this.globals = globals;
         this.workspace = workspace;
         this.onChange = onChange;
@@ -178,10 +180,13 @@ class WidgetController {
         }
         this._listen(remove, 'click', event => { event.stopPropagation(); this.requestRemove(id); }, widget.cleanups ??= []);
         this.applySettings(widget);
-        widget.view.setVisible(true);
+        widget.intersecting = true;
+        widget.view.setVisible(type === 'wave' || !this.captureHidden);
         if (typeof IntersectionObserver === 'function') {
-            widget.visibility = new IntersectionObserver(entries => widget.view.setVisible(entries[0].isIntersecting),
-                { root: this.element('workspace-viewport') });
+            widget.visibility = new IntersectionObserver(entries => {
+                widget.intersecting = entries.at(-1).isIntersecting;
+                widget.view.setVisible(widget.intersecting && (type === 'wave' || !this.captureHidden));
+            }, { root: this.element('workspace-viewport') });
             widget.visibility.observe(element);
         }
         this._whenReady(widget);
@@ -217,6 +222,8 @@ class WidgetController {
         if (widget.type === 'wave') {
             const response = settings.plotContent === 'response';
             const combined = settings.connectionSource === 'workspace';
+            view.setPresentationDeferred(this.captureHidden || Boolean(this.workspacePresentationDeferred && combined && !response));
+            view.projectReceiveTime = !combined && !response ? this.projectReceiveTime : null;
             const alignment = widget.refs['plot-alignment-status'];
             alignment.hidden = !combined || response;
             alignment.textContent = settings.plotViewMode === 'time' ? capture.alignmentLabel ?? '全局通道 · 近似对齐' : '全局通道 · 同步采样频谱';
@@ -1006,6 +1013,24 @@ class WidgetController {
         if (!widget) return;
         this._measureByteChrome(widget);
         widget.view?.resize?.(); widget.view?.schedule?.();
+    }
+    setCaptureHidden(hidden) {
+        if (hidden === this.captureHidden) return;
+        this.captureHidden = hidden;
+        for (const widget of this.widgets.values()) {
+            if (widget.type === 'wave') {
+                const deferred = this.workspacePresentationDeferred && widget.capture === this.getWorkspaceCapture() &&
+                    widget.settings.plotContent !== 'response';
+                widget.view.setPresentationDeferred(hidden || Boolean(deferred));
+            } else widget.view.setVisible(!hidden && widget.intersecting);
+        }
+    }
+    setWorkspacePresentationDeferred(deferred) {
+        this.workspacePresentationDeferred = deferred;
+        for (const widget of this.widgets.values()) {
+            if (widget.type === 'wave' && widget.capture === this.getWorkspaceCapture() && widget.settings.plotContent !== 'response')
+                widget.view.setPresentationDeferred(this.captureHidden || deferred);
+        }
     }
     setPaused(paused) {
         for (const widget of this.widgets.values()) {

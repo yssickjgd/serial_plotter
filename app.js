@@ -84,6 +84,8 @@ async function startSerialPlotterApplication() {
     }
     const globals = { ...initial.global, channelNames: [...initial.global.channelNames] };
     const uiLayout = { ...initial.uiLayout };
+    const visibilityGraceMs = 5000, visibilityPauses = [];
+    let visibilityStarted = null, visibilityCutoff = null, visibilityTimer = null, manuallyPaused = false;
     const bufferFormat = value => value === 'binary' ? 'binary' : 'hex-text';
     const bufferSourceId = value => value === 'numeric' || value?.startsWith('engine:') ? 'base' : value;
     let exportProfiles = initial.tools.exportProfiles, exportFormat = bufferFormat(initial.tools.exportFormat);
@@ -173,6 +175,7 @@ async function startSerialPlotterApplication() {
         }
     }
     function scheduleSourceUi() {
+        if (visibilityCutoff) return;
         if (workspaceChannels?.mappings.length) scheduleWorkspaceChannelPump();
         scheduleSourceIndicators();
     }
@@ -218,15 +221,33 @@ async function startSerialPlotterApplication() {
             return index >= 0 && frames.orderAt(index) === origin.order ? frames.frameAt(index, { copyBytes: false }) : null;
         }
     });
-    workspaceChannels.onChange = () => {
-        if (disposed) return;
-        widgets?.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
-        scheduleSourceIndicators();
-    };
     let workspaceChannelTimer = null, workspaceChannelDue = Infinity;
-    let workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null;
+    let workspaceChannelView = null, replayWorkspace = false, alignmentReplay = null, pauseDrain = null;
+    let batchingWorkspace = false, workspaceChanged = false;
+    function publishWorkspaceChange() {
+        if (!workspaceChanged || disposed) return;
+        workspaceChanged = false;
+        if (!pauseDrain) widgets?.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
+        scheduleSourceIndicators();
+    }
+    workspaceChannels.onChange = () => {
+        workspaceChanged = true;
+        if (!batchingWorkspace) publishWorkspaceChange();
+    };
+    function cancelWorkspacePump() {
+        if (workspaceChannelTimer !== null) clearTimeout(workspaceChannelTimer);
+        workspaceChannelTimer = null;
+        workspaceChannelDue = Infinity;
+    }
+    function wakeWorkspacePump() {
+        if (document.hidden || !workspaceChannels.mappings.length) return;
+        cancelWorkspacePump();
+        scheduleSourceUi();
+    }
+    listen(document, 'visibilitychange', () => { syncCaptureVisibility(); wakeWorkspacePump(); });
+    listen(window, 'focus', wakeWorkspacePump);
     function scheduleWorkspaceChannelPump(delay = 0) {
-        if (disposed || service.paused && !replayWorkspace && !alignmentReplay) return;
+        if (disposed || visibilityCutoff || service.paused && !pauseDrain && !replayWorkspace && !alignmentReplay) return;
         const due = performance.now() + delay;
         if (workspaceChannelTimer !== null) {
             if (workspaceChannelDue <= due) return;
@@ -286,38 +307,92 @@ async function startSerialPlotterApplication() {
         restartAlignmentReplay();
         scheduleSourceUi();
     }
-    function pumpWorkspaceChannels(flush = false) {
+    function finishPauseDrain() {
+        if (!pauseDrain) return;
+        pauseDrain = null;
+        workspaceChanged = false;
+        setTaskProgress('pause-alignment');
+        widgets.syncData(workspaceChannels.numericSource, {}, workspaceChannels);
+        widgets.setWorkspacePresentationDeferred(false);
+        tools?.syncPaused();
+        scheduleSourceIndicators();
+    }
+    function reportPauseDrain(capture) {
+        let done = 0, total = 0;
+        for (const [id, target] of pauseDrain.targets) {
+            const count = Math.max(0, target.last - target.start + 1);
+            const cursor = capture.cursors.get(id);
+            const scanned = cursor?.source === target.source ? cursor.readFrame : null;
+            total += count;
+            done += Math.max(0, Math.min(count, (scanned ?? target.start - 1) - target.start + 1));
+        }
+        const scanning = done < total;
+        setTaskProgress('pause-alignment', scanning ? '正在整理暂停前的数据' : '正在整理暂停前的数据 · 完成同步采样',
+            scanning ? done / total : null, scanning ? itemsProcessed(done, total, '帧') : '');
+    }
+    function pumpWorkspaceChannels(firstPauseBatch = false) {
+        if (disposed || visibilityCutoff) return;
         if (alignmentReplay && alignmentReplay.epoch !== workspaceChannels.epoch) cancelAlignmentReplay();
-        if (!workspaceChannels.mappings.length || service.paused && !flush && !replayWorkspace && !alignmentReplay || disposed) return;
-        const inputs = allConnections();
-        const cutoff = service.paused || flush ? Infinity : Date.now();
+        if (pauseDrain && (!workspaceChannels.mappings.length || pauseDrain.epoch !== workspaceChannels.epoch)) finishPauseDrain();
+        if (!workspaceChannels.mappings.length || service.paused && !pauseDrain && !replayWorkspace && !alignmentReplay) return;
+        const inputs = allConnections(), cutoff = service.paused ? Infinity : Date.now();
         let next;
+        batchingWorkspace = true;
         try {
             if (alignmentReplay && alignmentReplay.definitions !== workspaceChannels.settings.channelDefinitions)
                 restartAlignmentReplay();
-            const replay = alignmentReplay?.capture;
+            const replay = alignmentReplay?.capture, capture = replay ?? workspaceChannels;
             if (replay) {
                 if (replay.capacity !== workspaceChannels.capacity) replay.resize(workspaceChannels.capacity);
                 alignmentReplay.targets ??= alignmentScanTargets(inputs, replay);
-                next = replay.collect(inputs, cutoff);
-                const caughtUp = !Number.isFinite(next) || next > cutoff;
+            }
+            // Drain more than one bounded batch when there is backlog, then yield to receive and paint.
+            const deadline = performance.now() + 6;
+            let batches = 0;
+            do {
+                next = capture.collect(inputs, cutoff, undefined, pauseDrain?.targets);
+            } while (Number.isFinite(next) && next <= cutoff &&
+                ++batches < (firstPauseBatch ? 1 : 8) && performance.now() < deadline);
+            const pending = Number.isFinite(next);
+            const caughtUp = !pending || next > cutoff;
+            if (replay) {
                 if (caughtUp && (replay.numericSource.frames.length || !workspaceChannels.numericSource.frames.length)) {
                     workspaceChannels.finishAlignmentReplay(replay);
                     alignmentReplay = null; setTaskProgress('alignment');
                     tools?.invalidate();
-                    renderAlignmentTimebaseStatus();
                 } else reportAlignmentReplay(replay, caughtUp);
-            } else next = workspaceChannels.collect(inputs, cutoff);
+            }
+            if (pauseDrain) {
+                if (pending) reportPauseDrain(capture);
+                else finishPauseDrain();
+            }
+            replayWorkspace = replayWorkspace && pending;
+            if (pending) scheduleWorkspaceChannelPump(Math.max(0, Math.min(1000, next - cutoff)));
         } catch (error) {
             cancelAlignmentReplay();
-            report(error); replayWorkspace = false; return;
+            finishPauseDrain();
+            report(error); replayWorkspace = false;
+        } finally {
+            batchingWorkspace = false;
+            publishWorkspaceChange();
         }
-        const pending = Number.isFinite(next);
-        replayWorkspace = (replayWorkspace || flush) && pending;
-        if (pending) scheduleWorkspaceChannelPump(Math.max(0, Math.min(1000, next - cutoff)));
     }
     const serialAdapter = new S.SerialEngine(), netAdapter = new S.NetEngine();
     const portBindings = new S.SerialPortBindings(initial.serialSources.bindings);
+    const bridgeBindings = new Map();
+    const bridgeTokenKey = 'serialplot_bridge_access';
+    let bridgeToken = '', bridgeBindingSource = null, bridgePorts = [], bridgeListRevision = 0;
+    const bridgeBindingDialog = el('bridge-serial-binding');
+    let bridgeAuthorization = null;
+    const bridgeRevokedMessage = 'Bridge 已由另一个页面接管，当前页面保留已采集数据。';
+    const bridgeWorkspace = new S.BridgeWorkspace(() => {
+        rememberBridgeToken('');
+        if (connectionView.dialog.open) status('serial-config-status', bridgeRevokedMessage);
+        syncConnection();
+    });
+    let bridgeStatusTimer = null, bridgeStatusRevision = 0;
+    const { isSerialConnectionMode } = S.WidgetConfig;
+    try { bridgeToken = window.sessionStorage?.getItem(bridgeTokenKey) ?? ''; } catch { /* Storage may be unavailable for file pages. */ }
     const primaryFields = { mode: 'connType', name: 'serialName', baudRate: 'serialBaud', dataBits: 'serialData',
         stopBits: 'serialStop', parity: 'serialParity', host: 'netHost', port: 'netPort', localPort: 'netLocalPort' };
     function primaryConnectionSettings() {
@@ -326,7 +401,7 @@ async function startSerialPlotterApplication() {
         if (settings.mode === 'tcp-server' && settings.localPort) settings.port = settings.localPort;
         return { id: 'primary', ...settings };
     }
-    const primarySource = { adapter: globals.connType === 'serial' ? serialAdapter : netAdapter, capture: service,
+    const primarySource = { adapter: createTransport(globals.connType, true), capture: service,
         connected: false, pending: false, error: '', bindingMessage: '', settings: primaryConnectionSettings() };
     let connectionBusy = false;
     function primaryConnectionName() { return primarySource.settings.name; }
@@ -377,12 +452,23 @@ async function startSerialPlotterApplication() {
             if (!sampling) continue;
             const { statusId } = sampling, source = selectedSource();
             const id = source?.settings.id;
-            if (!id || workspaceChannels.timebases[id]?.mode !== 'fixed') { status(statusId, ''); continue; }
+            const mapped = id && workspaceChannels.mappings.some(entry => entry.sourceId === id);
             const live = workspaceChannels.cursors.get(id);
-            const mapped = workspaceChannels.mappings.some(entry => entry.sourceId === id);
-            status(statusId, !mapped ? '此来源尚未映射到全局通道。' : alignmentReplay ? ''
-                : !live ? '等待可解析的帧。' : live.invalidLatest ? '最近的帧缺少有效的时基值，已保留原始记录。'
-                    : live.lastResync ? '最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。' : '');
+            const fixed = workspaceChannels.timebases[id]?.mode === 'fixed';
+            const messages = [];
+            if (id && !mapped && fixed) messages.push('此来源尚未映射到全局通道。');
+            if (mapped) {
+                const capture = alignmentReplay?.capture ?? workspaceChannels;
+                const evicted = capture.cursors.get(id)?.evictedUnread;
+                if (evicted) messages.push('对齐前已淘汰 ' + evicted.toLocaleString() + ' 帧');
+                if (fixed && !alignmentReplay) {
+                    if (!live) messages.push('等待可解析的帧。');
+                    else if (live.invalidLatest) messages.push('最近的帧缺少有效的时基值，已保留原始记录。');
+                    else if (live.lastResync) messages.push('最近一次自动重同步估算跳过 ' + live.lastResync.toLocaleString() + ' 帧。');
+                }
+            }
+            const message = messages.join(' · ');
+            if (el(statusId).textContent !== message) status(statusId, message);
         }
     }
     function setTimingFeedback(panel, message = '', error = false) {
@@ -420,7 +506,7 @@ async function startSerialPlotterApplication() {
             if (capture.rebuildHistory) { sourcePlotTimelines.delete(source); continue; }
             if (!source.frames?.length || !source.frames.frameOrdinalAt || source.rebuilding) continue;
             const saved = sourcePlotTimelines.get(source);
-            const timeline = saved?.valid ? saved : new S.SourcePlotTimeline(source, previous);
+            const timeline = saved?.valid ? saved : new S.SourcePlotTimeline(source, previous, projectVisibleReceiveTime);
             timeline.change(timing);
             sourcePlotTimelines.set(source, timeline);
         }
@@ -560,6 +646,8 @@ async function startSerialPlotterApplication() {
     const connectionView = new S.SerialSourceView(el('serial-source-list'), {
         dialog: el('serial-config-dialog'),
         onDialogChange(open) {
+            watchBridgeStatus(open);
+            if (!open) closeBridgeBinding();
             if (open && engineView && connectionView.selectedSource) engineView.setEngine(connectionView.selectedSource.capture.dataEngine);
             const slot = open ? el('dialog-task-slot') : workspaceTaskSlot;
             if (taskProgress.parentElement !== slot) slot.append(taskProgress);
@@ -594,6 +682,7 @@ async function startSerialPlotterApplication() {
             dropConnectionSource(source); applyCaptureQuotas(); refreshConnectionChoices(); syncConnection(); saveSoon();
         },
         onSelect(source) {
+            closeBridgeBinding();
             renderAlignmentTimebase(dialogAlignment, source);
             if (connectionView.dialog.open) engineView?.setEngine(source.capture.dataEngine);
         }
@@ -611,6 +700,39 @@ async function startSerialPlotterApplication() {
         if (previous.name !== source.settings.name) refreshConnectionChoices();
         syncConnection();
     }
+    function normalizeSourceConnection(source, settings) {
+        const normalize = source === primarySource ? S.WidgetConfig.normalizeConnectionSettings : S.WidgetConfig.normalizeConnectionSource;
+        return normalize(settings);
+    }
+    function connectionPortOrDefault(value, fallback) {
+        try { S.parsePort(value); return value; }
+        catch { return fallback; }
+    }
+    function applyConnectionMode() {
+        const source = connectionView.selectedSource, select = el('conn-type');
+        if (!source || select.value === source.settings.mode) return;
+        if (source.connected || source.pending || applyingSourceSettings) {
+            select.value = source.settings.mode;
+            connectionView.syncDialog();
+            return;
+        }
+        closeBridgeBinding();
+        const mode = select.value, settings = { ...source.settings, mode };
+        const { netHost, netPort, netLocalPort } = S.WidgetConfig.GLOBAL_DEFAULTS;
+        if (!isSerialConnectionMode(mode)) {
+            settings.port = connectionPortOrDefault(settings.port, netPort);
+            if (mode !== 'tcp-server') settings.host = settings.host?.trim() || netHost;
+            if (mode === 'udp') settings.localPort = connectionPortOrDefault(settings.localPort, netLocalPort);
+        }
+        try {
+            saveConnectionSettings(source, normalizeSourceConnection(source, settings));
+            saveSoon();
+        } catch (error) {
+            select.value = source.settings.mode;
+            connectionView.syncDialog();
+            connectionView.finishConnectionSettings(source.settings.id, error.message);
+        }
+    }
     let applyingSourceSettings = false;
     async function applySourceSettings(validateOnly) {
         const source = connectionView.selectedSource, revision = importRevision;
@@ -621,8 +743,7 @@ async function startSerialPlotterApplication() {
             const draft = connectionView.connectionDraft();
             if (Object.keys(draft).length) {
                 try {
-                    const normalize = source === primarySource ? S.WidgetConfig.normalizeConnectionSettings : S.WidgetConfig.normalizeConnectionSource;
-                    settings = normalize({ ...source.settings, ...draft });
+                    settings = normalizeSourceConnection(source, { ...source.settings, ...draft });
                 } catch (error) {
                     connectionView.finishConnectionSettings(id, error.message);
                     throw error;
@@ -679,8 +800,10 @@ async function startSerialPlotterApplication() {
         if (service.memory.limitBytes !== limit) service.setMemoryLimit(limit);
         for (const { capture } of connectionSources.values()) if (capture.memory.limitBytes !== limit) capture.setMemoryLimit(limit);
     }
-    function createTransport(mode) {
-        return mode === 'serial' ? new S.SerialEngine() : new S.NetEngine();
+    function createTransport(mode, isPrimary = false) {
+        if (mode === 'bridge-serial') return new S.BridgeSerialEngine();
+        if (mode === 'serial') return isPrimary ? serialAdapter : new S.SerialEngine();
+        return isPrimary ? netAdapter : new S.NetEngine();
     }
     function createConnectionSource(settings, limit) {
         const adapter = createTransport(settings.mode);
@@ -791,13 +914,26 @@ async function startSerialPlotterApplication() {
     function watchTransport(source, adapter) {
         const current = () => !disposed && source.adapter === adapter &&
             (source === primarySource || connectionSources.get(source.settings.id) === source);
+        adapter.setCaptureVisible?.(!visibilityCutoff);
+        if (visibilityStarted && !visibilityCutoff) adapter.setCaptureGrace?.(Math.max(0, Math.ceil(visibilityGraceMs - visibilityElapsed())));
         adapter.onData((bytes, stamp) => {
-            if (current()) source.capture.receive(bytes, stamp);
+            if (!current() || visibilityCutoff) return;
+            // A transport callback can run before an overdue visibility timer after a freeze.
+            if (visibilityStarted && visibilityElapsed() >= visibilityGraceMs) { syncCaptureVisibility(); return; }
+            source.capture.receive(bytes, stamp);
         });
-        adapter.onStatusChange((connected, error) => {
+        adapter.onStatusChange((connected, error, info) => {
             if (!current()) return;
-            if (connected) source.connected = true;
-            else endConnectionStream(source);
+            if (connected) {
+                if (info?.gap) {
+                    source.capture.endStream();
+                    source.bindingMessage = 'Bridge · ' + source.bridgePath + ' · 上一段数据有缺口';
+                }
+                source.connected = true;
+            } else if (info?.detached) {
+                source.connected = false;
+                source.bindingMessage = 'Bridge · ' + source.bridgePath + ' · 网页订阅中断';
+            } else endConnectionStream(source);
             source.error = error?.message ?? '';
             syncConnection(); scheduleSourceUi();
         });
@@ -808,20 +944,19 @@ async function startSerialPlotterApplication() {
     }
     function replaceConnectionSettings(source, settings) {
         const previous = source.settings, adapter = source.adapter;
-        const serial = settings.mode === 'serial';
+        const serial = isSerialConnectionMode(settings.mode);
         source.settings = settings;
-        if (serial !== (previous.mode === 'serial')) {
-            if (source.connected) endConnectionStream(source);
-            if (!serial) portBindings.remove(settings.id);
-            source.bindingMessage = '';
-            if (source === primarySource) {
-                source.adapter = serial ? serialAdapter : netAdapter;
-                void adapter.disconnect();
-            } else {
-                source.adapter = createTransport(settings.mode);
-                watchTransport(source, source.adapter);
-                releaseTransport(adapter);
-            }
+        if (settings.mode !== previous.mode && (serial || isSerialConnectionMode(previous.mode))) {
+            const wasConnected = source.connected;
+            if (wasConnected) endConnectionStream(source);
+            if (bridgeBindingSource === source) closeBridgeBinding();
+            source.bindingMessage = ''; source.bridgePath = '';
+            source.adapter = createTransport(settings.mode, source === primarySource);
+            watchTransport(source, source.adapter);
+            if (adapter === serialAdapter || adapter === netAdapter) void adapter.disconnect();
+            else if (previous.mode === 'bridge-serial' && wasConnected)
+                void adapter.disconnect().catch(report).finally(() => releaseTransport(adapter));
+            else releaseTransport(adapter);
         } else {
             const keys = serial ? ['baudRate', 'dataBits', 'stopBits', 'parity']
                 : ['mode', 'host', 'port', 'localPort'];
@@ -840,8 +975,215 @@ async function startSerialPlotterApplication() {
     function openBoundSerialPort(adapter, { baudRate, dataBits, stopBits, parity }, port) {
         return adapter.connect({ baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits), parity }, port);
     }
+    function watchBridgeStatus(open) {
+        clearInterval(bridgeStatusTimer);
+        const revision = ++bridgeStatusRevision;
+        if (!open) return;
+        status('serial-config-status', '正在检测 Bridge…');
+        const update = async () => {
+            const result = await S.BridgeSerialEngine.probe();
+            if (revision !== bridgeStatusRevision || disposed) return;
+            const message = bridgeWorkspace.revoked && result ? bridgeRevokedMessage : result
+                ? (result.serial ? 'Bridge 已运行' : 'Bridge 已运行，仅提供 TCP / UDP')
+                : 'Bridge 未响应。使用 Bridge 模式前请启动 bridge.js。';
+            const hint = el('serial-config-status');
+            if (hint.textContent !== message) hint.textContent = message;
+        };
+        void update();
+        bridgeStatusTimer = setInterval(update, 2500);
+    }
+    function closeBridgeBinding() {
+        bridgeBindingSource = null;
+        const authorization = bridgeAuthorization;
+        bridgeAuthorization = null;
+        authorization?.reject(Object.assign(new Error('已取消 Bridge 授权'), { name: 'AbortError' }));
+        bridgeListRevision++;
+        bridgePorts = [];
+        if (bridgeBindingDialog.open) bridgeBindingDialog.close();
+        el('bridge-serial-token').value = '';
+    }
+    function showBridgeBinding(source) {
+        if (!connectionView.dialog.open || connectionView.selectedSource !== source || bridgeBindingDialog.open) return;
+        bridgeBindingSource = source;
+        el('bridge-serial-token').value = bridgeToken;
+        resetBridgePortList();
+        status('bridge-serial-binding-title', '绑定 Bridge 串口');
+        status('bridge-serial-source', source.settings.name);
+        el('bridge-serial-list').textContent = '列出端口';
+        el('bridge-serial-connect').hidden = false;
+        status('bridge-serial-status', '请输入 Bridge 终端显示的串口访问码。');
+        lockBridgeBinding(false);
+        bridgeBindingDialog.showModal();
+        if (bridgeToken) void listBridgePorts();
+        else el('bridge-serial-token').focus();
+    }
+    function rememberBridgeToken(token) {
+        bridgeToken = token;
+        try {
+            if (token) window.sessionStorage?.setItem(bridgeTokenKey, token);
+            else window.sessionStorage?.removeItem(bridgeTokenKey);
+        } catch { /* Storage is optional for local files. */ }
+    }
+    async function obtainBridgeWorkspace(interactive = true) {
+        if (bridgeWorkspace.key) return bridgeWorkspace.key;
+        const capability = await S.BridgeSerialEngine.probe();
+        if (!capability?.exclusive) return null;
+        if (bridgeToken) {
+            try { return await bridgeWorkspace.claim(S.BridgeSerialEngine.url, bridgeToken); }
+            catch (error) {
+                if (!interactive || error.code !== 'invalid-access-code') throw error;
+                rememberBridgeToken('');
+            }
+        }
+        if (!interactive) throw new Error('请输入 Bridge 访问码');
+        if (bridgeBindingDialog.open) throw new Error('请先完成当前的 Bridge 授权');
+        return new Promise((resolve, reject) => {
+            bridgeAuthorization = { resolve, reject };
+            resetBridgePortList();
+            status('bridge-serial-binding-title', '授权 Bridge');
+            status('bridge-serial-source', '');
+            status('bridge-serial-status', '请输入 Bridge 终端显示的访问码。');
+            el('bridge-serial-token').value = '';
+            el('bridge-serial-list').textContent = '授权并连接';
+            el('bridge-serial-connect').hidden = true;
+            lockBridgeBinding(false);
+            bridgeBindingDialog.showModal();
+            el('bridge-serial-token').focus();
+        });
+    }
+    async function submitBridgeAuthorization() {
+        const authorization = bridgeAuthorization;
+        const button = el('bridge-serial-list'), token = el('bridge-serial-token').value.trim();
+        if (!authorization || button.disabled) return;
+        if (!token) { status('bridge-serial-status', '请输入 Bridge 访问码。'); return; }
+        lockBridgeBinding(true);
+        try {
+            const key = await bridgeWorkspace.claim(S.BridgeSerialEngine.url, token);
+            if (bridgeAuthorization !== authorization) return;
+            rememberBridgeToken(token);
+            bridgeAuthorization = null;
+            closeBridgeBinding();
+            authorization.resolve(key);
+        } catch (error) {
+            if (bridgeAuthorization === authorization) status('bridge-serial-status', error.message);
+        } finally {
+            if (bridgeAuthorization === authorization) lockBridgeBinding(false);
+        }
+    }
+    function resetBridgePortList() {
+        bridgeListRevision++;
+        bridgePorts = [];
+        el('bridge-serial-port').replaceChildren();
+        el('bridge-serial-port-wrap').hidden = true;
+        syncBridgePortSelection();
+    }
+    function syncBridgePortSelection() {
+        const path = el('bridge-serial-port').value;
+        el('bridge-serial-connect').disabled = !bridgePorts.some(port => port.path === path) || Boolean(bridgeBindingSource?.pending);
+    }
+    function lockBridgeBinding(locked) {
+        for (const id of ['bridge-serial-token', 'bridge-serial-list', 'bridge-serial-port', 'bridge-serial-cancel'])
+            el(id).disabled = locked;
+        syncBridgePortSelection();
+    }
+    async function listBridgePorts() {
+        const source = bridgeBindingSource, token = el('bridge-serial-token').value.trim();
+        const button = el('bridge-serial-list'), select = el('bridge-serial-port');
+        if (!source || button.disabled) return;
+        resetBridgePortList();
+        const revision = bridgeListRevision;
+        button.disabled = true;
+        try {
+            if (!token) throw new Error('请输入 Bridge 访问码');
+            const ports = await S.BridgeSerialEngine.ports(token);
+            if (bridgeListRevision !== revision) return;
+            rememberBridgeToken(token);
+            bridgePorts = ports;
+            select.replaceChildren(...bridgePorts.map(port => {
+                const option = document.createElement('option');
+                option.value = port.path; option.textContent = port.label;
+                return option;
+            }));
+            const existing = bridgeBindings.get(source.settings.id);
+            select.value = bridgePorts.some(port => port.path === existing?.path && port.identity === existing.identity) ? existing.path : '';
+            el('bridge-serial-port-wrap').hidden = !ports.length;
+            status('bridge-serial-status', ports.length ? '请选择此来源对应的端口。' : 'Bridge 没有检测到可用串口。');
+            syncBridgePortSelection();
+            if (ports.length) select.focus();
+        } catch (error) {
+            if (bridgeListRevision === revision) status('bridge-serial-status', error.message);
+        } finally {
+            if (bridgeListRevision === revision) button.disabled = false;
+        }
+    }
+    async function openBridgeSerial(source, binding, workspaceKey) {
+        if (!bridgeToken) throw new Error('请在通讯配置中输入 Bridge 访问码并绑定端口');
+        const adapter = source.adapter;
+        source.bridgePath = binding.path;
+        source.bindingMessage = 'Bridge · ' + binding.path;
+        const { baudRate, dataBits, stopBits, parity } = source.settings;
+        return adapter.connect({ baudRate: Number(baudRate), dataBits: Number(dataBits), stopBits: Number(stopBits), parity }, binding, bridgeToken, workspaceKey);
+    }
+    async function confirmBridgeBinding() {
+        const source = bridgeBindingSource, path = el('bridge-serial-port').value;
+        const chosen = bridgePorts.find(port => port.path === path);
+        if (!source || source.settings.mode !== 'bridge-serial' || !chosen || source.connected || source.pending || connectionBusy) return;
+        const id = source.settings.id;
+        if ([...bridgeBindings.values()].some(binding => binding.id !== id && binding.path === path)) {
+            status('bridge-serial-status', '此端口已绑定到另一来源。');
+            return;
+        }
+        const revision = importRevision;
+        connectionBusy = source.pending = true; source.error = ''; syncConnection();
+        lockBridgeBinding(true);
+        try {
+            const binding = { id, path, identity: chosen.identity };
+            const workspaceKey = await obtainBridgeWorkspace(false);
+            if (!isCurrentConnection(source, revision)) return;
+            await openBridgeSerial(source, binding, workspaceKey);
+            if (!isCurrentConnection(source, revision)) return;
+            bridgeBindings.set(id, binding);
+            saveSoon();
+            if (bridgeBindingSource === source) closeBridgeBinding();
+        } catch (error) {
+            if (isCurrentConnection(source, revision)) {
+                source.error = 'Bridge 串口连接失败：' + error.message;
+                if (bridgeBindingSource === source) status('bridge-serial-status', error.message);
+            }
+        } finally {
+            connectionBusy = source.pending = false;
+            if (bridgeBindingSource === source) lockBridgeBinding(false);
+            if (!disposed) { syncConnection(); scheduleSourceUi(); }
+        }
+    }
+    listen(el('conn-type'), 'change', applyConnectionMode);
+    const submitBridgeCode = () => { void (bridgeAuthorization ? submitBridgeAuthorization() : listBridgePorts()); };
+    listen(el('bridge-serial-list'), 'click', submitBridgeCode);
+    listen(el('bridge-serial-connect'), 'click', () => { void confirmBridgeBinding(); });
+    listen(el('bridge-serial-cancel'), 'click', closeBridgeBinding);
+    listen(bridgeBindingDialog, 'cancel', event => {
+        event.preventDefault();
+        if (!bridgeBindingSource?.pending && !el('bridge-serial-token').disabled) closeBridgeBinding();
+    });
+    listen(el('bridge-serial-token'), 'input', () => {
+        resetBridgePortList();
+        el('bridge-serial-list').disabled = false;
+        status('bridge-serial-status', '请输入 Bridge 终端显示的串口访问码。');
+    });
+    listen(el('bridge-serial-token'), 'keydown', event => {
+        if (event.key !== 'Enter' || event.isComposing) return;
+        event.preventDefault();
+        submitBridgeCode();
+    });
+    listen(el('bridge-serial-port'), 'change', syncBridgePortSelection);
+    listen(el('bridge-serial-port'), 'keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        void confirmBridgeBinding();
+    });
     async function bindSerialPort(source) {
-        if (connectionBusy || source.settings.mode !== 'serial' || source.connected || source.pending || disposed) return;
+        if (connectionBusy || !isSerialConnectionMode(source.settings.mode) || source.connected || source.pending || disposed) return;
+        if (source.settings.mode === 'bridge-serial') { showBridgeBinding(source); return; }
         const revision = importRevision, id = source.settings.id;
         let bound = false;
         connectionBusy = source.pending = true;
@@ -882,7 +1224,10 @@ async function startSerialPlotterApplication() {
         for (const source of selected) { source.pending = true; source.error = ''; }
         syncConnection();
         try {
-            const grants = connect && selected.some(source => source.settings.mode === 'serial') ? authorizedPorts() : null;
+            const hasWebSerial = connect && selected.some(source => source.settings.mode === 'serial');
+            const grants = hasWebSerial ? authorizedPorts().then(ports => ({ ports }), error => ({ error })) : null;
+            let bridgeKey;
+            const getBridgeKey = () => bridgeKey ??= obtainBridgeWorkspace();
             await Promise.all(selected.map(async source => {
                 if (!isCurrentConnection(source, revision)) return;
                 const { adapter, settings } = source;
@@ -892,14 +1237,23 @@ async function startSerialPlotterApplication() {
                         if (isCurrentConnection(source, revision) && source.connected) endConnectionStream(source);
                         return;
                     }
-                    if (settings.mode !== 'serial') {
-                        await adapter.connect(networkOptions(settings));
+                    if (!isSerialConnectionMode(settings.mode)) {
+                        const options = networkOptions(settings), key = await getBridgeKey();
+                        if (isCurrentConnection(source, revision)) await adapter.connect(options, key);
                         return;
                     }
-                    const authorized = await grants;
-                    if (!isCurrentConnection(source, revision)) return;
                     const { id } = settings;
-                    const match = portBindings.resolve(id, authorized);
+                    if (settings.mode === 'bridge-serial') {
+                        const binding = bridgeBindings.get(id);
+                        if (!binding) throw new Error('请在通讯配置中绑定 Bridge 串口');
+                        const key = await getBridgeKey();
+                        if (isCurrentConnection(source, revision)) await openBridgeSerial(source, binding, key);
+                        return;
+                    }
+                    const { ports, error } = await grants;
+                    if (!isCurrentConnection(source, revision)) return;
+                    if (error) throw error;
+                    const match = portBindings.resolve(id, ports);
                     source.bindingMessage = match.issue ?? '已绑定端口';
                     if (!match.port) return;
                     await openBoundSerialPort(adapter, settings, match.port);
@@ -918,7 +1272,7 @@ async function startSerialPlotterApplication() {
     }
     function dropConnectionSource(source) {
         const { id } = source.settings;
-        connectionSources.delete(id); portBindings.remove(id); connectionView.remove(id);
+        connectionSources.delete(id); portBindings.remove(id); bridgeBindings.delete(id); connectionView.remove(id);
         delete workspaceChannels.timebases[id];
         source.capture.dispose(); releaseTransport(source.adapter);
     }
@@ -951,6 +1305,8 @@ async function startSerialPlotterApplication() {
             }
         }
         portBindings.load(config.bindings);
+        bridgeBindings.clear();
+        for (const binding of config.bridgeBindings ?? []) bridgeBindings.set(binding.id, binding);
         for (const source of allConnections()) source.bindingMessage = '';
         applyCaptureQuotas();
     }
@@ -986,7 +1342,7 @@ async function startSerialPlotterApplication() {
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
         onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
     widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices, getPrimaryConnectionName: primaryConnectionName,
-        getWorkspaceCapture: () => workspaceChannels, getSourcePlotTimeline: source => sourcePlotTimelines.get(source),
+        getWorkspaceCapture: () => workspaceChannels, projectReceiveTime: projectVisibleReceiveTime, getSourcePlotTimeline: source => sourcePlotTimelines.get(source),
         onTextPreparation: (widget, fraction, done, total) => setTaskProgress(widget,
             fraction === null || !total ? null : '正在准备字节流文本 · ' + widget.title, fraction,
             total ? bytesLabel(done) + ' / ' + bytesLabel(total) : ''),
@@ -1079,6 +1435,7 @@ async function startSerialPlotterApplication() {
     tools = new S.WorkspaceTools({ document, service, getWidgets: () => widgets.widgets, getAlignedIndex: resolveAlignedIndex,
         toCaptureTime: time => workspaceChannels.plotTime(time), toWallTime: time => workspaceChannels.receiveTime(time),
         getActiveWidget: () => widgets.active,
+        canNavigate: () => !pauseDrain,
         getChannelNames: () => widgets.active?.capture.dataEngine.globals.channelNames ?? globals.channelNames,
         getTimeOffset: widget => connectionSources.get(widget?.settings.connectionSource)?.settings.timeOffsetMs ?? 0,
         onSearchProgress: progress => setTaskProgress('search', progress && '搜索中 · ' + progress.title, progress?.fraction,
@@ -1177,6 +1534,7 @@ async function startSerialPlotterApplication() {
             : '请选择有解析数据的波形、位姿或显示「数据引擎」的字节流控件。';
         if (selected.widget.capture === workspaceChannels && (format === 'binary' || format === 'hex-text'))
             return '请在左侧「导出数据」中按通讯来源导出原始字节。此处可导出全局通道的 TXT 或 CSV。';
+        if (pauseDrain && selected.widget.capture === workspaceChannels) return '正在整理暂停前的数据。';
         if (selected.source.rebuilding || selected.source.frames.rebuilding) return '当前控件正在重建历史。';
         if (!selected.source.frames.length) return '当前控件没有可导出的记录。';
         if ((format === 'csv' || format === 'engine-text' || selected.source.frames.provenanceAt) &&
@@ -1367,15 +1725,18 @@ async function startSerialPlotterApplication() {
         for (const source of sources) {
             const { id, mode } = source.settings;
             source.controlsLocked = connectionBusy;
-            source.hasBinding = mode === 'serial' && (portBindings.ports.has(id) || portBindings.hints.has(id));
-            source.needsConfirmation = source.hasBinding && !portBindings.ports.has(id) && portBindings.hints.get(id)?.ambiguous;
+            source.hasBinding = mode === 'bridge-serial' ? bridgeBindings.has(id) :
+                mode === 'serial' && (portBindings.ports.has(id) || portBindings.hints.has(id));
+            source.needsConfirmation = mode === 'serial' && !portBindings.ports.has(id) && portBindings.hints.get(id)?.ambiguous;
+            if (mode === 'bridge-serial') source.bridgePath = bridgeBindings.get(id)?.path ?? source.bridgePath;
             connectionView.refresh(source);
         }
-        const serialOffline = sources.filter(source => !source.connected && source.settings.mode === 'serial');
+        const serialOffline = sources.filter(source => !source.connected && isSerialConnectionMode(source.settings.mode));
         const needsBinding = serialOffline.some(source => !source.hasBinding || source.needsConfirmation || source.bindingMessage.includes('重新确认'));
         const failed = sources.find(source => !source.connected && source.error);
         const offline = serialOffline.some(source => source.bindingMessage.includes('不在线'));
-        const detail = connectionBusy ? ' · 正在处理…' : failed ? ' · ' + failed.settings.name + '：' + failed.error
+        const detail = connectionBusy ? ' · 正在处理…' : bridgeWorkspace.revoked ? ' · ' + bridgeRevokedMessage
+            : failed ? ' · ' + failed.settings.name + '：' + failed.error
             : needsBinding ? ' · 请在配置中绑定端口' : offline ? ' · 请在配置中查看端口状态' : '';
         status('connection-status', '已连接 ' + connected + ' / ' + sources.length + detail);
         connectionView.syncDialog();
@@ -1386,6 +1747,8 @@ async function startSerialPlotterApplication() {
         status('engine-raw-limit-status', '');
         el('capture-memory-mib').value = String(globals.captureMemoryMiB);
         el('max-points-label').textContent = '每个来源最大帧数';
+        el('capture-visible-only').checked = globals.captureVisibleOnly;
+        syncCaptureVisibility();
         updateMemoryStatus();
         widgets.syncGlobals(); syncConnection();
     }
@@ -1447,8 +1810,8 @@ async function startSerialPlotterApplication() {
         const target = sendConnectionId === 'primary' ? primarySource : connectionSources.get(sendConnectionId);
         return target?.connected ? target.adapter : null;
     }
-    function captureForTransport(transport = serialAdapter) {
-        if (transport === serialAdapter || transport === netAdapter) return service;
+    function captureForTransport(transport = primarySource.adapter) {
+        if (transport === primarySource.adapter || transport === serialAdapter || transport === netAdapter) return service;
         return [...connectionSources.values()].find(source => source.adapter === transport)?.capture;
     }
     listen(el('send-connection-source'), 'change', () => {
@@ -1517,20 +1880,98 @@ async function startSerialPlotterApplication() {
     }
     listen(el('send-mode'), 'change', syncProtocolSend);
     for (const id of ['send-mode', 'send-interval', 'send-interval-unit']) S.bindSettingField(el(id), saveSoon, listen);
-    for (const adapter of [serialAdapter, netAdapter]) watchTransport(primarySource, adapter);
+    watchTransport(primarySource, primarySource.adapter);
     listen(el('serial-disconnect-all'), 'click', () => { void changeConnections(allConnections(), false); });
     listen(el('btn-connect'), 'click', () => { void changeConnections(allConnections(), true); });
+    function visibilityElapsed() {
+        return Math.max(performance.now() - visibilityStarted.arrival, service.wallNow() - visibilityStarted.timestamp);
+    }
+    function projectVisibleReceiveTime(time) {
+        if (!visibilityPauses.length) return time;
+        const section = workspaceChannels.pauseSection(time, visibilityPauses);
+        return time - (visibilityPauses[section - 1]?.total ?? 0);
+    }
+    function syncCaptureVisibility() {
+        const hidden = globals.captureVisibleOnly && document.hidden;
+        if (visibilityStarted && !visibilityCutoff && visibilityElapsed() >= visibilityGraceMs) {
+            // Preserve the original deadline even if Chrome suspended all page tasks.
+            visibilityCutoff = {
+                timestamp: Math.min(service.wallNow(), visibilityStarted.timestamp + visibilityGraceMs),
+                arrival: Math.min(performance.now(), visibilityStarted.arrival + visibilityGraceMs)
+            };
+            cancelWorkspacePump();
+            widgets.setCaptureHidden(true);
+            for (const { adapter } of allConnections()) adapter.setCaptureVisible?.(false);
+            applyCapturePause(visibilityCutoff);
+        }
+        if (hidden) {
+            if (!visibilityStarted) {
+                visibilityStarted = { timestamp: service.wallNow(), arrival: performance.now() };
+                for (const { adapter } of allConnections()) adapter.setCaptureGrace?.(visibilityGraceMs);
+            }
+            if (!visibilityCutoff && visibilityTimer === null) {
+                visibilityTimer = setTimeout(() => {
+                    visibilityTimer = null;
+                    syncCaptureVisibility();
+                }, Math.max(0, visibilityGraceMs - visibilityElapsed()));
+            }
+            return;
+        }
+        if (!visibilityStarted) return;
+        clearTimeout(visibilityTimer);
+        visibilityTimer = null;
+        visibilityStarted = null;
+        if (!visibilityCutoff) {
+            for (const { adapter } of allConnections()) adapter.setCaptureGrace?.(null);
+            return;
+        }
+        const end = Math.max(visibilityCutoff.timestamp, service.wallNow());
+        visibilityPauses.push({ end, total: (visibilityPauses.at(-1)?.total ?? 0) + end - visibilityCutoff.timestamp });
+        visibilityCutoff = null;
+        // Only a deliberate resume may release a memory-pressure stop.
+        if (service.memory.blockedReason) manuallyPaused = true;
+        applyCapturePause(undefined, true);
+        for (const { adapter } of allConnections()) {
+            adapter.setCaptureVisible?.(true);
+            adapter.setCaptureGrace?.(null);
+        }
+        widgets.setCaptureHidden(false);
+        scheduleSourceUi();
+    }
+    listen(el('capture-visible-only'), 'change', () => {
+        globals.captureVisibleOnly = el('capture-visible-only').checked;
+        syncCaptureVisibility();
+        saveSoon();
+    });
     function setPaused(paused) {
-        workspaceChannels.setPaused(Boolean(paused), service.wallNow());
-        service.pause(paused);
-        if (!paused) scheduleSourceUi();
-        for (const { capture } of connectionSources.values()) capture.pause(paused);
-        if (paused) pumpWorkspaceChannels(true);
-        if (service.paused) tools.invalidate(); else tools.resetNavigation();
-        widgets.setPaused(service.paused); tools.syncPaused();
-        for (const widget of widgets.widgets.values()) { widget.view.draw?.(); widget.view.render?.(); }
-        el('btn-pause').textContent = service.paused ? '恢复捕获' : '暂停捕获';
-        el('btn-pause').className = service.paused ? 'btn btn-success' : 'btn btn-secondary';
+        manuallyPaused = paused;
+        applyCapturePause();
+    }
+    function applyCapturePause(boundary, automaticResume = false) {
+        const paused = manuallyPaused || Boolean(visibilityCutoff);
+        if (workspaceChannels.paused === paused && service.paused === paused) return;
+        workspaceChannels.setPaused(paused, boundary?.timestamp ?? service.wallNow());
+        // Hold the last presented frame while parsers close and alignment catches up.
+        if (paused && !visibilityCutoff && workspaceChannels.mappings.length) {
+            pauseDrain = { epoch: workspaceChannels.epoch, targets: null };
+            widgets.setWorkspacePresentationDeferred(true);
+        }
+        service.pause(paused, boundary);
+        for (const { capture } of connectionSources.values()) {
+            if (!automaticResume || paused || !capture.memory.blockedReason) capture.pause(paused, boundary);
+        }
+        if (pauseDrain && paused) pauseDrain.targets = (alignmentReplay?.capture ?? workspaceChannels).alignmentTargets(allConnections());
+        if (paused) tools.invalidate(); else tools.resetNavigation();
+        widgets.setPaused(paused);
+        if (!paused) { finishPauseDrain(); scheduleSourceUi(); }
+        tools.syncPaused();
+        if (!visibilityCutoff) for (const widget of widgets.widgets.values()) { widget.view.draw?.(); widget.view.render?.(); }
+        if (pauseDrain && paused) {
+            cancelWorkspacePump();
+            pumpWorkspaceChannels(true);
+        }
+        el('btn-pause').textContent = paused ? '恢复捕获' : '暂停捕获';
+        el('btn-pause').className = paused ? 'btn btn-success' : 'btn btn-secondary';
     }
     listen(el('btn-pause'), 'click', () => setPaused(!service.paused));
     listen(document, 'keydown', event => {
@@ -1544,7 +1985,9 @@ async function startSerialPlotterApplication() {
         service.clear();
         for (const { capture } of connectionSources.values()) capture.clear();
         workspaceChannels.clear();
+        finishPauseDrain();
         workspaceChannels.pauses.length = 0;
+        visibilityPauses.length = 0;
         if (workspaceChannels.paused) workspaceChannels.pauseStarted = service.wallNow();
         tools.invalidate(); rates.clear(); draws.clear();
         for (const widget of widgets.widgets.values()) widget.view.clear();
@@ -1568,7 +2011,7 @@ async function startSerialPlotterApplication() {
         status('capture-memory-status', message);
     }
     function updateStats() {
-        if (disposed) return;
+        if (disposed || visibilityCutoff) return;
         service.memory.enforce();
         for (const source of connectionSources.values()) { source.capture.memory.enforce(); connectionView.refresh(source); }
         updateMemoryStatus();
@@ -1631,6 +2074,7 @@ async function startSerialPlotterApplication() {
         return { version: 3, global: { ...globals, channelNames: [...globals.channelNames], channelRecords: widgets.getChannelRegistry().toJSON() }, widgets: widgets.serialize(),
             workspace: workspace.serialize(), nextNumber: widgets.nextNumber, uiLayout: { ...uiLayout },
             dataEngine: dataEngine.serialize(), workspaceChannels: workspaceChannels.settings, serialSources: { nextNumber: nextConnectionSourceNumber, bindings: portBindings.snapshot(),
+                bridgeBindings: [...bridgeBindings.values()],
                 entries: [...connectionSources.values()].map(({ settings, capture }) => {
                     const engine = capture.dataEngine;
                     const { channelsCount, channelNames, channelColors, channelDefinitions, rebuildHistory } = engine.globals;
@@ -1675,6 +2119,7 @@ async function startSerialPlotterApplication() {
         engineView.rebuildDrafts = new WeakMap();
         engineView.channels.metadataDrafts = new WeakMap();
         connectionView.clearFormDrafts();
+        finishPauseDrain();
         cancelAlignmentReplay();
         const wasRestoring = restoring, revision = ++importRevision; restoring = true;
         try {
@@ -1896,17 +2341,20 @@ async function startSerialPlotterApplication() {
         endPanelResize(null);
         if (saveTimer !== null) saveNow();
         disposed = true; if (saveTimer !== null) clearTimeout(saveTimer);
+        clearTimeout(visibilityTimer);
         if (uiFrame !== null) cancelAnimationFrame(uiFrame);
         if (workspaceChannelTimer !== null) clearTimeout(workspaceChannelTimer);
         alignmentReplay?.capture.dispose(); resetTaskProgress();
         workspaceChannelView.dispose(); workspaceChannels.dispose();
         clearInterval(statsTimer); regularProtocolView.dispose(); commandRunner.dispose(); commandView.dispose(); sendController.stop(); sendController.dispose?.(); exportView.dispose(); widgetExportView.dispose();
         engineView.dispose(); tools.dispose(); widgets.dispose(); workspace.dispose();
+        closeBridgeBinding();
+        bridgeWorkspace.dispose();
         connectionView.dispose();
         for (const source of connectionSources.values()) dropConnectionSource(source);
         service.dispose();
         for (const cleanup of cleanups.splice(0)) cleanup();
-        for (const adapter of [serialAdapter, netAdapter]) releaseTransport(adapter);
+        for (const adapter of new Set([serialAdapter, netAdapter, primarySource.adapter])) releaseTransport(adapter);
         return workspaceStorage.dispose();
     }
     installWidgets(initial); restoring = false; setTaskProgress('config-restore'); updateStats();

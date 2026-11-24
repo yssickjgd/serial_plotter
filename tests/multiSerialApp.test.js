@@ -492,7 +492,11 @@ test('serial and multiple network sources connect, receive and send independentl
     f.context.WebSocket = class {
         static OPEN = 1;
         static CLOSING = 2;
-        constructor() { this.readyState = 0; this.sent = []; sockets.push(this); }
+        constructor(url) {
+            this.readyState = 0; this.sent = [];
+            if (url.endsWith('/serial')) queueMicrotask(() => this.onerror());
+            else sockets.push(this);
+        }
         send(value) { this.sent.push(value); }
         close() { this.readyState = this.constructor.CLOSING; }
         open() { this.readyState = this.constructor.OPEN; this.onopen(); }
@@ -551,7 +555,8 @@ test('serial and multiple network sources connect, receive and send independentl
     assert.equal(f.get('wrap-local-port').hidden, true);
     f.change('net-port', '0'); saveSerialConfig(f);
     assert.match(f.get('serial-config-error').textContent, /端口/);
-    assert.equal(udp.settings.mode, 'udp');
+    assert.equal(udp.settings.mode, 'tcp-server');
+    assert.equal(udp.settings.port, '9002');
     f.change('net-port', '9004'); saveSerialConfig(f);
     assert.equal(udp.settings.mode, 'tcp-server');
     assert.ok(byte.capture === udp.capture);
@@ -650,6 +655,33 @@ test('adding a source immediately shows its parameters in the communication tab'
     assert.equal(f.get('serial-source-nav').querySelector('[aria-current="true"]').getAttribute('aria-controls'), 'serial-2-details');
 });
 
+test('all five connection modes apply and save immediately without committing other fields', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    f.click('serial-manager-open');
+    for (const id of ['primary', 'serial-2']) {
+        if (id !== 'primary') f.click('serial-source-add');
+        const savedMode = () => id === 'primary' ? f.app.getConfig().global.connType : f.app.serialSources.get(id).settings.mode;
+        const prefix = id === 'primary' ? 'serial-primary' : id;
+        f.change('serial-baud', '1250000');
+        for (const mode of ['bridge-serial', 'tcp-client', 'tcp-server', 'udp', 'serial']) {
+            f.change('conn-type', mode);
+            assert.equal(savedMode(), mode);
+            assert.equal(f.get(prefix + '-connect').disabled, false);
+            assert.equal(f.get(prefix + '-bind').hidden, !['serial', 'bridge-serial'].includes(mode));
+        }
+        assert.equal(f.get('serial-baud').value, '1250000');
+        assert.equal(id === 'primary' ? Number(f.app.getConfig().global.serialBaud) : f.app.serialSources.get(id).settings.baudRate, 115200);
+    }
+    f.change('conn-type', 'bridge-serial');
+    await f.app.flushConfig();
+    const saved = JSON.parse(f.storage.get('serialplot_v3_config'));
+    assert.equal(saved.serialSources.entries[0].mode, 'bridge-serial');
+    assert.equal(saved.serialSources.entries[0].baudRate, 115200);
+    assert.match(f.get('serial-mode-help').textContent, /休眠/);
+    assert.match(f.get('serial-mode-help').textContent, /start-bridge\.bat/);
+    assert.match(f.get('serial-mode-help').textContent, /start-bridge\.sh/);
+});
+
 test('serial configuration is a draft until saved and connected ports keep their link settings', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const port = makePort();
@@ -679,7 +711,7 @@ test('serial configuration is a draft until saved and connected ports keep their
     assert.equal(dialog().open, true);
     assert.equal(f.get('serial-config-form').hidden, false);
     assert.equal(f.app.serialSources.size, 1);
-    assert.match(f.get('serial-config-status').textContent, /已更新/);
+    assert.match(f.get('serial-config-status').textContent, /Bridge/);
     assert.equal(selections, 0);
     assert.match(f.get('serial-2-summary').textContent, /1,250,000.*8N1/);
 
@@ -863,4 +895,372 @@ test('renaming the primary serial port updates the bound source labels and survi
     const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
     assert.equal(restored.get('serial-primary-label').textContent, '主采样');
     assert.equal(restored.app.getConfig().global.serialBaud, '115200');
+});
+
+async function backloggedWorkspace(t) {
+    const f = bootApplication();
+    t.after(() => f.app.dispose());
+    const useUint8 = async () => {
+        f.change('engine-mode', 'Data_Array'); f.change('chk-header', false);
+        f.change('chk-footer', false); f.change('data-type', 'uint8');
+        await f.app.engineView.apply();
+    };
+    await useUint8();
+    addSerial(f);
+    f.selectConnection('serial-2', 'engine-parsing');
+    await useUint8();
+    f.click('serial-manager-close');
+    f.change('max-points', '12000');
+    f.click('workspace-channel-auto-map');
+    const wave = f.app.widgets.create({ type: 'wave', settings: { connectionSource: 'workspace' } });
+    f.app.widgets.setChannelVisible(1, true);
+    const captures = [f.app.service, f.app.serialSources.get('serial-2').capture];
+    const start = Date.now() - 20000;
+    const feed = (batches, size, first) => {
+        for (let n = 0; n < batches; n++) {
+            const bytes = new Uint8Array(size).fill(n + 1);
+            for (const capture of captures) capture.receive(bytes, { timestamp: start + first + 100 * n });
+        }
+    };
+    feed(2, 25, 0);
+    await f.tick(100);
+    return { ...f, wave, captures, start, feed,
+        pressP() { f.document.dispatchEvent({ type: 'keydown', key: 'p', target: f.document.body }); } };
+}
+
+test('pausing under alignment backlog holds the waveform until one automatic final draw', async t => {
+    const f = await backloggedWorkspace(t);
+    const view = f.wave.view;
+    f.feed(60, 50, 200);
+    const previous = view._drawState.aligned.last, before = view.completedDraws;
+    f.pressP();
+    assert.ok(f.captures.every(capture => capture.paused));
+    assert.match(f.get('history-rebuild-progress').textContent, /整理暂停前/);
+    assert.equal(f.get('nav-jump-button').disabled, true);
+    assert.equal(view._drawState.aligned.last, previous);
+    view.canvas.dispatchEvent({ type: 'pointermove', clientX: 70, clientY: 60, buttons: 0 });
+    assert.equal(view.completedDraws, before);
+    const retained = f.captures.map(capture => capture.history.endByte);
+    f.feed(1, 5, 6300);
+    await f.tick(100);
+    assert.deepEqual(f.captures.map(capture => capture.history.endByte), retained);
+    assert.equal(view._drawState.aligned.last, f.start + 6100);
+    assert.equal(view.completedDraws, before + 1);
+    assert.doesNotMatch(f.get('history-rebuild-progress').textContent, /整理暂停前/);
+    assert.equal(f.get('nav-jump-button').disabled, false);
+    view.canvas.dispatchEvent({ type: 'pointermove', clientX: 120, clientY: 60, buttons: 0 });
+    assert.equal(view._drawState.aligned.last, f.start + 6100);
+});
+
+test('pause catch-up preserves a historical viewport and can be interrupted by resume', async t => {
+    const f = await backloggedWorkspace(t);
+    const view = f.wave.view;
+    view.setPlotWindowPoints(80);
+    assert.equal(view.jumpToFrame(20), true);
+    view.draw();
+    const anchor = { ...view._drawState.aligned };
+    f.feed(40, 50, 200);
+    f.pressP();
+    await f.tick(100);
+    assert.deepEqual({ ...view._drawState.aligned }, anchor);
+    assert.equal(view.vp.time.autoFollow, false);
+
+    f.pressP();
+    f.feed(25, 50, 4200);
+    f.pressP();
+    assert.match(f.get('history-rebuild-progress').textContent, /整理暂停前/);
+    f.pressP();
+    assert.ok(f.captures.every(capture => !capture.paused));
+    assert.doesNotMatch(f.get('history-rebuild-progress').textContent, /整理暂停前/);
+    f.feed(1, 50, 6800);
+    await f.tick(100);
+    assert.equal(view.vp.time.autoFollow, true);
+    assert.equal(view._drawState.aligned.last, f.start + 6800);
+});
+
+test('foreground return wakes a deferred alignment timer without mouse input', async t => {
+    const f = await backloggedWorkspace(t);
+    f.feed(40, 50, 200);
+    const deferred = [...f.timers.values()].find(timer => timer.fn.toString().includes('pumpWorkspaceChannels()'));
+    assert.ok(deferred);
+    deferred.due += 10000;
+    f.document.hidden = false;
+    f.document.dispatchEvent({ type: 'visibilitychange' });
+    await f.tick(100);
+    assert.equal(f.wave.view._drawState.aligned.last, f.start + 4100);
+});
+
+function changeVisibility(f, hidden) {
+    f.document.hidden = hidden;
+    f.document.dispatchEvent({ type: 'visibilitychange' });
+}
+
+test('visible-only capture belongs to the communication channel group and restores from configuration', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const option = f.get('capture-visible-only');
+    assert.ok(option, 'the communication panel offers a visible-only capture checkbox');
+    assert.equal(option.closest('.control-group'), f.get('btn-connect').closest('.control-group'));
+    assert.equal(option.checked, false);
+    changeVisibility(f, true);
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(1));
+    assert.equal(f.app.service.history.endByte, 1, 'background capture is the default');
+    changeVisibility(f, false);
+    f.change('capture-visible-only', true);
+    const saved = JSON.parse(JSON.stringify(f.app.getConfig()));
+    assert.equal(saved.global.captureVisibleOnly, true);
+
+    const restored = bootApplication(saved, { hidden: true }); t.after(() => restored.app.dispose());
+    assert.equal(restored.get('capture-visible-only').checked, true);
+    restored.app.serialAdapter.onDataCallback(Uint8Array.of(2));
+    assert.equal(restored.app.service.history.endByte, 1, 'the startup grace period permits brief background capture');
+    await restored.tick(5000);
+    restored.app.serialAdapter.onDataCallback(Uint8Array.of(9));
+    assert.equal(restored.app.service.history.endByte, 1, 'an initially hidden page applies its saved option after the grace period');
+    changeVisibility(restored, false);
+    restored.app.serialAdapter.onDataCallback(Uint8Array.of(3));
+    assert.equal(restored.app.service.history.endByte, 2);
+
+    const legacy = JSON.parse(JSON.stringify(saved));
+    delete legacy.global.captureVisibleOnly;
+    restored.app.applyConfig(legacy);
+    assert.equal(restored.get('capture-visible-only').checked, false);
+    changeVisibility(restored, true);
+    await restored.tick(5100);
+    restored.app.serialAdapter.onDataCallback(Uint8Array.of(4));
+    assert.equal(restored.app.service.history.snapshot().at(-1).bytes[0], 4);
+});
+
+test('visible-only capture skips hidden data for both sources and resumes with fresh complete frames', async t => {
+    const f = await backloggedWorkspace(t);
+    const secondary = f.app.serialSources.get('serial-2');
+    const adapters = [f.app.serialAdapter, secondary.adapter];
+    const previousBytes = f.captures.map(capture => capture.history.endByte);
+    let now = f.start + 200;
+    for (const capture of f.captures) capture.wallNow = () => now;
+    f.change('capture-visible-only', true);
+    f.window.dispatchEvent({ type: 'blur' });
+    adapters.forEach(adapter => adapter.onDataCallback(Uint8Array.of(123)));
+    assert.deepEqual(f.captures.map(capture => capture.history.endByte), previousBytes.map(length => length + 1),
+        'a visible page continues to acquire even when another window has focus');
+
+    changeVisibility(f, true);
+    now += 4999;
+    await f.tick(4999);
+    adapters.forEach(adapter => adapter.onDataCallback(Uint8Array.of(124)));
+    assert.deepEqual(f.captures.map(capture => capture.history.endByte), previousBytes.map(length => length + 2));
+    now += 1;
+    await f.tick(1);
+    const initialFrames = f.captures.map(capture => capture.numericSource.frames.length);
+    for (const adapter of adapters) adapter.onDataCallback(new Uint8Array(2500).fill(222));
+    now += 1500;
+    await f.tick(1500);
+    assert.deepEqual(f.captures.map(capture => capture.numericSource.frames.length), initialFrames);
+    assert.deepEqual(f.captures.map(capture => capture.history.endByte), previousBytes.map(length => length + 2));
+    changeVisibility(f, false);
+    now += 1;
+    adapters.forEach((adapter, index) => adapter.onDataCallback(Uint8Array.of(130 + index)));
+    await f.tick(100);
+    for (const [index, capture] of f.captures.entries()) {
+        const frames = capture.numericSource.frames;
+        assert.equal(frames.length, initialFrames[index] + 1);
+        assert.equal(frames.getValue(0, frames.length - 1), 130 + index);
+        const events = f.wave.source.frames.events.get(index);
+        assert.equal(events.at(-1).value, 130 + index, 'the global waveform resumes at the new sample');
+        assert.equal(events.at(-1).origin.alignedTime, now - 1500, 'only the interval after the grace period is folded');
+        assert.equal(events.some(entry => entry.value === 222), false);
+    }
+
+    f.pressP();
+    changeVisibility(f, true);
+    now += 5100;
+    await f.tick(5100);
+    changeVisibility(f, false);
+    adapters.forEach(adapter => adapter.onDataCallback(Uint8Array.of(200)));
+    assert.ok(f.captures.every(capture => capture.paused));
+    assert.deepEqual(f.captures.map(capture => capture.history.endByte), previousBytes.map(length => length + 3));
+    f.pressP();
+    assert.ok(f.captures.every(capture => !capture.paused));
+});
+
+test('visible-only capture leaves short switches untouched and cuts stale queues after throttled hidden timers', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    addSerial(f, { 'conn-type': 'udp' });
+    const adapters = [f.app.serialAdapter, f.app.serialSources.get('serial-2').adapter];
+    f.change('capture-visible-only', true);
+    const observations = adapters.map(transport => {
+        const grace = [], gates = [];
+        let receiving = true;
+        transport.setCaptureGrace = milliseconds => grace.push(milliseconds);
+        transport.setCaptureVisible = visible => {
+            if (receiving !== visible) gates.push(visible);
+            receiving = visible;
+        };
+        return { grace, gates };
+    });
+    changeVisibility(f, true);
+    for (const { grace } of observations) assert.deepEqual(grace, [5000], 'arm both transports as soon as the page hides');
+    await f.tick(3000);
+    changeVisibility(f, false);
+    await f.tick(2500);
+    for (const { grace, gates } of observations) {
+        assert.deepEqual(grace, [5000, null], 'returning early cancels the transport grace period');
+        assert.deepEqual(gates, [], 'a short absence leaves the original receive stream intact');
+    }
+    changeVisibility(f, true);
+    f.advanceClockWithoutTasks(10000);
+    for (const { gates } of observations) assert.deepEqual(gates, [], 'the simulated browser did not run the hidden timer');
+    changeVisibility(f, false);
+    for (const { grace, gates } of observations) {
+        assert.deepEqual(gates, [false, true], 'foreground recovery resynchronizes the stream even when the timer never ran');
+        assert.deepEqual(grace, [5000, null, 5000, null], 'both transports are ready for the next background transition');
+    }
+});
+
+test('visible-only capture preserves an independent memory-pressure pause when the other source resumes', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    addSerial(f);
+    const secondary = f.app.serialSources.get('serial-2');
+    const check = secondary.capture.memory.beforeReceive;
+    secondary.capture.memory.beforeReceive = () => false;
+    secondary.adapter.onDataCallback(Uint8Array.of(1));
+    secondary.capture.memory.beforeReceive = check;
+    const reason = secondary.capture.memory.blockedReason;
+    assert.ok(reason);
+    assert.equal(secondary.capture.paused, true);
+    assert.equal(f.app.service.paused, false);
+
+    f.change('capture-visible-only', true);
+    changeVisibility(f, true);
+    await f.tick(5000);
+    changeVisibility(f, false);
+    assert.equal(secondary.capture.paused, true, 'automatic foreground recovery must preserve the memory-pressure pause');
+    assert.equal(secondary.capture.memory.blockedReason, reason);
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(2));
+    secondary.adapter.onDataCallback(Uint8Array.of(3));
+    assert.equal(f.app.service.history.endByte, 1);
+    assert.equal(secondary.capture.history.endByte, 0);
+});
+
+test('neither settings view shows the rapidly changing alignment backlog count', async t => {
+    const f = await backloggedWorkspace(t);
+    f.selectConnection('serial-2', 'engine-communication');
+    f.feed(12, 50, 200);
+    f.change('sidebar-sampling-source', 'serial-2');
+    assert.doesNotMatch(f.get('sidebar-timebase-state').textContent, /待对齐/);
+    assert.doesNotMatch(f.get('channel-timebase-state').textContent, /待对齐/);
+});
+
+test('source alignment reports unread frames evicted before the cursor caught up', async t => {
+    const f = await backloggedWorkspace(t);
+    f.change('max-points', '1000');
+    f.feed(26, 100, 200);
+    await f.tick(100);
+    const workspace = f.app.workspaceChannels;
+    assert.equal(workspace.cursors.get('primary').evictedUnread, 1600);
+    assert.equal(workspace.cursors.get('serial-2').evictedUnread, 1600);
+    for (const list of workspace.numericSource.frames.events.values())
+        assert.ok(list.some(event => event.origin?.breakBefore), 'the retained suffix starts a new trace segment');
+    assert.match(f.get('sidebar-timebase-state').textContent, /1[,， ]?600/);
+    assert.match(f.get('channel-timebase-state').textContent, /1[,， ]?600/);
+    assert.equal(workspace.numericSource.frames.liveTimeBounds(1000).last, f.start + 2700);
+});
+
+test('explicit Bridge mode binds and connects two independent serial sources', async t => {
+    const f = bootApplication();
+    t.after(() => f.app.dispose());
+    const ports = ['COM3', 'COM518'].map((path, index) => ({ path, label: path, identity: String(index + 1).repeat(64) }));
+    const opened = [];
+    let nativePrompts = 0, bridgeStatus = { serial: true };
+    const webPort = makePort();
+    f.context.navigator.serial = { getPorts: async () => [webPort], requestPort: async () => { nativePrompts++; return webPort; } };
+    f.S.BridgeSerialEngine = class {
+        backend = 'bridge';
+        static async probe() { return bridgeStatus; }
+        static async ports(token) { assert.equal(token, 'test-access'); return ports; }
+        onData(callback) { this.callback = callback; }
+        onStatusChange(callback) { this.status = callback; }
+        async connect(settings, binding, token) {
+            assert.equal(token, 'test-access');
+            if (!bridgeStatus?.serial) throw new Error('Bridge 串口不可用');
+            this.binding = binding;
+            opened.push([binding.path, settings.baudRate]);
+            this.status(true);
+        }
+        async disconnect() { this.status(false); }
+        async send() {}
+        dispose() {}
+    };
+    f.click('serial-manager-open'); await f.tick();
+    assert.match(f.get('serial-config-status').textContent, /Bridge 已运行/);
+    await chooseSerial(f);
+    assert.equal(nativePrompts, 1, 'Web mode uses the browser even when Bridge is running');
+    f.click('serial-primary-connect'); await waitForConnectionButton(f, 'serial-primary-connect');
+    f.change('conn-type', 'bridge-serial');
+    assert.equal(f.get('serial-primary-bind').disabled, false);
+    assert.equal(f.app.getConfig().global.connType, 'bridge-serial', f.get('engine-status').textContent);
+    addSerial(f, { 'conn-type': 'bridge-serial', 'serial-baud': '1250000' });
+    async function bind(id, path) {
+        f.selectConnection(id);
+        f.click(id === 'primary' ? 'serial-primary-bind' : id + '-bind');
+        await f.tick();
+        const chooser = f.get('bridge-serial-binding');
+        assert.equal(chooser.tagName, 'DIALOG');
+        assert.equal(chooser.open, true);
+        assert.equal(chooser.closest('#serial-config-dialog'), null);
+        assert.equal(f.get('serial-config-status').parentElement, f.get('serial-config-form'));
+        f.change('bridge-serial-token', 'test-access');
+        f.get('bridge-serial-token').dispatchEvent({ type: 'keydown', key: 'Enter' });
+        await f.tick();
+        assert.equal(f.get('bridge-serial-connect').disabled, true);
+        f.change('bridge-serial-port', path);
+        f.click('bridge-serial-connect'); await f.tick();
+        assert.equal(chooser.open, false);
+    }
+    f.selectConnection('primary');
+    f.click('serial-primary-bind');
+    f.get('bridge-serial-binding').dispatchEvent({ type: 'cancel' });
+    assert.equal(f.get('bridge-serial-binding').open, false);
+    assert.equal(f.get('serial-config-dialog').open, true);
+    await bind('primary', 'COM3');
+    await bind('serial-2', 'COM518');
+    assert.equal(nativePrompts, 1);
+    assert.deepEqual(opened, [['COM3', 115200], ['COM518', 1250000]]);
+    const config = f.app.getConfig();
+    assert.deepEqual(Array.from(config.serialSources.bridgeBindings, binding => [binding.id, binding.path]),
+        [['primary', 'COM3'], ['serial-2', 'COM518']]);
+    assert.equal(JSON.stringify(config).includes('test-access'), false);
+    assert.match(f.get('serial-2-summary').textContent, /Bridge.*COM518/);
+    const secondary = f.app.serialSources.get('serial-2');
+    secondary.adapter.callback(Uint8Array.of(5, 18));
+    assert.equal(secondary.capture.history.endByte, 2);
+    assert.equal(f.app.service.history.endByte, 0);
+    assert.equal(await f.app.sendController.sendBytes(Uint8Array.of(0x5a)), true);
+    assert.equal(f.app.service.stats.txBytes, 1);
+    f.click('serial-2-connect'); await f.tick();
+    assert.equal(secondary.connected, false);
+    assert.match(f.get('serial-primary-status').textContent, /已连接/);
+    f.change('conn-type', 'udp');
+    assert.equal(f.S.WidgetConfig.validateWorkspaceConfig(f.app.getConfig()).serialSources.bridgeBindings[1].path, 'COM518');
+    f.change('conn-type', 'bridge-serial');
+    assert.equal(f.get('serial-2-bind').textContent, '重新绑定');
+    f.click('btn-connect'); await f.tick();
+    assert.equal(secondary.connected, true);
+    assert.equal(opened.at(-1)[0], 'COM518');
+    assert.equal(config.global.connType, 'bridge-serial');
+    assert.equal(config.serialSources.entries[0].mode, 'bridge-serial');
+    assert.equal(f.S.WidgetConfig.validateWorkspaceConfig(config).serialSources.bridgeBindings.length, 2);
+    f.click('serial-manager-close');
+    bridgeStatus = { serial: false };
+    f.click('serial-manager-open'); await f.tick();
+    assert.match(f.get('serial-config-status').textContent, /仅提供 TCP \/ UDP/);
+    f.click('serial-manager-close');
+    bridgeStatus = null;
+    f.click('serial-manager-open'); await f.tick();
+    assert.match(f.get('serial-config-status').textContent, /Bridge 未响应/);
+    f.click('serial-2-connect'); await f.tick();
+    f.click('serial-2-connect'); await f.tick();
+    assert.match(f.get('serial-2-status').textContent, /Bridge 串口不可用/);
+    assert.equal(secondary.connected, false);
+    f.click('serial-2-bind'); await f.tick();
+    assert.equal(nativePrompts, 1, 'Bridge mode never opens the Web Serial chooser');
 });

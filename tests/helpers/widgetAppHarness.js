@@ -100,6 +100,8 @@ function bootApplication(config = null, options = {}) {
         releasePointerCapture() { this.capture = null; }
     }
     const document = new Element('#document');
+    document.hidden = Boolean(options.hidden);
+    Object.defineProperty(document, 'visibilityState', { get: () => document.hidden ? 'hidden' : 'visible' });
     document.createElement = tag => { const node = new Element(tag); if (tag === 'a') downloads.push(node); return node; };
     document.createDocumentFragment = () => new Element('#fragment');
     document.getElementById = id => document.querySelectorAll('*').find(node => node.id === id) ?? null;
@@ -149,6 +151,7 @@ function bootApplication(config = null, options = {}) {
             document.querySelector('[aria-controls="' + prefix + '-details"]').click();
             document.querySelector('[data-tab="' + tab + '"]').click();
         },
+        advanceClockWithoutTasks(ms) { clock += ms; },
         async tick(ms = 1000) {
             clock += ms;
             for (let i = 0; i < 1000; i++) { const due = [...timers].find(([, timer]) => timer.due <= clock); if (!due) break;

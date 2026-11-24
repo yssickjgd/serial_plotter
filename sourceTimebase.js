@@ -288,12 +288,13 @@
 
     // A single-source wave can preserve its seconds axis without copying retained samples.
     class SourcePlotTimeline {
-        constructor(source, timing) {
+        constructor(source, timing, projectReceiveTime = timestamp => timestamp) {
             this.source = source;
             this.frames = source.frames;
             this.generation = source.generation;
+            this.projectReceiveTime = projectReceiveTime;
             const rate = timing.mode === 'fixed' ? timing.sampleRate : 0;
-            this.sections = [{ from: 0, rate, start: 0, offset: -this.frames.originTimestamp }];
+            this.sections = [{ from: 0, rate, start: 0, offset: -projectReceiveTime(this.frames.originTimestamp) }];
         }
 
         get valid() { return this.source.frames === this.frames && this.source.generation === this.generation; }
@@ -306,7 +307,7 @@
                 if (this.sections[mid].from <= ordinal) low = mid + 1; else high = mid;
             }
             const { from, rate, start, offset } = this.sections[low - 1];
-            return rate ? start + (ordinal - from) * 1000 / rate : this.frames.timestampAt(index) + offset;
+            return rate ? start + (ordinal - from) * 1000 / rate : this.projectReceiveTime(this.frames.timestampAt(index)) + offset;
         }
 
         change(timing) {
@@ -316,7 +317,7 @@
             if (!Number.isFinite(secondsAxis)) return;
             const rate = timing.mode === 'fixed' ? timing.sampleRate : 0, from = ordinal + 1;
             const start = rate ? secondsAxis + 1000 / rate : secondsAxis;
-            const offset = secondsAxis - this.frames.timestampAt(last);
+            const offset = secondsAxis - this.projectReceiveTime(this.frames.timestampAt(last));
             if (this.sections.at(-1).from === from) this.sections.pop();
             this.sections.push({ from, rate, start, offset });
             const first = this.frames.frameOrdinalAt(0);

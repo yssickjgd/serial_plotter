@@ -499,6 +499,44 @@ test('time seconds, frequency bins, and logarithmic axes use their selected unit
         'the cursor in the middle of a log axis lands near the geometric mean');
 });
 
+test('single-source receive-time traces, cursor and zoom use visible capture intervals', () => {
+    const { plotter, labels } = createPlotter();
+    plotter.clear();
+    plotter.receiveTimeAxis = true;
+    plotter.projectReceiveTime = stamp => stamp - 1000 - (stamp >= 11030 ? 10000 : 0);
+    plotter.setDisplayOptions({ displayMode: 'time', timeXUnit: 's' });
+    const stamps = [1010, 1020, 11030, 11040];
+    stamps.forEach((stamp, index) => plotter.addFrame([index], undefined, '', index + 1, stamp));
+    plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
+    labels.length = 0;
+    plotter.draw();
+    assert.equal(plotter._drawState.aligned.first, 10);
+    assert.equal(plotter._drawState.aligned.last, 40);
+    assert.deepEqual(Array.from(plotter._timeSeriesCache.series[0].times), [10, 20, 30, 40]);
+    assert.ok(labels.includes('Time: 0.015 s'));
+    assert.equal(plotter._timeBoundaryIndex(30, false), 2);
+    assert.equal(plotter._timeZoomStart(35, .5, 2), 2);
+    assert.deepEqual(stamps.map((_, i) => plotter.frames.timestampAt(i)), stamps);
+});
+
+test('timebase changes keep fixed-rate sections and fold hidden spans in receive-time sections', () => {
+    const { SourcePlotTimeline } = require('../sourceTimebase');
+    const { FrameBuffer } = require('../frameBuffer');
+    const frames = new FrameBuffer(1, 10);
+    const append = stamp => frames.append([1], undefined, '', frames.length + 1, stamp);
+    append(1010);
+    append(11020);
+    const project = stamp => stamp - 1000 - (stamp >= 11020 ? 10000 : 0) - (stamp >= 31050 ? 20000 : 0);
+    const timeline = new SourcePlotTimeline({ frames, generation: 1 }, { mode: 'receive' }, project);
+    timeline.change({ mode: 'fixed', sampleRate: 100 });
+    append(11030);
+    append(11035);
+    timeline.change({ mode: 'receive' });
+    append(31050);
+    assert.deepEqual(Array.from({ length: frames.length }, (_, i) => timeline.timestampAt(i)), [0, 10, 20, 30, 45]);
+    assert.equal(frames.timestampAt(4), 31050);
+});
+
 for (const mode of ['sample index', 'fixed rate', 'receive time']) {
     test('live time ticks retain their values as the ' + mode + ' window moves', () => {
         const { plotter, labels } = createPlotter();

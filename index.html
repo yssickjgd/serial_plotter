@@ -39,6 +39,8 @@
                             <button id="serial-disconnect-all" class="btn btn-secondary" type="button">全部断开</button>
                             <button id="serial-manager-open" class="btn btn-secondary" type="button" aria-haspopup="dialog">配置</button>
                         </div>
+                        <label class="option-label"><input type="checkbox" id="capture-visible-only" aria-describedby="capture-visible-hint" /> 仅在页面可见时采集</label>
+                        <span id="capture-visible-hint" class="hint-text">切到后台 5 秒内继续采集，超过后暂停。返回页面时跳过暂停期间的数据。</span>
                         <div class="status-text" id="connection-status" role="status"></div>
                     </div>
 
@@ -768,220 +770,234 @@
                     <div class="tab-bar"><button class="tab-btn" data-tab="engine-communication">通讯</button><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-raw-records">原始记录</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
                     <div id="engine-communication" class="tab-content" hidden>
                         <h3 id="engine-communication-heading" class="engine-pane-heading" tabindex="-1">通讯</h3>
-                        <div id="serial-source-list" class="serial-source-list"></div>
-                        <div id="serial-config-form" class="control-group serial-inline-config" hidden>
-                            <div class="section-title">连接参数</div>
-                            <div class="connection-config-fields">
-                                <div class="input-group">
-                                    <label for="conn-type">模式</label>
-                                    <select id="conn-type">
-                                        <option value="serial">原生串口</option>
-                                        <option value="tcp-client">TCP 客户端</option>
-                                        <option value="tcp-server">TCP 服务端</option>
-                                        <option value="udp">UDP</option>
-                                    </select>
-                                </div>
-                                <div id="serial-config-name-wrap" class="input-group">
-                                    <label for="serial-config-name">来源名称</label>
-                                    <input id="serial-config-name" type="text" maxlength="80" />
-                                </div>
-                            </div>
-                            <p id="serial-config-locked" class="hint-text" hidden>断开该来源后可修改模式和连接参数。</p>
-                            <div id="serial-config-parameters">
-                                <div class="serial-config-fields">
+                        <div class="engine-pane-body">
+                            <div id="serial-source-list" class="serial-source-list"></div>
+                            <div id="serial-config-form" class="control-group serial-inline-config" hidden>
+                                <div class="section-title">连接参数</div>
+                                <div class="connection-config-fields">
                                     <div class="input-group">
-                                        <label for="serial-baud">波特率</label>
-                                        <input id="serial-baud" type="text" inputmode="numeric" />
+                                        <label for="conn-type">模式</label>
+                                        <select id="conn-type" aria-describedby="serial-config-status serial-mode-help">
+                                            <option value="serial">Web-原生串口</option>
+                                            <option value="bridge-serial">Bridge-原生串口</option>
+                                            <option value="tcp-client">Bridge-TCP 客户端</option>
+                                            <option value="tcp-server">Bridge-TCP 服务端</option>
+                                            <option value="udp">Bridge-UDP</option>
+                                        </select>
                                     </div>
-                                    <div class="input-group">
-                                        <label for="serial-data">数据位</label>
-                                        <select id="serial-data"><option value="8">8</option><option value="7">7</option></select>
-                                    </div>
-                                    <div class="input-group">
-                                        <label for="serial-stop">停止位</label>
-                                        <select id="serial-stop"><option value="1">1</option><option value="2">2</option></select>
-                                    </div>
-                                    <div class="input-group">
-                                        <label for="serial-parity">奇偶校验</label>
-                                        <select id="serial-parity"><option value="none">无</option><option value="even">偶</option><option value="odd">奇</option></select>
+                                    <div id="serial-config-name-wrap" class="input-group">
+                                        <label for="serial-config-name">来源名称</label>
+                                        <input id="serial-config-name" type="text" maxlength="80" />
                                     </div>
                                 </div>
-                            </div>
-                            <div id="connection-network-parameters" hidden>
-                                <div id="config-net" class="sidebar-stack">
-                                    <div class="input-group" id="wrap-net-host">
-                                        <label for="net-host">远端地址</label>
-                                        <input type="text" id="net-host" spellcheck="false" />
-                                    </div>
-                                    <div class="connection-config-fields">
+                                <p id="serial-config-status" class="hint-text" role="status">正在检测 Bridge…</p>
+                                <p id="serial-config-locked" class="hint-text" hidden>断开该来源后可修改模式和连接参数。</p>
+                                <div id="serial-config-parameters">
+                                    <div class="serial-config-fields">
                                         <div class="input-group">
-                                            <label for="net-port" id="net-port-label">远端端口</label>
-                                            <input type="text" id="net-port" inputmode="numeric" />
+                                            <label for="serial-baud">波特率</label>
+                                            <input id="serial-baud" type="text" inputmode="numeric" />
                                         </div>
-                                        <div class="input-group" id="wrap-local-port">
-                                            <label for="net-local">本地端口</label>
-                                            <input type="text" id="net-local" inputmode="numeric" placeholder="默认与远端一致" />
+                                        <div class="input-group">
+                                            <label for="serial-data">数据位</label>
+                                            <select id="serial-data"><option value="8">8</option><option value="7">7</option></select>
+                                        </div>
+                                        <div class="input-group">
+                                            <label for="serial-stop">停止位</label>
+                                            <select id="serial-stop"><option value="1">1</option><option value="2">2</option></select>
+                                        </div>
+                                        <div class="input-group">
+                                            <label for="serial-parity">奇偶校验</label>
+                                            <select id="serial-parity"><option value="none">无</option><option value="even">偶</option><option value="odd">奇</option></select>
                                         </div>
                                     </div>
-                                    <p class="hint-text">连接前请在本机启动 <code>node bridge.js</code>。</p>
+                                </div>
+                                <div id="connection-network-parameters" hidden>
+                                    <div id="config-net" class="sidebar-stack">
+                                        <div class="input-group" id="wrap-net-host">
+                                            <label for="net-host">远端地址</label>
+                                            <input type="text" id="net-host" spellcheck="false" />
+                                        </div>
+                                        <div class="connection-config-fields">
+                                            <div class="input-group">
+                                                <label for="net-port" id="net-port-label">远端端口</label>
+                                                <input type="text" id="net-port" inputmode="numeric" />
+                                            </div>
+                                            <div class="input-group" id="wrap-local-port">
+                                                <label for="net-local">本地端口</label>
+                                                <input type="text" id="net-local" inputmode="numeric" placeholder="默认与远端一致" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <p id="serial-config-error" class="serial-config-error" role="alert" hidden></p>
+                                <div id="serial-mode-help" class="serial-mode-help">
+                                    <p class="hint-text">选择模式后立即生效。修改其他连接参数后，点击「应用设置」。</p>
+                                    <p class="hint-text"><strong>Web-原生串口</strong>　由浏览器直接收发，无需启动 Bridge。网页休眠时，读取、发送和绘图可能暂停。</p>
+                                    <p class="hint-text"><strong>Bridge</strong>　由本机进程收发。只要电脑和 Bridge 仍在运行，网页休眠时 Bridge 可继续接收串口数据，并完成已交给它的发送。网页唤醒后继续绘图，重连可补取仍保留的串口历史。网页发起的定时发送可能延迟。</p>
+                                    <p class="hint-text"><strong>启动 Bridge</strong>　Windows 双击 <code>start-bridge.bat</code>，Linux 运行 <code>sh ./start-bridge.sh</code>。启动成功后会自动打开本页面。授权时使用终端显示的访问码。</p>
                                 </div>
                             </div>
-                            <p id="serial-config-error" class="serial-config-error" role="alert" hidden></p>
-                            <p id="serial-config-status" class="hint-text" role="status">点击「应用设置」生效。</p>
+                            <div class="sidebar-stack source-timing-settings" id="serial-config-alignment">
+                                <section class="control-group" id="channel-time-alignment-group" aria-labelledby="channel-time-alignment-title">
+                                    <div class="section-title" id="channel-time-alignment-title">来源时间对齐</div>
+                                    <div class="input-group">
+                                        <label for="serial-config-offset">对齐偏移（ms）</label>
+                                        <input id="serial-config-offset" type="number" step="1" value="0" aria-describedby="channel-alignment-hint" />
+                                    </div>
+                                    <div class="input-group">
+                                        <label for="channel-timebase-mode">时间基准</label>
+                                        <select id="channel-timebase-mode">
+                                            <option value="receive">电脑接收时间</option>
+                                            <option value="fixed">按设定帧率推算时间</option>
+                                        </select>
+                                    </div>
+                                    <div id="channel-timebase-fixed" class="input-group" hidden>
+                                        <label for="channel-timebase-rate">该来源的帧率（帧/秒）</label>
+                                        <input id="channel-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
+                                    </div>
+                                    <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。点击「应用设置」生效。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
+                                </section>
+                                <section class="control-group" id="channel-sampling-group" aria-labelledby="channel-sampling-title">
+                                    <div class="section-title" id="channel-sampling-title">同步采样</div>
+                                    <div id="channel-resync-fixed" class="sidebar-stack" hidden>
+                                        <label class="option-label"><input id="channel-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
+                                        <div id="channel-resync-settings" class="sidebar-stack">
+                                            <span id="channel-resync-summary" class="hint-text">以下三项共同决定何时自动重新同步。偏差持续同向超出延迟阈值，并同时满足连续批次数和确认时间条件时，才校正来源时轴。估算出缺口后，按欠采样恢复策略尝试补全。</span>
+                                            <div class="input-group">
+                                                <label for="channel-resync-delay">延迟阈值（ms）</label>
+                                                <input id="channel-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="channel-resync-delay-hint" />
+                                                <span id="channel-resync-delay-hint" class="hint-text">比较每批末帧的实际接收时刻与预计时刻，以正常交付延迟为基准判断偏差。连续丢帧可能造成持续偏差，批量交付也可能造成短暂偏差。有效阈值至少为两个帧周期。</span>
+                                            </div>
+                                            <div class="input-group">
+                                                <label for="channel-resync-batches">连续批次数</label>
+                                                <input id="channel-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="channel-resync-batches-hint" />
+                                                <span id="channel-resync-batches-hint" class="hint-text">偏差连续同向超出延迟阈值的批数达到该值，即满足连续批次数条件。</span>
+                                            </div>
+                                            <div class="input-group">
+                                                <label for="channel-resync-confirmation">确认时间（ms）</label>
+                                                <input id="channel-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="channel-resync-confirmation-hint" />
+                                                <span id="channel-resync-confirmation-hint" class="hint-text">从首个超阈批次起，偏差同向超阈的持续时间达到该值，即满足确认时间条件。默认 100 ms，设为 0 时无需额外等待。</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="input-group">
+                                        <label for="channel-grid-method">欠采样恢复策略</label>
+                                        <select id="channel-grid-method" aria-describedby="channel-grid-method-hint">
+                                            <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
+                                            <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
+                                            <option value="spline">局部自然三次样条（4 点）</option>
+                                        </select>
+                                        <span id="channel-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。</span>
+                                    </div>
+                                    <p id="channel-timebase-state" class="hint-text" role="status" hidden></p>
+                                    <p id="channel-alignment-status" class="hint-text is-error" role="status" hidden></p>
+                                </section>
+                            </div>
+                            <p class="hint-text">完成端口绑定后自动连接该来源。</p>
                         </div>
-                        <div class="sidebar-stack source-timing-settings" id="serial-config-alignment">
-                            <section class="control-group" id="channel-time-alignment-group" aria-labelledby="channel-time-alignment-title">
-                                <div class="section-title" id="channel-time-alignment-title">来源时间对齐</div>
-                                <div class="input-group">
-                                    <label for="serial-config-offset">对齐偏移（ms）</label>
-                                    <input id="serial-config-offset" type="number" step="1" value="0" aria-describedby="channel-alignment-hint" />
-                                </div>
-                                <div class="input-group">
-                                    <label for="channel-timebase-mode">时间基准</label>
-                                    <select id="channel-timebase-mode">
-                                        <option value="receive">电脑接收时间</option>
-                                        <option value="fixed">按设定帧率推算时间</option>
-                                    </select>
-                                </div>
-                                <div id="channel-timebase-fixed" class="input-group" hidden>
-                                    <label for="channel-timebase-rate">该来源的帧率（帧/秒）</label>
-                                    <input id="channel-timebase-rate" type="number" min="0.001" max="1000000" step="any" />
-                                </div>
-                                <p id="channel-alignment-hint" class="hint-text">以主连接为基准。正值后移，负值前移。点击「应用设置」生效。帧解析中的「重建历史数据」决定是否按新时基重新对齐已保留的波形。</p>
-                            </section>
-                            <section class="control-group" id="channel-sampling-group" aria-labelledby="channel-sampling-title">
-                                <div class="section-title" id="channel-sampling-title">同步采样</div>
-                                <div id="channel-resync-fixed" class="sidebar-stack" hidden>
-                                    <label class="option-label"><input id="channel-resync-enabled" type="checkbox" checked /> 自动重新同步</label>
-                                    <div id="channel-resync-settings" class="sidebar-stack">
-                                        <span id="channel-resync-summary" class="hint-text">以下三项共同决定何时自动重新同步。偏差持续同向超出延迟阈值，并同时满足连续批次数和确认时间条件时，才校正来源时轴。估算出缺口后，按欠采样恢复策略尝试补全。</span>
-                                        <div class="input-group">
-                                            <label for="channel-resync-delay">延迟阈值（ms）</label>
-                                            <input id="channel-resync-delay" type="number" min="0" max="60000" step="any" value="5" aria-describedby="channel-resync-delay-hint" />
-                                            <span id="channel-resync-delay-hint" class="hint-text">比较每批末帧的实际接收时刻与预计时刻，以正常交付延迟为基准判断偏差。连续丢帧可能造成持续偏差，批量交付也可能造成短暂偏差。有效阈值至少为两个帧周期。</span>
-                                        </div>
-                                        <div class="input-group">
-                                            <label for="channel-resync-batches">连续批次数</label>
-                                            <input id="channel-resync-batches" type="number" min="1" max="1000" step="1" value="3" aria-describedby="channel-resync-batches-hint" />
-                                            <span id="channel-resync-batches-hint" class="hint-text">偏差连续同向超出延迟阈值的批数达到该值，即满足连续批次数条件。</span>
-                                        </div>
-                                        <div class="input-group">
-                                            <label for="channel-resync-confirmation">确认时间（ms）</label>
-                                            <input id="channel-resync-confirmation" type="number" min="0" max="60000" step="any" value="100" aria-describedby="channel-resync-confirmation-hint" />
-                                            <span id="channel-resync-confirmation-hint" class="hint-text">从首个超阈批次起，偏差同向超阈的持续时间达到该值，即满足确认时间条件。默认 100 ms，设为 0 时无需额外等待。</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="input-group">
-                                    <label for="channel-grid-method">欠采样恢复策略</label>
-                                    <select id="channel-grid-method" aria-describedby="channel-grid-method-hint">
-                                        <option value="hold">保持前值</option><option value="nearest">最近点（中点取后点）</option>
-                                        <option value="linear">线性插值（2 点）</option><option value="quadratic">局部二次多项式（3 点）</option>
-                                        <option value="spline">局部自然三次样条（4 点）</option>
-                                    </select>
-                                    <span id="channel-grid-method-hint" class="hint-text">高阶插值支撑点不足时，依次改用二次或线性插值。插值缺少有效前后点时留空。</span>
-                                </div>
-                                <p id="channel-timebase-state" class="hint-text" role="status" hidden></p>
-                                <p id="channel-alignment-status" class="hint-text is-error" role="status" hidden></p>
-                            </section>
-                        </div>
-                        <p class="hint-text">从浏览器选择串口后会自动连接该来源。TCP 和 UDP 通过本地 Bridge 连接。</p>
                     </div>
                     <div id="engine-parsing" class="tab-content active">
                         <h3 id="engine-parsing-heading" class="engine-pane-heading" tabindex="-1">帧解析</h3>
-                        <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。规则作用于使用该来源的控件。</span></div>
-                        <div class="control-group" id="engine-residual-timeout-settings"><div class="section-title">解析残帧超时 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">解析残帧超时（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">完整帧立即解析，残帧超时后重新同步。0 关闭。两项计时都开启时，建议与「原始记录空闲间隔」设为相同值。</span></div>
-                        <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
-                            <div class="control-group" id="frame-numeric-settings">
-                                <div class="section-title">数值解码 <span class="scope-badge">全局共用</span></div>
-                                <div class="row">
-                                    <div class="input-group">
-                                        <label>数据类型</label>
-                                        <select id="data-type">
-                                            <option value="int8">Int8</option>
-                                            <option value="uint8">UInt8</option>
-                                            <option value="int16">Int16</option>
-                                            <option value="uint16">UInt16</option>
-                                            <option value="int32">Int32</option>
-                                            <option value="uint32">UInt32</option>
-                                            <option value="int64">Int64</option>
-                                            <option value="uint64">UInt64</option>
-                                            <option value="float32" selected>Float32</option>
-                                            <option value="float64">Float64</option>
-                                        </select>
+                        <div class="engine-pane-body">
+                            <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。规则作用于使用该来源的控件。</span></div>
+                            <div class="control-group" id="engine-residual-timeout-settings"><div class="section-title">解析残帧超时 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">解析残帧超时（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">完整帧立即解析，残帧超时后重新同步。0 关闭。两项计时都开启时，建议与「原始记录空闲间隔」设为相同值。</span></div>
+                            <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
+                                <div class="control-group" id="frame-numeric-settings">
+                                    <div class="section-title">数值解码 <span class="scope-badge">全局共用</span></div>
+                                    <div class="row">
+                                        <div class="input-group">
+                                            <label>数据类型</label>
+                                            <select id="data-type">
+                                                <option value="int8">Int8</option>
+                                                <option value="uint8">UInt8</option>
+                                                <option value="int16">Int16</option>
+                                                <option value="uint16">UInt16</option>
+                                                <option value="int32">Int32</option>
+                                                <option value="uint32">UInt32</option>
+                                                <option value="int64">Int64</option>
+                                                <option value="uint64">UInt64</option>
+                                                <option value="float32" selected>Float32</option>
+                                                <option value="float64">Float64</option>
+                                            </select>
+                                        </div>
+                                        <div class="input-group">
+                                            <label>字节端序</label>
+                                            <select id="endianness">
+                                                <option value="little" selected>小端 (LE)</option>
+                                                <option value="big">大端 (BE)</option>
+                                            </select>
+                                        </div>
                                     </div>
                                     <div class="input-group">
-                                        <label>字节端序</label>
-                                        <select id="endianness">
-                                            <option value="little" selected>小端 (LE)</option>
-                                            <option value="big">大端 (BE)</option>
-                                        </select>
+                                        <label>采样通道数 (Channels)</label>
+                                        <input type="number" id="channels-count" value="1" min="1" max="65535" />
                                     </div>
                                 </div>
-                                <div class="input-group">
-                                    <label>采样通道数 (Channels)</label>
-                                    <input type="number" id="channels-count" value="1" min="1" max="65535" />
+                                <div class="control-group" id="frame-header-settings">
+                                    <div class="section-title">帧首 <span class="scope-badge">全局共用</span></div>
+                                    <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
+                                    <div class="input-group" id="header-config">
+                                        <label>帧首字节序列 (Hex, 空格分隔)</label>
+                                        <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
+                                        <span class="hint-text">支持多字节，如: AA BB CC</span>
+                                    </div>
                                 </div>
-                            </div>
-                            <div class="control-group" id="frame-header-settings">
-                                <div class="section-title">帧首 <span class="scope-badge">全局共用</span></div>
-                                <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
-                                <div class="input-group" id="header-config">
-                                    <label>帧首字节序列 (Hex, 空格分隔)</label>
-                                    <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
-                                    <span class="hint-text">支持多字节，如: AA BB CC</span>
+                                <div class="control-group" id="frame-footer-settings">
+                                    <div class="section-title">帧尾 <span class="scope-badge">全局共用</span></div>
+                                    <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
+                                    <div class="input-group" id="footer-config">
+                                        <label>帧尾字节序列 (Hex, 空格分隔)</label>
+                                        <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
+                                    </div>
                                 </div>
-                            </div>
-                            <div class="control-group" id="frame-footer-settings">
-                                <div class="section-title">帧尾 <span class="scope-badge">全局共用</span></div>
-                                <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
-                                <div class="input-group" id="footer-config">
-                                    <label>帧尾字节序列 (Hex, 空格分隔)</label>
-                                    <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
+                                <div class="control-group" id="frame-checksum-settings">
+                                    <div class="section-title">校验位 <span class="scope-badge">全局共用</span></div>
+                                    <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
+                                    <span class="hint-text">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
                                 </div>
+                            </div></div>
+                            <div id="engine-protocol-settings" class="control-group" hidden>
+                                <div class="section-title">当前协议 <span class="scope-badge">全局共用</span></div>
+                                <select id="engine-protocol" aria-label="当前协议"></select>
+                                <button id="engine-protocol-edit" class="btn btn-secondary" type="button">打开协议配置面板</button>
                             </div>
-                            <div class="control-group" id="frame-checksum-settings">
-                                <div class="section-title">校验位 <span class="scope-badge">全局共用</span></div>
-                                <label class="chk-label"><input type="checkbox" id="chk-checksum" />启用末尾 8-bit 和校验</label>
-                                <span class="hint-text">校验仅针对数据段，不含帧首/帧尾。若启用帧尾，校验位位于帧尾之后。</span>
+                            <div id="engine-protocol-mappings" class="control-group" hidden><div id="engine-mappings"></div></div>
+                            <div id="engine-synchronization" class="control-group" hidden>
+                                <div class="section-title">因果同步采样 <span class="scope-badge">全局共用</span></div>
+                                <div class="input-group"><label for="engine-sync-rate">采样率 (Hz)</label><input id="engine-sync-rate" type="number" min="0.001" max="1000000" step="any" value="1000"></div>
+                                <p class="hint-text">首次有效消息后启动。保持各字段最近值；暂停和断开期间不补采。此频率不是设备实际更新率。</p>
+                                <div id="engine-expiry"></div>
+                                <p class="hint-text">有效期为 0 表示关闭；超过有效期后为空，不补零。</p>
                             </div>
-                        </div></div>
-                        <div id="engine-protocol-settings" class="control-group" hidden>
-                            <div class="section-title">当前协议 <span class="scope-badge">全局共用</span></div>
-                            <select id="engine-protocol" aria-label="当前协议"></select>
-                            <button id="engine-protocol-edit" class="btn btn-secondary" type="button">打开协议配置面板</button>
-                        </div>
-                        <div id="engine-protocol-mappings" class="control-group" hidden><div id="engine-mappings"></div></div>
-                        <div id="engine-synchronization" class="control-group" hidden>
-                            <div class="section-title">因果同步采样 <span class="scope-badge">全局共用</span></div>
-                            <div class="input-group"><label for="engine-sync-rate">采样率 (Hz)</label><input id="engine-sync-rate" type="number" min="0.001" max="1000000" step="any" value="1000"></div>
-                            <p class="hint-text">首次有效消息后启动。保持各字段最近值；暂停和断开期间不补采。此频率不是设备实际更新率。</p>
-                            <div id="engine-expiry"></div>
-                            <p class="hint-text">有效期为 0 表示关闭；超过有效期后为空，不补零。</p>
-                        </div>
-                        <div class="control-group" id="frame-history-settings">
-                            <div class="section-title">重建历史数据 <span class="scope-badge">全局共用</span></div>
-                            <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />解析规则或时间基准变更时重建</label>
-                            <span class="hint-text">未勾选时，解析规则变更从当前接收位置开始记录。切换时间基准时，已收帧保留原来的时间位置。</span>
+                            <div class="control-group" id="frame-history-settings">
+                                <div class="section-title">重建历史数据 <span class="scope-badge">全局共用</span></div>
+                                <label class="chk-label"><input type="checkbox" id="rebuild-history" checked />解析规则或时间基准变更时重建</label>
+                                <span class="hint-text">未勾选时，解析规则变更从当前接收位置开始记录。切换时间基准时，已收帧保留原来的时间位置。</span>
+                            </div>
                         </div>
                     </div>
                     <div id="engine-raw-records" class="tab-content" hidden>
                         <h3 id="engine-raw-records-heading" class="engine-pane-heading" tabindex="-1">原始记录</h3>
-                        <div class="control-group">
-                            <div class="section-title">原始记录空闲间隔 <span class="scope-badge">全局共用</span></div>
-                            <div class="input-group"><label for="engine-raw-idle-timeout">空闲间隔（ms） · <span id="engine-raw-mode">数组</span></label><input id="engine-raw-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-raw-idle-hint" /></div>
-                            <span id="engine-raw-idle-hint" class="hint-text">各模式分别保存，0 关闭计时。点击“应用设置”生效。数组和自定义帧模式下，两项计时都开启时建议与「解析残帧超时」设为相同值。此间隔较短时，原始记录可能在残帧超时前收尾。</span>
-                        </div>
-                        <div class="control-group">
-                            <div class="section-title">原始帧分段上限 <span class="scope-badge" data-global-scope>全局共用</span></div>
-                            <div class="input-group"><label for="max-raw-frame-bytes">每段最大字节数</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /></div>
-                            <span class="hint-text">默认 1024 B，点击「应用设置」生效，并对所有来源生效。已识别的完整帧保留整体。</span>
-                            <span id="engine-raw-limit-status" class="hint-text is-error" role="status" hidden></span>
+                        <div class="engine-pane-body">
+                            <div class="control-group">
+                                <div class="section-title">原始记录空闲间隔 <span class="scope-badge">全局共用</span></div>
+                                <div class="input-group"><label for="engine-raw-idle-timeout">空闲间隔（ms） · <span id="engine-raw-mode">数组</span></label><input id="engine-raw-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-raw-idle-hint" /></div>
+                                <span id="engine-raw-idle-hint" class="hint-text">各模式分别保存，0 关闭计时。点击“应用设置”生效。数组和自定义帧模式下，两项计时都开启时建议与「解析残帧超时」设为相同值。此间隔较短时，原始记录可能在残帧超时前收尾。</span>
+                            </div>
+                            <div class="control-group">
+                                <div class="section-title">原始帧分段上限 <span class="scope-badge" data-global-scope>全局共用</span></div>
+                                <div class="input-group"><label for="max-raw-frame-bytes">每段最大字节数</label><input id="max-raw-frame-bytes" type="number" min="64" max="67108864" step="1" value="1024" /></div>
+                                <span class="hint-text">默认 1024 B，点击「应用设置」生效，并对所有来源生效。已识别的完整帧保留整体。</span>
+                                <span id="engine-raw-limit-status" class="hint-text is-error" role="status" hidden></span>
+                            </div>
                         </div>
                     </div>
                     <div id="engine-channels" class="tab-content" hidden>
                         <h3 id="engine-channels-heading" class="engine-pane-heading" tabindex="-1">通道管理</h3>
-                        <div id="engine-channel-panel"></div>
+                        <div class="engine-pane-body">
+                            <div id="engine-channel-panel"></div>
+                        </div>
                     </div>
                     <div id="engine-edit-actions">
                         <div class="engine-apply-bar"><button id="engine-validate" class="btn btn-secondary" type="button">校验草稿</button><button id="engine-apply" class="btn btn-primary" type="button">应用设置</button></div><p id="engine-status" class="hint-text" role="status" aria-live="polite"></p>
@@ -994,6 +1010,23 @@
             </div>
         </div>
         <section id="protocol-editor-host" hidden></section>
+    </dialog>
+    <dialog id="bridge-serial-binding" class="bridge-serial-dialog" aria-labelledby="bridge-serial-binding-title">
+        <h2 id="bridge-serial-binding-title">绑定 Bridge 串口</h2>
+        <p id="bridge-serial-source" class="hint-text"></p>
+        <div class="bridge-serial-access">
+            <div class="input-group"><label for="bridge-serial-token">Bridge 访问码</label><input id="bridge-serial-token" type="password" autocomplete="off" spellcheck="false" autofocus /></div>
+            <button id="bridge-serial-list" class="btn btn-secondary" type="button">列出端口</button>
+        </div>
+        <div id="bridge-serial-port-wrap" class="input-group" hidden>
+            <label for="bridge-serial-port">系统串口</label>
+            <select id="bridge-serial-port" size="5"></select>
+        </div>
+        <p id="bridge-serial-status" class="hint-text" role="status"></p>
+        <div class="bridge-serial-actions">
+            <button id="bridge-serial-cancel" class="btn btn-secondary" type="button">取消</button>
+            <button id="bridge-serial-connect" class="btn btn-primary" type="button" disabled>绑定并连接</button>
+        </div>
     </dialog>
     <script src="autoApply.js"></script>
     <script src="projectLimits.js"></script>
@@ -1038,6 +1071,7 @@
     <script src="historyWorkers.js"></script>
     <script src="textHistory.js"></script>
     <script src="serialEngine.js"></script>
+    <script src="bridgeSerialEngine.js"></script>
     <script src="serialSourceView.js"></script>
     <script src="netEngine.js"></script>
     <script src="sendController.js"></script>

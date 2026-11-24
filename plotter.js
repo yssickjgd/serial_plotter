@@ -27,11 +27,16 @@ function activeTimeProjection(plot) {
 }
 
 function plotTimeAt(plot, index) {
-    return activeTimeProjection(plot)?.timestampAt(index) ?? plot.frames.timestampAt?.(index);
+    const timeline = activeTimeProjection(plot);
+    if (timeline) return timeline.timestampAt(index);
+    const timestamp = plot.frames.timestampAt?.(index);
+    return plot.projectReceiveTime ? plot.projectReceiveTime(timestamp) : timestamp;
 }
 
 function plotTimeOrigin(plot) {
-    return activeTimeProjection(plot) ? 0 : plot.frames.originTimestamp;
+    if (activeTimeProjection(plot)) return 0;
+    const origin = plot.frames.originTimestamp;
+    return plot.projectReceiveTime ? plot.projectReceiveTime(origin) : origin;
 }
 
 function sampleTimeBounds(plot, start, end, follow = plot.vp?.time.autoFollow) {
@@ -210,7 +215,7 @@ class Plotter {
     }
 
     _scheduleRender() {
-        if (this._disposed || !this.isVisible || !this._inViewport || this._raf !== null ||
+        if (this._disposed || this._presentationDeferred || !this.isVisible || !this._inViewport || this._raf !== null ||
             !(this._dirty || this._scrollbarDirty) || (this.isPaused && !this._viewDirty) ||
             (this.displayMode !== 'time' && this._fftPending && !this._viewDirty)) return;
         this._raf = requestAnimationFrame(() => {
@@ -267,7 +272,7 @@ class Plotter {
     }
 
     invalidateData() {
-        if (this._disposed) return;
+        if (this._disposed || this._presentationDeferred) return;
         const view = this.vp.time;
         if (view.autoFollow) view.scrollOffset = Math.max(0, this.frames.length - view.displayCount);
         else if (Number.isFinite(this._timeWindowStartOrder) &&
@@ -345,7 +350,7 @@ class Plotter {
 
     /** 根据父容器尺寸重置画布宽高，并刷新滚动条 */
     resize() {
-        if (this._disposed) return;
+        if (this._disposed || this._presentationDeferred) return;
         if (this._selection)
             this.vp[this._selection.mode].autoFollow = this._selection.autoFollow;
         this._selection = null;
@@ -593,6 +598,16 @@ class Plotter {
             this.vp[mode].autoFollow = true;
         }
         this._updateScrollbar(); this.draw();
+    }
+
+    setPresentationDeferred(deferred) {
+        if (Boolean(this._presentationDeferred) === deferred) return;
+        this._presentationDeferred = deferred;
+        if (deferred) this._cancelRender();
+        else {
+            this.invalidateData();
+            this.resize();
+        }
     }
 
     /** 切换暂停状态，返回当前是否暂停 */
@@ -953,7 +968,7 @@ class Plotter {
         const receiveSeconds = this.receiveTimeAxis && this.timeXUnit === 's';
         if (this.displayMode === 'time' && cached?.frames === this.frames && cached.version === this.frames.version &&
             cached.start === startIdx && cached.end === actualEnd && cached.receiveSeconds === receiveSeconds &&
-            cached.timeProjection === timeProjection) return cached.series;
+            cached.timeProjection === timeProjection && cached.projectReceiveTime === this.projectReceiveTime) return cached.series;
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
             const ch = this.channels[idx];
@@ -984,7 +999,8 @@ class Plotter {
             }
         }
         if (this.displayMode === 'time') this._timeSeriesCache = {
-            frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd, receiveSeconds, timeProjection, series
+            frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd,
+            receiveSeconds, timeProjection, projectReceiveTime: this.projectReceiveTime, series
         };
         return series;
     }
@@ -1051,7 +1067,7 @@ class Plotter {
 
     /** 绘图区和 X 轴刻度带缩放 X；Y 轴刻度带缩放 Y。 */
     _onWheel(e) {
-        if (!e.deltaY || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        if (this._presentationDeferred || !e.deltaY || e.ctrlKey || e.metaKey || e.shiftKey) return;
         e.preventDefault();
         const pointer = this._pointerClient;
         // Wheel events may round client coordinates that pointermove reports fractionally.
@@ -1173,7 +1189,7 @@ class Plotter {
     }
 
     _onPointerDown(event) {
-        if (event.button !== 0 || !this._drawState) return;
+        if (this._presentationDeferred || event.button !== 0 || !this._drawState) return;
         const point = this._pointFromPointer(event);
         const { plotW, plotH } = this._drawState;
         if (point.x < 0 || point.x > plotW || point.y < 0 || point.y > plotH) return;
@@ -1192,6 +1208,11 @@ class Plotter {
     }
 
     _onPointerMove(event) {
+        if (this._presentationDeferred) {
+            this._pointerClient = { clientX: event.clientX, clientY: event.clientY };
+            this.mousePos = this._pointFromPointer(event);
+            return;
+        }
         const point = this._pointFromPointer(event);
         if (this._selection) {
             if (event.pointerId !== this._selection.pointerId) return;
@@ -1299,11 +1320,13 @@ class Plotter {
         let dragging = false, dragStartX = 0, dragStartOff = 0;
 
         this._listen(this.scrollbarThumb, 'mousedown', (e) => {
+            if (this._presentationDeferred) return;
             if (this.displayMode === 'time') this._timeCenterOrder = null;
             dragging = true; dragStartX = e.clientX; dragStartOff = this._vp.scrollOffset;
             e.preventDefault();
         });
         this._listen(this.document, 'mousemove', (e) => {
+            if (this._presentationDeferred || e.buttons === 0) dragging = false;
             if (!dragging) return;
             const previousViewport = this._viewportState();
             this._markViewDirty();
@@ -1321,7 +1344,7 @@ class Plotter {
         this._listen(this.document, 'mouseup', () => { dragging = false; });
 
         this._listen(this.scrollbarWrap, 'click', (e) => {
-            if (e.target === this.scrollbarThumb) return;
+            if (this._presentationDeferred || e.target === this.scrollbarThumb) return;
             const previousViewport = this._viewportState();
             if (this.displayMode === 'time') this._timeCenterOrder = null;
             this._markViewDirty();
@@ -1342,12 +1365,14 @@ class Plotter {
         this.yScrollbarWrap.hidden = true;
         let dragging = false, dragStartY = 0, dragStartTop = 0;
         this._listen(this.yScrollbarThumb, 'mousedown', e => {
+            if (this._presentationDeferred) return;
             dragging = true;
             dragStartY = e.clientY;
             dragStartTop = parseFloat(this.yScrollbarThumb.style.top) || 0;
             e.preventDefault();
         });
         this._listen(this.document, 'mousemove', e => {
+            if (this._presentationDeferred || e.buttons === 0) dragging = false;
             if (!dragging) return;
             const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
             const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
@@ -1356,7 +1381,7 @@ class Plotter {
         });
         this._listen(this.document, 'mouseup', () => { dragging = false; });
         this._listen(this.yScrollbarWrap, 'click', e => {
-            if (e.target === this.yScrollbarThumb) return;
+            if (this._presentationDeferred || e.target === this.yScrollbarThumb) return;
             const rect = this.yScrollbarWrap.getBoundingClientRect();
             const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
             const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
@@ -1390,7 +1415,7 @@ class Plotter {
 
     /** 根据当前模式的视口位置和可滚动范围更新滚动条 thumb 的宽度和位置 */
     _updateScrollbar() {
-        if (!this.scrollbarWrap || !this.scrollbarThumb) return;
+        if (this._presentationDeferred || !this.scrollbarWrap || !this.scrollbarThumb) return;
         const minimum = this._minimumXIndex(), total = this._scrollTotal() - minimum;
         if (this._vp.displayCount >= total) {
             this.scrollbarThumb.style.left = '0'; this.scrollbarThumb.style.width = '100%'; return;
@@ -1452,7 +1477,7 @@ class Plotter {
 
     /** Count only completed Canvas redraws, including explicit redraws while paused. */
     draw() {
-        if (this._disposed || !this.isVisible || !this._inViewport) return;
+        if (this._disposed || this._presentationDeferred || !this.isVisible || !this._inViewport) return;
         this._renderFrame();
         this._updateYScrollbar();
         this.completedDraws++;

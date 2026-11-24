@@ -6,6 +6,12 @@
     const MAX = 65535;
     const sampleMethods = ['hold', 'nearest', 'linear', 'quadratic', 'spline'];
     const sampleTime = event => event.traceTime ?? event.timestamp;
+    function alignmentInput(capture) {
+        const engine = capture.dataEngine;
+        if (engine.mode === 'Raw_Data') return null;
+        const source = engine.mode === 'Self_Defined_Frame' ? engine.recordsSource : engine.arraySource;
+        return source?.rebuilding ? null : source;
+    }
     // Bulk reads start with binary searches and carry both cursors through
     // adjacent grid rows. A dense batch can still be skipped by binary search.
     function eventBoundary(events, time, high, aligned, previous) {
@@ -443,11 +449,11 @@
             }
         }
 
-        pauseSection(timestamp) {
-            let lo = 0, hi = this.pauses.length;
+        pauseSection(timestamp, pauses = this.pauses) {
+            let lo = 0, hi = pauses.length;
             while (lo < hi) {
                 const mid = (lo + hi) >>> 1;
-                if (this.pauses[mid].end <= timestamp) lo = mid + 1; else hi = mid;
+                if (pauses[mid].end <= timestamp) lo = mid + 1; else hi = mid;
             }
             return lo;
         }
@@ -611,7 +617,24 @@
             return channel ? channel.number - 1 : -1;
         }
 
-        collect(connections, cutoff = Infinity, limit = 1024) {
+        alignmentTargets(connections) {
+            const mapped = new Set(this.mappings.map(entry => entry.sourceId));
+            const targets = new Map();
+            for (const { settings: { id }, capture } of connections) {
+                if (!mapped.has(id)) continue;
+                const source = alignmentInput(capture), frames = source?.frames;
+                if (!frames?.length) continue;
+                const first = frames.frameOrdinalAt(0), last = frames.frameOrdinalAt(frames.length - 1);
+                const cursor = this.cursors.get(id);
+                const valid = cursor?.source === source && cursor.generation === source.generation && cursor.epoch === capture.epoch;
+                const read = valid ? cursor.readFrame : null;
+                const start = Math.max(first, read === null ? last + 1 - this.capacity : read + 1);
+                targets.set(id, { source, generation: source.generation, epoch: capture.epoch, start, last });
+            }
+            return targets;
+        }
+
+        collect(connections, cutoff = Infinity, limit = 1024, boundaries = null) {
             const inputs = new Map();
             for (const [index, entry] of this.mappings.entries()) {
                 const columns = inputs.get(entry.sourceId) ?? [];
@@ -620,15 +643,17 @@
             const lanes = [];
             for (const { settings, capture } of connections) {
                 const columns = inputs.get(settings.id), engine = capture.dataEngine;
-                if (!columns || engine.mode === 'Raw_Data') continue;
-                const protocol = engine.mode === 'Self_Defined_Frame';
-                const source = protocol ? engine.recordsSource : engine.arraySource;
-                if (!source || source.rebuilding) continue;
+                if (!columns) continue;
+                const protocol = engine.mode === 'Self_Defined_Frame', source = alignmentInput(capture);
+                if (!source) continue;
+                const boundary = boundaries?.get(settings.id);
+                if (boundaries && (boundary?.source !== source || boundary.generation !== source.generation ||
+                    boundary.epoch !== capture.epoch)) continue;
                 const frames = source.frames;
                 const previous = this.cursors.get(settings.id);
                 if (previous && (source !== previous.source || source.generation !== previous.generation || capture.epoch !== previous.epoch)) {
                     this.clear();
-                    return this.collect(connections, cutoff, limit);
+                    return this.collect(connections, cutoff, limit, boundaries);
                 }
                 const cursor = previous ?? this.createCursor(settings.id, source, capture.epoch,
                     this.timebases[settings.id], settings.timeOffsetMs ?? 0);
@@ -647,9 +672,16 @@
                         }
                     }
                 }
+                const first = frames.frameOrdinalAt(0);
+                if (cursor.readFrame !== null && first > cursor.readFrame + 1) {
+                    cursor.evictedUnread = (cursor.evictedUnread ?? 0) + first - cursor.readFrame - 1;
+                    cursor.readFrame = first - 1;
+                    cursor.retentionGap = true;
+                }
                 const index = cursor.readFrame === null ? Math.max(0, frames.length - this.capacity)
-                    : Math.max(0, cursor.readFrame + 1 - frames.frameOrdinalAt(0));
-                lanes.push({ cursor, columns, frames, protocol, engine, capture, index,
+                    : Math.max(0, cursor.readFrame + 1 - first);
+                const end = boundary ? Math.min(frames.length, boundary.last + 1 - first) : frames.length;
+                lanes.push({ cursor, columns, frames, protocol, engine, capture, index, end,
                     markerIndex: this.markerIndex(timing, engine), id: settings.id });
             }
             const events = [];
@@ -657,7 +689,7 @@
             let work = limit + lanes.length, scanLimited = false, futureReceipt = Infinity;
             const peek = lane => {
                 const { cursor, frames } = lane;
-                while (!cursor.pending.length && lane.index < frames.length) {
+                while (!cursor.pending.length && lane.index < lane.end) {
                     if (work-- <= 0) { scanLimited = true; break; }
                     const index = lane.index, timestamp = frames.timestampAt(index);
                     if (timestamp > cutoff) { futureReceipt = Math.min(futureReceipt, timestamp); break; }
@@ -687,7 +719,7 @@
                     if (cursor.timing.mode === 'fixed' && !cursor.timing.sequenceChannelId && cursor.batchStamp !== timestamp) {
                         cursor.batchStamp = timestamp;
                         const nextCutover = cursor.timebaseChanges[0]?.from ?? Infinity;
-                        let lo = index + 1, hi = Math.min(frames.length, nextCutover - frames.frameOrdinalAt(0));
+                        let lo = index + 1, hi = Math.min(lane.end, nextCutover - frames.frameOrdinalAt(0));
                         while (lo < hi) {
                             const mid = (lo + hi) >>> 1;
                             if (frames.timestampAt(mid) === timestamp) lo = mid + 1; else hi = mid;
@@ -714,9 +746,11 @@
                     }
                     cursor.pending.push({ time, receivedAt: timestamp, values, origin: {
                         sourceId: lane.id, epoch: cursor.epoch, generation: cursor.generation, order, timestamp,
-                        alignedTime: time, missingBefore: sample.missingBefore, period: sample.period, breakBefore: sample.breakBefore || time !== sample.time, byteOffset,
+                        alignedTime: time, missingBefore: sample.missingBefore, period: sample.period,
+                        breakBefore: cursor.retentionGap || sample.breakBefore || time !== sample.time, byteOffset,
                         endByte: frames.frameAt(index, { copyBytes: false })?.endByte
                     } });
+                    cursor.retentionGap = false;
                 }
                 return cursor.pending[0];
             };

@@ -44,7 +44,8 @@ test('communications keeps a single window and restores source, engine scroll an
     f.selectConnection('primary', 'engine-parsing');
     f.change('engine-mode', 'Self_Defined_Frame');
     view.updateProtocolLibrary([schema()], 'library');
-    f.get('engine-parsing').scrollTop = 125;
+    const parsingBody = f.get('engine-parsing').querySelector('.engine-pane-body');
+    parsingBody.scrollTop = 125;
     f.click('engine-protocol-edit');
     const dialog = f.get('serial-config-dialog'), editor = view.editor;
     assert.ok(f.get('serial-manager-close').closest('.serial-config-header'));
@@ -68,7 +69,7 @@ test('communications keeps a single window and restores source, engine scroll an
     dialog.dispatchEvent({ type: 'cancel' });
     assert.equal(editor.dialog.hidden, true);
     assert.equal(f.get('connection-engine-panel').hidden, false);
-    assert.equal(f.get('engine-parsing').scrollTop, 125);
+    assert.equal(parsingBody.scrollTop, 125);
     assert.deepEqual(Array.from(f.get('data-engine').querySelectorAll('[role="tab"]'), item => item.textContent),
         ['通讯', '帧解析', '原始记录', '通道管理']);
     assert.equal(f.get('serial-manager-panel').hidden, false);

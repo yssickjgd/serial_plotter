@@ -13,6 +13,8 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 class NetEngine {
+    static url = 'ws://127.0.0.1:8081';
+    static visibilityError = '当前网络 Bridge 不支持仅在页面可见时采集，请启动本项目的新版 Bridge 后重新连接。';
     /** 初始化 WebSocket 实例指针、回调和读取状态 */
     constructor() {
         this.ws = null;
@@ -21,6 +23,13 @@ class NetEngine {
         this.keepReading = false;
         this._rejectPending = null;
         this._connected = false;
+        this._connectSent = false;
+        this._captureVisible = true;
+        this._captureRevision = 0;
+        this._capturePending = false;
+        this._captureSupported = false;
+        this._graceDeadline = null;
+        this._graceSupported = false;
     }
 
     /* ── 回调注册 ── */
@@ -31,10 +40,42 @@ class NetEngine {
     /** 注册连接状态变化回调 callback(connected: boolean, error?: Error) */
     onStatusChange(callback) { this.onConnectStatusChange = callback; }
 
+    setCaptureVisible(visible) {
+        if (this._captureVisible === visible) return;
+        this._captureVisible = visible;
+        if (this._connectSent && this.ws?.readyState === WebSocket.OPEN) {
+            this._capturePending = true;
+            if (this._connected) {
+                if (this._captureSupported) this._sendCaptureVisibility();
+                else void this.disconnect(new Error(NetEngine.visibilityError));
+            }
+        }
+    }
+
+    _sendCaptureVisibility() {
+        this.ws.send(JSON.stringify({ cmd: 'capture-visibility', visible: this._captureVisible, revision: ++this._captureRevision }));
+    }
+
+    setCaptureGrace(ms) {
+        if (ms === null && this._graceDeadline === null) return;
+        this._graceDeadline = ms === null ? null : (globalThis.performance?.now() ?? Date.now()) + ms;
+        if (this._connected && this._graceSupported && this.ws?.readyState === WebSocket.OPEN)
+            this._sendCaptureGrace();
+    }
+
+    _remainingGrace() {
+        return this._graceDeadline === null ? null :
+            Math.max(0, Math.ceil(this._graceDeadline - (globalThis.performance?.now() ?? Date.now())));
+    }
+
+    _sendCaptureGrace() {
+        this.ws.send(JSON.stringify({ cmd: 'capture-grace', graceMs: this._remainingGrace() }));
+    }
+
     /* ── 连接管理 ── */
 
     /** 通过 WebSocket 连接到本地 bridge（ws://127.0.0.1:8081），发送 connect 指令 */
-    async connect(config) {
+    async connect(config, workspace) {
         if (this.ws) await this.disconnect();
         return new Promise((resolve, reject) => {
             let settled = false;
@@ -51,16 +92,22 @@ class NetEngine {
             }, 10000);
             this._rejectPending = (error) => finish(error);
             try {
-                this.ws = new WebSocket('ws://127.0.0.1:8081');
+                const url = this.constructor.url;
+                this.ws = new WebSocket(workspace ? url + '/?workspace=' + encodeURIComponent(workspace) : url);
                 this.ws.binaryType = 'arraybuffer';
             } catch (e) {
                 finish(new Error('无法连接到本地 Bridge，请确认已运行 node bridge.js'));
                 return;
             }
             const ws = this.ws;
+            let openingGrace = null;
             ws.onopen = () => {
                 if (this.ws !== ws) return;
                 const cmd = Object.assign({ cmd: 'connect' }, config);
+                if (!this._captureVisible) cmd.captureVisible = false;
+                openingGrace = this._graceDeadline;
+                if (openingGrace !== null) cmd.captureGraceMs = this._remainingGrace();
+                this._connectSent = true;
                 ws.send(JSON.stringify(cmd));
             };
             ws.onmessage = (event) => {
@@ -74,13 +121,25 @@ class NetEngine {
                         void this.disconnect(error);
                         return;
                     }
-                    if (res.event === 'error') {
+                    if (res.event === 'capture-visibility') {
+                        if (res.revision === this._captureRevision) this._capturePending = false;
+                    } else if (res.event === 'error') {
                         const error = new Error(res.msg || '网络连接失败');
                         finish(error);
                         void this.disconnect(error);
                     } else if (res.event === 'connected' || res.event === 'listening') {
                         this.keepReading = true;
                         if (!this._connected) {
+                            this._captureSupported = res.captureVisibility === true;
+                            this._graceSupported = res.captureGrace === true;
+                            if (!this._captureSupported && (!this._captureVisible || this._capturePending)) {
+                                const error = new Error(NetEngine.visibilityError);
+                                finish(error);
+                                void this.disconnect(error);
+                                return;
+                            }
+                            if (this._capturePending) this._sendCaptureVisibility();
+                            if (this._graceSupported && this._graceDeadline !== openingGrace) this._sendCaptureGrace();
                             this._connected = true;
                             if (this.onConnectStatusChange) this.onConnectStatusChange(true);
                         }
@@ -91,7 +150,7 @@ class NetEngine {
                         void this.disconnect(error);
                     }
                 } else {
-                    if (this.onDataCallback && this.keepReading)
+                    if (this.onDataCallback && this.keepReading && this._captureVisible && !this._capturePending)
                         this.onDataCallback(new Uint8Array(event.data));
                 }
             };
@@ -113,6 +172,8 @@ class NetEngine {
     async disconnect(reason = null) {
         if (this._rejectPending) this._rejectPending(new Error('连接已取消'));
         this.keepReading = false;
+        this._connectSent = false;
+        this._capturePending = false;
         const ws = this.ws;
         this.ws = null;
         try {

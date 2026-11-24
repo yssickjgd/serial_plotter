@@ -60,7 +60,7 @@ function validateConfig(config) {
     if (config.monitorDisplay !== undefined)
         validationMonitorDisplay.normalizeDisplayOptions(config.monitorDisplay);
     const options = {
-        connType: [['serial', 'tcp-client', 'tcp-server', 'udp'], '连接模式'],
+        connType: [['serial', 'bridge-serial', 'tcp-client', 'tcp-server', 'udp'], '连接模式'],
         captureMode: [['number', 'engine', 'hex', 'text'], '采集格式'],
         textEncoding: [['utf-8', 'ascii', 'gbk', 'gb18030', 'big5', 'utf-16le',
             'utf-16be', 'shift_jis', 'windows-1252'], '文本字符集'],
@@ -114,7 +114,7 @@ function validateConfig(config) {
             Number(config.idleGapSeconds) < 0.001 || Number(config.idleGapSeconds) * 1000 > 2147483647))
         throw new RangeError('空闲断帧间隔需为至少 0.001 s 的有限数值，且不超过计时器范围');
     for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc',
-        'plotPhaseUnwrap', 'plotTimeXUnitExplicit', 'rebuildHistory']) {
+        'plotPhaseUnwrap', 'plotTimeXUnitExplicit', 'rebuildHistory', 'captureVisibleOnly']) {
         if (config[key] !== undefined && typeof config[key] !== 'boolean')
             throw new Error(`${key} 必须是布尔值`);
     }

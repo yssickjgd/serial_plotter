@@ -106,9 +106,20 @@ body {
 .data-engine { position: relative; min-height: 0; flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
 .data-engine > .sidebar-section-header { flex-shrink: 0; }
 .data-engine > .tab-bar { flex-shrink: 0; }
-.data-engine > .tab-content { overflow-y: auto; }
-.data-engine > #engine-channels { min-height: 0; overflow: hidden; }
+.data-engine > .tab-content { min-height: 0; gap: 0; padding: 0; overflow: hidden; }
 .engine-pane-heading { display: none; }
+.engine-pane-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    gap: var(--ui-section-gap);
+    padding: 8px;
+    overflow: auto;
+    scroll-padding-block: 8px;
+}
+#engine-channels > .engine-pane-body { overflow: hidden; }
 .data-engine.engine-overview {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -128,11 +139,8 @@ body {
 .engine-overview .engine-pane-heading {
     display: block;
     flex: 0 0 auto;
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    margin: 0;
-    padding: 2px 0 var(--ui-group-gap);
+    margin: 0 8px;
+    padding: 10px 0 var(--ui-group-gap);
     border-bottom: 1px solid var(--border);
     background: var(--sidebar-bg);
     color: var(--primary);
@@ -927,7 +935,9 @@ input.channel-name-input {
 .serial-inline-config { max-width: 820px; margin-top: var(--ui-section-gap); }
 .engine-overview .serial-inline-config { max-width: none; }
 .serial-inline-config > :is(.hint-text, .serial-config-error) { margin: 0; }
-#engine-communication > .hint-text { margin: var(--ui-section-gap) 0 0; }
+.serial-mode-help { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.serial-mode-help .hint-text { margin: 0; }
+#engine-communication .engine-pane-body > .hint-text { margin: var(--ui-section-gap) 0 0; }
 .serial-config-header > .serial-config-actions { margin-inline-start: auto; }
 .serial-config-header > .serial-config-actions > button { white-space: nowrap; }
 .serial-source-nav-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 4px; }
@@ -949,7 +959,7 @@ input.channel-name-input {
 .connection-config-fields { display: flex; align-items: start; gap: 8px; }
 .connection-config-fields > .input-group { flex: 1 1 0; min-width: 0; }
 .serial-config-dialog #config-net { gap: 6px; }
-#engine-communication > :is(.control-group, .source-timing-settings) { margin-top: var(--ui-section-gap); }
+#engine-communication .engine-pane-body > :is(.control-group, .source-timing-settings) { margin-top: var(--ui-section-gap); }
 .serial-config-dialog :is(select, input):disabled { opacity: .75; }
 .serial-config-dialog :is(select, input, button):focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .serial-config-error { color: #a02119; }
@@ -965,6 +975,20 @@ input.channel-name-input {
 @media (max-width: 410px) {
     .serial-config-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.bridge-serial-dialog {
+    position: fixed; inset: 0; margin: auto; box-sizing: border-box;
+    width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 16px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--sidebar-bg); color: var(--text); font-family: var(--ui-font);
+}
+.bridge-serial-dialog[open] { display: grid; gap: 8px; }
+.bridge-serial-dialog::backdrop { background: #07111d80; }
+.bridge-serial-dialog h2 { margin: 0; font-size: var(--ui-section-size); }
+.bridge-serial-dialog .hint-text { margin: 0; overflow-wrap: anywhere; }
+.bridge-serial-access { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 6px; }
+.bridge-serial-access .btn { white-space: nowrap; }
+.bridge-serial-dialog select[size] { height: auto; }
+.bridge-serial-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.bridge-serial-actions .btn { width: auto; }
 .widget-delete-dialog { position: fixed; inset: 0; margin: auto; width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 18px; border: 1px solid #536374; border-radius: 6px; background: #18212a; color: #e0e9f1; }
 .widget-delete-dialog::backdrop { background: #0009; }
 .widget-delete-dialog h2 { margin: 0 0 12px; font-size: 1rem; }
