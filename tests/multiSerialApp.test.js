@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 
 function saveSerialConfig(f) { f.click('engine-apply'); }
 function addSerial(f, fields = {}) {
@@ -125,7 +125,8 @@ test('serial source settings validate atomically and removing a disconnected sou
     const source = f.app.serialSources.get('serial-2');
     const primaryPool = f.app.service.workerPool;
     assert.equal(source.capture.workerPool, primaryPool);
-    assert.equal(source.capture.memory.limitBytes + f.app.service.memory.limitBytes, 4096 * 1048576);
+    assert.equal(source.capture.memory.limitBytes + f.app.service.memory.limitBytes, 8192 * 1048576);
+    assert.equal(source.capture.dataEngine.mode, 'Raw_Data');
     const config = f.app.getConfig();
     config.serialSources.entries.push({ ...config.serialSources.entries[0] });
     assert.throws(() => f.app.applyConfig(config), /接收来源编号重复/);
@@ -138,10 +139,13 @@ test('serial source settings validate atomically and removing a disconnected sou
     assert.equal(f.app.serialSources.size, 0);
     assert.equal(source.capture.disposed, true);
     assert.equal(primaryPool.disposed, false);
-    assert.equal(f.app.service.memory.limitBytes, 4096 * 1048576);
+    assert.equal(f.app.service.memory.limitBytes, 8192 * 1048576);
     f.selectConnection('primary'); f.change('conn-type', 'serial'); saveSerialConfig(f);
     addSerial(f);
-    assert.equal(f.app.serialSources.has('serial-3'), true);
+    const next = f.app.serialSources.get('serial-3');
+    assert.ok(next);
+    next.capture.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
+    assert.equal(next.capture.numericSource.frames.length, 0);
 });
 
 test('serial data engines and widget input bindings isolate parsing and export per connection', async t => {
@@ -152,7 +156,7 @@ test('serial data engines and widget input bindings isolate parsing and export p
     assert.equal(f.get('engine-splitter'), null);
     assert.equal(f.get('engine-connection-source'), null);
     f.click('serial-manager-open'); f.selectConnection('primary', 'engine-parsing');
-    f.change('chk-header', false); f.change('data-type', 'uint8');
+    f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8');
     await f.app.engineView.apply();
     f.click('connection-engine-back');
     addSerial(f);
@@ -210,7 +214,7 @@ test('secondary channel management edits and remaps its own catalog and persists
     addSerial(f);
     const capture = f.app.serialSources.get('serial-2').capture;
     f.selectConnection('serial-2', 'engine-parsing');
-    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('data-type', 'uint8');
+    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8');
     await f.app.engineView.apply();
     const engine = f.get('data-engine'), channelPanel = f.get('engine-channel-panel');
     engine.querySelector('[data-tab="engine-channels"]').click();
@@ -258,7 +262,7 @@ test('secondary channel management edits and remaps its own catalog and persists
 test('global channel mapping packs two transports and exposes the same synchronized wave and CSV source', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const updatePrimary = async () => {
-        f.change('chk-header', false); f.change('data-type', 'uint8'); await f.app.engineView.apply();
+        f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await f.app.engineView.apply();
     };
     await updatePrimary();
     f.click('workspace-channel-auto-map');
@@ -273,7 +277,7 @@ test('global channel mapping packs two transports and exposes the same synchroni
     addSerial(f, { 'conn-type': 'udp', 'net-port': '9051' });
     const secondary = f.app.serialSources.get('serial-2').capture;
     f.selectConnection('serial-2', 'engine-parsing');
-    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('data-type', 'uint8');
+    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8');
     await f.app.engineView.apply();
     f.click('connection-engine-back'); f.click('serial-manager-close');
     f.click('workspace-channel-auto-map');
@@ -350,8 +354,8 @@ test('global waveforms receive aligned batches while painting is deferred and an
     };
     f.context.cancelAnimationFrame = id => { deferred.delete(id); cancelFrame(id); };
     const wire = value => {
-        const bytes = Uint8Array.of(0xab, 0, 0, 0, 0);
-        new DataView(bytes.buffer).setFloat32(1, value, true);
+        const bytes = Uint8Array.of(0, 0, 0, 0, 0, 0, 128, 127);
+        new DataView(bytes.buffer).setFloat32(0, value, true);
         return bytes;
     };
     const now = Date.now() - 30, incoming = [f.app.service, f.app.serialSources.get('serial-2').capture];
@@ -446,11 +450,11 @@ test('changing a timebase without rebuilding preserves the time of already recei
 
 test('cross-connection time navigation uses timestamps and applies a signed millisecond offset', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    f.change('chk-header', false); f.change('data-type', 'uint8'); await f.app.engineView.apply();
+    f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await f.app.engineView.apply();
     addSerial(f);
     const second = f.app.serialSources.get('serial-2');
     f.selectConnection('serial-2', 'engine-parsing');
-    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('data-type', 'uint8');
+    f.change('engine-mode', 'Data_Array'); f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8');
     await f.app.engineView.apply();
     f.click('connection-engine-back'); f.click('serial-manager-close');
     const a = f.app.widgets.create({ type: 'wave' }), b = f.app.widgets.create({ type: 'wave' });

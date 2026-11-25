@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 
 test('disposing shared computation cancels its scheduled yield and does not retain a pending task', async t => {
     const f = bootApplication();
@@ -10,7 +10,7 @@ test('disposing shared computation cancels its scheduled yield and does not reta
     f.selectConnection();
     f.change('rebuild-history', false); f.click('engine-apply');
     const number = controller.addChannel('formula');
-    f.app.service.receive(Uint8Array.of(0xab, 0, 0, 128, 63));
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     f.change('rebuild-history', true); f.click('engine-apply');
     const pending = controller.updateChannelDefinition({ number, type: 'formula', expression: 'CH01*2' });
     assert.equal(f.app.service.numericSource.frames.rebuilding, true);

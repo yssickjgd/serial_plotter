@@ -7,11 +7,12 @@ test('resuming capture clears navigation and makes every retained widget follow 
     const spectrum = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'frequency' } });
     const bytes = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
     const hex = f.app.widgets.create({ type: 'byte' });
-    for (let i = 0; i < 10; i++) f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 128, 63));
+    const frame = Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127);
+    for (let i = 0; i < 10; i++) f.app.serialAdapter.onDataCallback(frame);
     await f.settle(); f.click('btn-pause');
-    f.app.tools._jumpAll(wave.source.frames.rawByteOffsetAt(3), true);
-    f.app.tools.matches = [{ startByte: wave.source.frames.rawByteOffsetAt(3),
-        endByte: wave.source.frames.rawByteOffsetAt(3) + 5 }];
+    const startByte = wave.source.frames.rawByteOffsetAt(3);
+    f.app.tools._jumpAll(startByte, true);
+    f.app.tools.matches = [{ startByte, endByte: startByte + frame.length }];
     f.app.tools.currentMatch = 0; f.app.tools._publish();
     assert.equal(wave.view.vp.time.autoFollow, false);
     assert.notEqual(wave.view.navigationMarkers.timeOrder, null);
@@ -31,11 +32,11 @@ test('resuming capture clears navigation and makes every retained widget follow 
         assert.equal(widget.view.cursorOrder, null);
         assert.equal(widget.view.cursorByteOffset, null);
     }
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 0, 64)); await f.tick();
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0, 0, 0, 64, 0, 0, 128, 127)); await f.tick();
     assert.equal(wave.source.frames.length, 11, 'resuming must preserve retained history');
     assert.equal(wave.source.frames.getValue(0, 10), 2);
 });
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 
 test('byte logs keep following across the native scroll events from entering and leaving title focus', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
@@ -86,7 +87,7 @@ test('amplitude and phase widgets share one FFT and deleting a subscriber preser
     const f = bootApplication(); t.after(() => f.app.dispose());
     const amplitude = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'frequency' } });
     const phase = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'phase' } });
-    for (let i = 0; i < 64; i++) f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 128, 63));
+    for (let i = 0; i < 64; i++) f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     await f.settle();
     const pool = f.app.service.workerPool;
     const run = pool.runTask.bind(pool);
@@ -102,7 +103,7 @@ test('amplitude and phase widgets share one FFT and deleting a subscriber preser
     amplitude.view.draw(); phase.view.draw();
     assert.equal(amplitude.view._fftCache.get(0), phase.view._fftCache.get(0));
     assert.equal(fftJobs, 1);
-    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0, 64));
+    f.app.service.receive(Uint8Array.of(0, 0, 0, 64, 0, 0, 128, 127));
     for (const widget of [amplitude, phase]) { widget.view._fftAt -= 200; widget.view.draw(); }
     assert.equal(fftJobs, 2);
     const before = phase.view.completedSpectrumDraws;
@@ -116,12 +117,12 @@ test('inspector deletion waits for confirmation, cancellation preserves the widg
     const f = bootApplication(); t.after(() => f.app.dispose());
     const widget = f.app.widgets.create({ type: 'wave', title: '待确认的波形' });
     const source = widget.source;
-    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0x80, 0x3F), { timestamp: 100 });
+    f.app.service.receive(Uint8Array.of(0, 0, 0x80, 0x3F, 0, 0, 128, 127), { timestamp: 100 });
     f.click('widget-delete');
     assert.equal(f.app.widgets.widgets.has(widget.id), true);
     assert.equal(f.get('widget-delete-dialog').open, true);
     assert.ok(f.get('widget-delete-message').textContent.includes(widget.title));
-    f.app.service.receive(Uint8Array.of(0xAB, 0, 0, 0, 0x40), { timestamp: 101 });
+    f.app.service.receive(Uint8Array.of(0, 0, 0, 0x40, 0, 0, 128, 127), { timestamp: 101 });
     assert.equal(source.frames.length, 2, 'confirmation must not pause incoming capture');
     f.click('widget-delete-cancel');
     assert.equal(f.app.widgets.widgets.has(widget.id), true);
@@ -385,7 +386,7 @@ test('disposing widgets detaches shared inspector controls', () => {
 
 test('two independently zoomed waves restore after a whole receive block and remain restored after ready', async t => {
     const { GLOBAL_DEFAULTS } = require('../widgetConfig');
-    const f = bootApplication({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false },
+    const f = bootApplication({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, enableFooter: false },
         widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1 });
     t.after(() => f.app.dispose());
     const a = f.app.widgets.create({ type: 'wave' }), b = f.app.widgets.create({ type: 'wave' });
@@ -441,7 +442,7 @@ test('viewport restoration waits for the current ready promise and cancels queue
 
 test('user wheel zoom and thumb pan persist the viewport while capture alone never saves', async t => {
     const { GLOBAL_DEFAULTS } = require('../widgetConfig');
-    const f = bootApplication({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false },
+    const f = bootApplication({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, enableFooter: false },
         widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1 });
     t.after(() => f.app.dispose());
     const widget = f.app.widgets.create({ type: 'wave' }); await f.settle(); await f.tick(200);

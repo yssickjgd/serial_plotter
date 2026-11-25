@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 async function fixture(t) {
     const f = bootApplication(); t.after(() => f.app.dispose());
     f.change('channels-count', '3'); const applied = f.app.engineView.apply(); await f.settle(); await applied;
@@ -8,8 +8,8 @@ async function fixture(t) {
     const wave = f.app.widgets.create({ type: 'wave' });
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'number' } });
     for (const value of [1, 2, 3]) {
-        const bytes = new Uint8Array(13); bytes[0] = 0xAB; const view = new DataView(bytes.buffer);
-        [value, 42, 0].forEach((v, i) => view.setFloat32(1 + i * 4, v, true));
+        const bytes = new Uint8Array(16); bytes.set([0, 0, 128, 127], 12); const view = new DataView(bytes.buffer);
+        [value, 42, 0].forEach((v, i) => view.setFloat32(i * 4, v, true));
         f.app.serialAdapter.onDataCallback(bytes); await f.tick(10);
     }
     f.click('btn-pause'); f.app.workspace.activate(pose.id); f.change('monitor-search-origin', pose.id);
@@ -41,7 +41,7 @@ test('time navigation marks pose targets and retains invalid pose frames as exac
     assert.equal(f.pose.view.navigationMarkers.timeOrder, frames.orderAt(0));
     assert.equal(f.pose.view.target.index, 0);
     assert.equal(f.pose.view.jumpToByteOffset(-1), false);
-    assert.equal(f.pose.view.jumpToByteOffset(frames.rawByteOffsetAt(2) + 13), false);
+    assert.equal(f.pose.view.jumpToByteOffset(frames.rawByteOffsetAt(2) + 16), false);
     f.app.service.clear(); await f.tick();
     assert.equal(f.pose.view.lastValid, null); assert.equal(f.pose.view.getReferenceByteOffset(), null);
 });

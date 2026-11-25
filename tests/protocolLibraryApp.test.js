@@ -59,7 +59,7 @@ test('communications keeps a single window and restores source, engine scroll an
     assert.match(editor.applyButton.textContent, /主串口/);
     assert.equal(await editor.saveDraft(), true);
     assert.ok(f.writes > 0);
-    assert.equal(f.app.dataEngine.mode, 'Data_Array');
+    assert.equal(f.app.dataEngine.mode, 'Raw_Data');
     assert.equal(f.app.getConfig().dataEngine.draft.protocolId, 'library');
     editor.selectTab('json');
     editor.jsonInput.value = '{"id":';
@@ -111,7 +111,7 @@ test('protocol actions and source selection remain scoped to the selected second
     await f.tick(100); await f.tick(100);
     assert.equal(await applying, true);
     assert.equal(source.capture.dataEngine.mode, 'Self_Defined_Frame');
-    assert.equal(f.app.dataEngine.mode, 'Data_Array');
+    assert.equal(f.app.dataEngine.mode, 'Raw_Data');
     view.editor.close(); f.click('connection-engine-back');
     assert.equal(f.get('serial-source-nav').querySelector('[aria-current="true"]').querySelector('strong').textContent, 'UART7');
 });

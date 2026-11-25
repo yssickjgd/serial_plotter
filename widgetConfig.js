@@ -13,17 +13,18 @@ const widgetSymbolUtils = () => typeof module !== 'undefined' ? require('./confi
 const GLOBAL_DEFAULTS = {
     symbolVersion: 2,
     connType: 'serial', serialName: '主串口', serialBaud: '115200', serialData: '8', serialStop: '1', serialParity: 'none',
-    netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '1000', plotWindowPoints: '1000',
-    maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: 4096, captureVisibleOnly: false, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
-    endianness: 'little', enableHeader: true, headerHex: 'AB', enableFooter: false,
-    footerHex: '0D 0A', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
+    netHost: '127.0.0.1', netPort: '8081', netLocalPort: '', maxPoints: '60000', plotWindowPoints: '5000',
+    maxRawFrameBytes: widgetLimits.defaultMaxRawFrameBytes, captureMemoryMiB: widgetLimits.maxCaptureMemoryMiB,
+    captureVisibleOnly: false, rebuildHistory: true, channelsCount: '1', dataType: 'float32',
+    endianness: 'little', enableHeader: false, headerHex: 'AB', enableFooter: true,
+    footerHex: '00 00 80 7F', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
 const WAVE_DEFAULTS = {
     connectionSource: 'primary', engineSource: null, plotViewMode: 'time',
     plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotFreqXUnit: 'hz',
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
-    plotResponseSampleRate: '0', plotResponseTimePoints: '1000', responseChannels: [], responseViewport: null,
+    plotResponseSampleRate: '1000', plotResponseTimePoints: '20', responseChannels: [], responseViewport: null,
     plotYScaleModePhase: 'auto', plotYMinPhase: String(-Math.PI), plotYMaxPhase: String(Math.PI),
     plotYScaleModeDb: 'auto', plotYMinDb: '-80', plotYMaxDb: '20',
     plotYScaleModeTime: 'auto', plotYScaleModeFreq: 'auto', plotYMinTime: '-1', plotYMaxTime: '1',
@@ -130,7 +131,7 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
-        result.plotResponseTimePoints = settings.plotResponseTimePoints ?? settings.plotResponsePoints ?? String(Math.max(2, Number(globals.plotWindowPoints)));
+        result.plotResponseTimePoints = settings.plotResponseTimePoints ?? settings.plotResponsePoints ?? WAVE_DEFAULTS.plotResponseTimePoints;
         widgetConfigUtils.parseIntInRange(result.plotResponseTimePoints, 2, 65536, '系统响应时域采样点数');
         result.plotResponseTimePoints = String(result.plotResponseTimePoints);
         result.plotYMinPhase = settings.plotYMinPhase ?? (result.plotPhaseUnit === 'radians' ? String(-Math.PI) : '-180');
@@ -435,13 +436,19 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
     if ([2, 3].includes(legacy?.version)) return validateWorkspaceConfig(legacy);
     if (legacy?.version !== undefined) throw new Error('工作区配置版本无效');
     if (legacy === null || legacy === undefined) return validateWorkspaceConfig({
-        version: 2, global: GLOBAL_DEFAULTS, widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1
+        version: 2, global: GLOBAL_DEFAULTS, dataEngine: { mode: 'Raw_Data' },
+        widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1
     });
     widgetConfigUtils.validateConfig(legacy);
-    const globals = { ...GLOBAL_DEFAULTS, ...pick(legacy, GLOBAL_DEFAULTS), symbolVersion: legacy.symbolVersion,
+    const legacyDefaults = { ...GLOBAL_DEFAULTS, maxPoints: '1000', plotWindowPoints: '1000', captureMemoryMiB: 4096,
+        enableHeader: true, enableFooter: false, footerHex: '0D 0A' };
+    const globals = { ...pick(legacy, legacyDefaults), symbolVersion: legacy.symbolVersion,
         channelNames: legacy.channels?.map((channel, index) => channel.name ?? `CH${String(index + 1).padStart(5, '0')}`) ?? ['CH00001'] };
-    globals.plotWindowPoints = String(Math.min(Number(legacyWindowPoints(legacy) ?? GLOBAL_DEFAULTS.plotWindowPoints), Number(globals.maxPoints)));
-    const waveSettings = normalizeWidgetSettings('wave', legacy, globals);
+    globals.plotWindowPoints = String(Math.min(Number(legacyWindowPoints(legacy) ?? legacyDefaults.plotWindowPoints), Number(globals.maxPoints)));
+    const waveSettings = normalizeWidgetSettings('wave', {
+        plotResponseTimePoints: legacy.plotResponseTimePoints ?? legacy.plotResponsePoints ?? globals.plotWindowPoints,
+        plotResponseSampleRate: '0', ...legacy
+    }, globals);
     const widgets = [
         { id: 'wave-1', type: 'wave', title: '波形 1', settings: waveSettings },
         { id: 'byte-1', type: 'byte', title: '字节流 1', settings: { ...BYTE_DEFAULTS, ...pick(legacy, BYTE_DEFAULTS),

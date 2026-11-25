@@ -5,7 +5,7 @@ const { GLOBAL_DEFAULTS } = require('../widgetConfig');
 
 function boot(t, global = {}) {
     const f = bootApplication({ version: 2,
-        global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, channelsCount: '2', ...global },
+        global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, enableFooter: false, channelsCount: '2', ...global },
         widgets: [], workspace: { step: 10, rects: {} }, nextNumber: 1 });
     t.after(() => f.app.dispose());
     return f;

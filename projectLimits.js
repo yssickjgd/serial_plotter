@@ -6,6 +6,8 @@ const PROJECT_LIMITS = Object.freeze({
     maxPoints: 3600000,
     maxPlotWindowPoints: 65536,
     defaultMaxRawFrameBytes: 1024,
+    maxCaptureMemoryMiB: 8192,
+    defaultChannelColors: Object.freeze(['#ff0000', '#00ff00', '#00ffff']),
     minPort: 1,
     maxPort: 65535
 });

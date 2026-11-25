@@ -95,7 +95,7 @@ function validateConfig(config) {
     if (config.maxPoints !== undefined)
         parseIntInRange(config.maxPoints, validationLimits.minPoints, validationLimits.maxPoints, '采样点数');
     if (config.captureMemoryMiB !== undefined)
-        parseIntInRange(config.captureMemoryMiB, 64, 4096, '采集内存预算（MiB）');
+        parseIntInRange(config.captureMemoryMiB, 64, validationLimits.maxCaptureMemoryMiB, '采集内存预算（MiB）');
     if (config.plotWindowPoints !== undefined) {
         const count = parseIntInRange(config.plotWindowPoints, validationLimits.minPoints,
             validationLimits.maxPlotWindowPoints, '波形监视台内采样点数');

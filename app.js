@@ -1320,10 +1320,9 @@ async function startSerialPlotterApplication() {
             const settings = S.WidgetConfig.normalizeConnectionSource({ ...primaryConnectionSettings(), id: 'serial-' + number,
                 mode: 'serial', name: '来源 ' + number, host: netHost, port: netPort, localPort: netLocalPort, timeOffsetMs: 0 });
             const limit = captureQuota(globals, connectionSources.size + 1);
-            const engine = dataEngine.serialize();
+            const engine = { ...dataEngine.serialize(), mode: 'Raw_Data', draft: null };
             S.preflightDataEngine(engine, globals, { memoryLimitBytes: limit });
-            createConnectionSource({ ...settings, channelCount: Number(globals.channelsCount),
-                engine: { ...engine, mode: 'Raw_Data', draft: null } }, limit);
+            createConnectionSource({ ...settings, channelCount: Number(globals.channelsCount), engine }, limit);
             nextConnectionSourceNumber = number + 1;
             applyCaptureQuotas(); refreshConnectionChoices(); syncConnection(); saveSoon();
             connectionView.revealSource(settings.id);

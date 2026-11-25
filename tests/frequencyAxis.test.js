@@ -145,14 +145,14 @@ test('GPU waveform draws traces below transparent axes and falls back to Canvas 
     assert.equal(calls.some(call => call[0] === 'render'), false);
     assert.ok(canvasOps.includes('fillRect'), 'fallback retains individual time-domain points');
     assert.ok(canvasOps.indexOf('strokeStyle:#1e1e1e') >= 0 &&
-        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#00FF7F'),
+        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#ff0000'),
         'the Canvas 2D fallback still paints its grid before the waveform');
     gpu.available = true;
     gpu.render = () => false;
     canvasOps.length = 0;
     plotter.draw();
     assert.ok(canvasOps.indexOf('strokeStyle:#1e1e1e') >= 0 &&
-        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#00FF7F'),
+        canvasOps.indexOf('strokeStyle:#2e2e2e') < canvasOps.indexOf('strokeStyle:#ff0000'),
         'losing the GPU during a frame also restores the grid below the fallback waveform');
     plotter.dispose();
 });

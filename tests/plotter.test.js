@@ -187,7 +187,7 @@ test('a 39% waveform budgets vertices and backing pixels for its displayed size'
     const ctx = new Proxy({}, { get: (state, key) => {
         if (key === 'measureText') return () => ({ width: 20 });
         if (key === 'stroke') return () => {
-            if (state.strokeStyle === '#00FF7F') widths.push(state.lineWidth);
+            if (state.strokeStyle === '#ff0000') widths.push(state.lineWidth);
         };
         return () => {};
     } });

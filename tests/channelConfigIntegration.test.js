@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 function commitFormula(row, explicit = false) {
     const field = row.querySelector('[data-role="channel-expression"]');
     if (explicit) field.dispatchEvent({ type: 'keydown', key: 'Enter', target: field, bubbles: true });
@@ -265,7 +265,7 @@ test('engine renames refresh the current pose binding labels while preserving ch
 test('moving derived channels preserves dependencies, history and widget selections', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
-    f.change('channels-count', '12'); f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
+    f.change('channels-count', '12'); f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await applyEngine(f);
     const first = f.app.widgets.addChannel('formula'), second = f.app.widgets.addChannel('formula');
     await f.app.widgets.updateChannelDefinition({ number: first, type: 'formula', expression: 'CH00001+CH00002' });
     await f.app.widgets.updateChannelDefinition({ number: second, type: 'formula', expression: 'CH00013+CH00002' });
@@ -368,7 +368,7 @@ test('global channel creation follows its category regardless of the selected wi
 test('deleting CH00024 shifts later definitions references metadata and retained samples without resetting state', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
-    f.change('channels-count', '23'); f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
+    f.change('channels-count', '23'); f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await applyEngine(f);
     const removed = f.app.widgets.addChannel('formula'), kept = f.app.widgets.addChannel('formula');
     const dependent = f.app.widgets.addChannel('formula');
     await f.app.widgets.updateChannelDefinition({ number: kept, type: 'formula', expression: 'INT(CH00001)' });
@@ -433,7 +433,7 @@ test('computed definitions and colors are global while numeric visibility belong
     assert.equal(typeof f.app.widgets.addChannel, 'function', 'the inspector supports derived channels');
     const number = f.app.widgets.addChannel('formula');
     await f.app.widgets.updateChannelDefinition({ number, type: 'formula', expression: 'CH00001*2' });
-    f.app.service.receive(Uint8Array.of(0xab, 0, 0, 128, 63));
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     await f.settle();
     assert.equal(a.source.frames.getValue(number - 1, 0), 2);
     assert.equal(a.view.frames, byte.view.frames);
@@ -468,7 +468,7 @@ test('uniform editor reports invalid formulas below channel without replacing va
 test('formula drafts apply when leaving the editor or pressing Enter and update plotted historical values only with rebuild enabled', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
-    f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
+    f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await applyEngine(f);
     const number = f.app.widgets.addChannel('formula'); await f.settle();
     f.app.widgets.setChannelVisible(number - 1, true);
     f.app.service.receive(Uint8Array.of(2, 3)); await f.settle();
@@ -525,7 +525,7 @@ test('constant and system parameter channels cannot become visible wave series',
 test('computed numeric values flow into FFT search and CSV without synthetic raw bytes', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
-    f.change('chk-header', false); f.change('data-type', 'uint8'); await applyEngine(f);
+    f.change('chk-header', false); f.change('chk-footer', false); f.change('data-type', 'uint8'); await applyEngine(f);
     f.selectConnection();
     f.change('rebuild-history', false); f.click('engine-apply'); f.click('serial-manager-close');
     const number = f.app.widgets.addChannel('formula');
@@ -548,7 +548,8 @@ test('configuration replacement changes raw count and derived numbering without 
     const f = bootApplication(); t.after(() => f.app.dispose());
     f.app.widgets.create({ type: 'wave' });
     const config = f.app.getConfig();
-    config.global.channelsCount = '2'; config.global.dataType = 'uint8'; config.global.enableHeader = false;
+    config.global.channelsCount = '2'; config.global.dataType = 'uint8';
+    config.global.enableHeader = false; config.global.enableFooter = false;
     config.global.channelDefinitions = [{ number: 3, type: 'formula', expression: 'CH00001+CH00002' }];
     config.dataEngine.array = Object.fromEntries(f.S.ENGINE_ARRAY_FIELDS.map(key => [key, config.global[key]]));
     f.app.applyConfig(config); await f.settle();
@@ -644,7 +645,7 @@ test('system plots do not redraw on receipt and cannot become byte navigation re
     f.change('plot-content', 'response'); f.app.widgets.setChannelVisible(kernel - 1, true);
     await f.settle();
     wave.view.draw(); const draws = wave.view.completedDraws;
-    f.app.service.receive(Uint8Array.of(0xab, 0, 0, 128, 63)); await f.tick();
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127)); await f.tick();
     assert.equal(wave.view.completedDraws, draws);
     assert.equal(wave.source.frames.length, 1);
     f.app.service.pause(true); f.app.tools.syncPaused();

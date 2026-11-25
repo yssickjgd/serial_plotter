@@ -90,11 +90,7 @@ class Plotter {
         this._viewDirty = true;
         this.completedDraws = 0;
         this.completedSpectrumDraws = 0;
-        this.defaultColors = [
-            '#00FF7F','#FF4DC4','#00CFFF','#FFE040',
-            '#FF6B35','#4FC3F7','#CE93D8','#A5D6A7',
-            '#FFAB40','#EF9A9A','#80DEEA','#B0BEC5'
-        ];
+        this.defaultColors = plotterLimits.defaultChannelColors;
 
         this.isPaused     = false;
         this.isVisible    = true;

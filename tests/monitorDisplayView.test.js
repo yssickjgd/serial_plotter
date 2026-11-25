@@ -98,7 +98,7 @@ test('byte channel controls retain independent visibility and show channel names
 test('numeric significant digits restore and apply without accepting invalid drafts', () => {
     const { view, applied, getElement } = displayFixture();
     const input = getElement('monitor-numeric-significant-digits');
-    assert.equal(input.value, '6');
+    assert.equal(input.value, '4');
     view.apply({ numericSignificantDigits: 12 });
     assert.equal(input.value, '12');
     input.value = '3'; input.listeners.input();
@@ -113,7 +113,7 @@ test('numeric significant digits restore and apply without accepting invalid dra
     view.setMode('number');
     assert.equal(getElement('monitor-number-options').hidden, false);
     view.apply();
-    assert.equal(input.value, '6');
+    assert.equal(input.value, '4');
 });
 
 test('keyword format controls drafts and case-sensitive visibility before validation', () => {

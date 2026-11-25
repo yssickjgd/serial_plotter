@@ -49,8 +49,8 @@
         return candidates.find(({ field, path, depth }) => mapping.fieldId ? field.id === mapping.fieldId && depth === mappedDepth : path.test(mapping.path))?.field ?? null;
     }
     function normalizeDataEngine(input, globals = {}) {
-        const defaults = { dataType: 'float32', endianness: 'little', channelsCount: '1', enableHeader: true,
-            headerHex: 'AB', enableFooter: false, footerHex: '0D 0A', enableChecksum: false };
+        const defaults = { dataType: 'float32', endianness: 'little', channelsCount: '1', enableHeader: false,
+            headerHex: 'AB', enableFooter: true, footerHex: '00 00 80 7F', enableChecksum: false };
         if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input))) throw new Error('数据引擎配置无效');
         input = (typeof module !== 'undefined' ? require('./configSymbols') : root.SerialPlotter).migrateEngineSymbols(input).settings;
         const s = { mode: 'Data_Array', array: Object.fromEntries(ARRAY_FIELDS.map(key => [key, globals[key] ?? defaults[key]])),

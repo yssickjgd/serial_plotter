@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 
 function fixture(t) { const f = bootApplication(); t.after(() => f.app.dispose()); return f; }
 function protocol() {
@@ -29,7 +29,7 @@ test('raw idle interval and parser timeout are separate drafts with independent 
     assert.equal(f.app.service.baseSource.parser.idleGapSeconds,.015);
     assert.equal(f.app.getConfig().dataEngine.rawIdleTimeouts.Raw_Data,0);
     const numeric = f.app.service.numericSource, raw = f.app.service.baseSource;
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(171, 0, 0, 128, 63));
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     const numericGeneration = numeric.generation;
     f.change('rebuild-history', false);
     f.change('engine-raw-idle-timeout','25'); await f.app.engineView.apply();
@@ -58,7 +58,7 @@ test('empty workspaces configure explicit parsing drafts and applying is the onl
     assert.equal(f.app.service.numericSource.format.dataType, 'float32');
     assert.match(f.get('engine-status').textContent, /草稿/);
     await f.app.engineView.apply();
-    f.app.service.receive(Uint8Array.of(171, 0x34, 0x12));
+    f.app.service.receive(Uint8Array.of(0x34, 0x12, 0, 0, 128, 127));
     assert.equal(f.app.service.numericSource.frames.getValue(0, 0), 0x1234);
     const wave = f.app.widgets.create({ type: 'wave' });
     assert.equal(wave.view.maxDrawFps, null);
@@ -68,6 +68,7 @@ test('empty workspaces configure explicit parsing drafts and applying is the onl
 
 test('23-to-25 array cutover shifts the same channels and keeps both wire widths in history', async t => {
     const f = fixture(t), { service, dataEngine, widgets, engineView } = f.app;
+    f.change('chk-header', true); f.change('chk-footer', false);
     const frame = (count, first) => {
         const bytes = new Uint8Array(count * 4 + 1), view = new DataView(bytes.buffer);
         bytes[0] = 0xab;
@@ -157,13 +158,13 @@ test('23-to-25 array cutover shifts the same channels and keeps both wire widths
 test('raw mode preserves receive history without sampled values or widget parsing editors', async t => {
     const f = fixture(t), wave = f.app.widgets.create({ type: 'wave' });
     f.change('engine-mode', 'Raw_Data'); await f.app.engineView.apply();
-    f.app.service.receive(Uint8Array.of(171, 0, 0, 128, 63)); f.app.service.endStream();
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127)); f.app.service.endStream();
     const byte = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'engine' } });
     assert.equal(wave.source.frames.length, 0);
     assert.equal(byte.source, f.app.service.baseSource);
     assert.equal(byte.view.mode, 'hex');
-    assert.equal(f.app.service.history.byteLength, 5);
-    assert.equal(byte.source.frames.rawBytesAt(0).length, 5);
+    assert.equal(f.app.service.history.byteLength, 8);
+    assert.equal(byte.source.frames.rawBytesAt(0).length, 8);
 });
 
 test('custom engine exposes structured records, separate message sequences and synchronized numeric output', async t => {
@@ -236,7 +237,7 @@ test('protocol mode previews Hex and idle text, prioritizes complete frames and 
 test('array mode gives Hex the configured wire boundaries and replays unmatched bytes by idle', async t => {
     const f = fixture(t), engine = f.app.dataEngine;
     assert.equal(f.app.service.maxRawFrameBytes, 1024);
-    const array = { ...engine.config.array, dataType: 'uint16', headerHex: 'AA 55',
+    const array = { ...engine.config.array, dataType: 'uint16', enableHeader: true, headerHex: 'AA 55',
         enableFooter: true, footerHex: '0D' };
     const settings = { ...engine.serialize(), array };
     await engine.apply(settings, { rebuild: false });
@@ -288,12 +289,12 @@ test('Hex has an independent boundary setting and text still shares its viewing 
     assert.match(f.get('engine-status').textContent, /原始帧分段上限/);
     assert.match(f.get('monitor-record-rule').textContent, /2048 B/);
     assert.equal(f.app.getConfig().global.textBoundary, 'idle-basic');
-    const payload = Uint8Array.of(0xab, 65, 66, 67, 68, 0xab, 69, 70, 71, 72);
+    const payload = Uint8Array.of(65, 66, 67, 68, 0, 0, 128, 127, 69, 70, 71, 72, 0, 0, 128, 127);
     f.app.serialAdapter.onDataCallback(payload);
     await f.tick(1);
     assert.equal(hexSource.frames.length, 2);
     assert.equal(text.source.frames.length, 0);
-    assert.match(text.view.spacer.textContent, /ABCD.*EFGH/);
+    assert.match(text.view.spacer.textContent, /ABCD.*EFGH/s);
     await f.tick(50);
     assert.equal(text.source.frames.length, 1);
     assert.deepEqual([...text.source.frames.rawBytesAt(0)], [...payload]);
@@ -382,7 +383,7 @@ test('new-field mapping stays a draft and applies after validating its future ch
 
 test('memory-incompatible imports fail before replacing widgets, global settings or histories', t => {
     const f = fixture(t); f.app.widgets.create({ type: 'wave' });
-    f.app.service.receive(Uint8Array.of(171, 0, 0, 128, 63));
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     const before = JSON.stringify(f.app.getConfig()), config = f.app.getConfig();
     Object.assign(config.global, { captureMemoryMiB: 64, channelsCount: '130', channelNames: [], channelRecords: [],
         channelDefinitions: Array.from({ length: 130 }, (_, index) => ({ number: 131 + index, type: 'formula', expression: `CH${index + 1}[-65536]` })) });
@@ -398,7 +399,7 @@ test('full configuration replacement reapplies definitions even when wire parsin
     const f = fixture(t), number = f.app.widgets.addChannel('formula'), config = f.app.getConfig();
     config.global.channelDefinitions[0].expression = 'CH1*3';
     f.app.applyConfig(config); await f.settle();
-    f.app.service.receive(Uint8Array.of(171, 0, 0, 128, 63));
+    f.app.service.receive(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127));
     assert.equal(f.app.service.numericSource.frames.getValue(number - 1, 0), 3);
 });
 

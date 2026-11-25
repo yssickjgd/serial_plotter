@@ -813,11 +813,11 @@ test('numerical keyword highlighting ignores inserted line wrapping', () => {
         frames.append([123456], Uint8Array.of(65), 't', 1);
         const view = monitorFixture(frames, 800, 600);
         view.setMode('number');
-        view.setDisplayOptions({ keyword: '1.23456e+5' });
+        view.setDisplayOptions({ keyword: '1.235e+5' });
         view.container.clientWidth = 120;
         view.render();
         assert.equal(view.spacer.children[0].children[1].children
-            .filter(span => span.className === 'monitor-keyword').map(span => span.textContent).join(''), '1.23456e+5');
+            .filter(span => span.className === 'monitor-keyword').map(span => span.textContent).join(''), '1.235e+5');
     } finally { global.document = oldDocument; }
 });
 
@@ -941,7 +941,7 @@ test('Hex display groups bytes with offsets and ASCII while preserving both sear
         assert.equal(frames.version, version);
         assert.deepEqual(frames.rawBytesAt(0), Uint8Array.of(65, 66, 0, 255, 67, 68, 69, 70, 71));
         view.setMode('number');
-        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.00000e+0');
+        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.000e+0');
     } finally { global.document = oldDocument; }
 });
 
@@ -1320,7 +1320,7 @@ test('numeric log alignment resizes and preserves search highlighting by channel
         view.setSearchResults([{ startOrder: 1, endOrder: 1, channel: 9 }], 0);
         const body = view.spacer.children[0].children[1];
         assert.ok(body.children.some(span => span.className === 'monitor-search-current' &&
-            /^CH00010= +9\.50000e\+0$/.test(span.textContent)));
+            /^CH00010= +9\.500e\+0$/.test(span.textContent)));
         const oldHeight = view.rowPositions[0].height;
         view.container.clientWidth = 1200;
         view.render();
@@ -1454,13 +1454,13 @@ test('unchanged numeric rows reuse decoded values and refresh when their buffer 
         rebuilt.append([456.5, -0.25, 0.5, 0.75], Uint8Array.of(3), 't', 501);
         frames.replaceFrom(rebuilt);
         view.render();
-        assert.ok(view.spacer.children[0].children[1].textContent.includes('4.56500e+2'));
-        assert.ok(!view.spacer.children[0].children[1].textContent.includes('1.23500e+2'));
+        assert.ok(view.spacer.children[0].children[1].textContent.includes('4.565e+2'));
+        assert.ok(!view.spacer.children[0].children[1].textContent.includes('1.235e+2'));
         const replacement = new FrameBuffer(4, 500);
         replacement.append([-789.5, 0.25, -0.5, -0.75], Uint8Array.of(4), 't', 501);
         view.frames = replacement;
         view.render();
-        assert.ok(view.spacer.children[0].children[1].textContent.includes('-7.89500e+2'));
+        assert.ok(view.spacer.children[0].children[1].textContent.includes('-7.895e+2'));
     } finally { global.document = oldDocument; }
 });
 
@@ -2227,12 +2227,12 @@ test('ASCII and decoded display modes retain all bytes and show active cross-fra
         assert.ok(view.spacer.children[1].children[1].children.some(span =>
             span.className === 'monitor-search-current' && span.textContent === 'C'));
         view.setMode('number');
-        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.50000e+0');
+        assert.equal(view.spacer.children[0].children[1].textContent, 'CH00001= 1.500e+0');
         const numeric = new MonitorSearchSession(frames, parseMonitorSearch('number', '1.5', 0, 0));
         numeric.step(10);
         view.setSearchResults(numeric.matches, 0);
         assert.ok(view.spacer.children[0].children[1].children.some(span =>
-            span.className === 'monitor-search-current' && span.textContent === 'CH00001= 1.50000e+0'));
+            span.className === 'monitor-search-current' && span.textContent === 'CH00001= 1.500e+0'));
     } finally { global.document = oldDocument; }
 });
 

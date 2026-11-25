@@ -23,7 +23,7 @@ test('display options fill missing defaults without sharing mutable input state'
         rxColor: '#50b4ff', txColor: '#63ff9a', rxErrorColor: '#ffcc02', txErrorColor: '#ff5a5a',
         rxInvalidColor: '#ffffff', rxLimitColor: '#ffcc02',
         searchCurrentColor: '#ff8c00', searchMatchColor: '#745a00',
-        foldLong: false, foldLines: 8, numericSignificantDigits: 6, numericHiddenChannels: []
+        foldLong: false, foldLines: 2, numericSignificantDigits: 4, numericHiddenChannels: []
     });
     assert.equal(input.hexBytesPerLine, '16');
     options.showRx = false;

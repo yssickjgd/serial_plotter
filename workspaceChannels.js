@@ -1,7 +1,8 @@
 /** The workspace catalog maps capture-local channels to a contiguous shared channel space. */
 (function(root) {
     const S = typeof module !== 'undefined'
-        ? { ...require('./channelOperations'), ...require('./engineFrames'), ...require('./plotMath'), ...require('./sourceTimebase') }
+        ? { ...require('./channelOperations'), ...require('./engineFrames'), ...require('./plotMath'), ...require('./sourceTimebase'),
+            Limits: require('./projectLimits').PROJECT_LIMITS }
         : root.SerialPlotter;
     const MAX = 65535;
     const sampleMethods = ['hold', 'nearest', 'linear', 'quadratic', 'spline'];
@@ -47,7 +48,8 @@
 
     const sourceIdPattern = /^(?:primary|serial-[1-9]\d*)$/;
     const idFor = entry => entry.sourceId + '/' + entry.channelId;
-    const defaultColor = index => ['#ff0000', '#00ff00', '#00ffff', '#ffff00', '#ff00ff', '#ffffff'][index % 6];
+    const palette = S.Limits.defaultChannelColors;
+    const defaultColor = index => palette[index % palette.length];
 
     function normalizeWorkspaceChannels(input = {}) {
         if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('全局通道配置无效');

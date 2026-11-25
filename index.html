@@ -114,9 +114,9 @@
                         <div class="section-title">缓冲区设置 <span class="scope-badge">全局共用</span></div>
                         <div class="input-group">
                             <label id="max-points-label" for="max-points">最大采样点数</label>
-                            <input type="number" step="100" min="2" max="3600000" id="max-points" value="1000" />
+                            <input type="number" step="100" min="2" max="3600000" id="max-points" value="60000" />
                         </div>
-                        <div class="input-group"><label for="capture-memory-mib">采集内存预算（MiB）</label><input id="capture-memory-mib" type="number" min="64" max="4096" step="64" value="4096" /><span class="hint-text">所有来源、接收历史与 TX 共用；达到预算提前淘汰最旧帧，继续采集。浏览器总内存还包括画布及其它开销。</span></div>
+                        <div class="input-group"><label for="capture-memory-mib">采集内存预算（MiB）</label><input id="capture-memory-mib" type="number" min="64" max="8192" step="64" value="8192" /><span class="hint-text">所有来源、接收历史与 TX 共用；达到预算提前淘汰最旧帧，继续采集。浏览器总内存还包括画布及其它开销。</span></div>
                         <div class="hint-text" id="capture-memory-status" role="status" aria-live="polite"></div>
                         <div class="row buffer-actions">
                             <button id="btn-pause" class="btn btn-secondary" title="快捷键：P（输入时不触发）">暂停捕捉</button>
@@ -447,12 +447,12 @@
                             <div class="section-title">采样与响应</div>
                             <div class="input-group" id="plot-window-control">
                                 <label id="plot-window-label" for="plot-window-points">采样点数 <span class="scope-badge">全局共用</span></label>
-                                <input type="number" step="1" min="2" max="65536" id="plot-window-points" value="1000" />
+                                <input type="number" step="1" min="2" max="65536" id="plot-window-points" value="5000" />
                             </div>
                             <p id="plot-workspace-sampling-hint" class="hint-text" hidden>全局通道按同步采样频率确定窗口时长、运算波形和频谱。映射的原始曲线按各来源时基绘制。</p>
                             <p id="plot-recovered-markers-hint" class="hint-text" hidden>放大到可逐点查看时，空心圆表示用欠采样恢复策略补出的点。</p>
                             <div id="wrap-response-options" class="sidebar-stack" hidden>
-                                <div class="input-group"><label for="plot-response-sample-rate">响应采样率（Hz，0 表示未设置）</label><input id="plot-response-sample-rate" type="number" min="0" step="any" value="0" /></div>
+                                <div class="input-group"><label for="plot-response-sample-rate">响应采样率（Hz，0 表示未设置）</label><input id="plot-response-sample-rate" type="number" min="0" step="any" value="1000" /></div>
                                 <p class="hint-text">时域为零状态单位脉冲响应，左侧固定为 [0]，向右递增。未设置采样率时，频率单位为 cycles/sample。</p>
                             </div>
                             <span id="plot-response-status" class="hint-text" role="status" style="color:#b42318;" hidden></span>
@@ -613,7 +613,7 @@
                         <div class="monitor-options" id="monitor-number-options">
                             <div class="input-group">
                                 <label for="monitor-numeric-significant-digits">有效数字位数</label>
-                                <input type="number" id="monitor-numeric-significant-digits" min="1" max="17" step="1" value="6" />
+                                <input type="number" id="monitor-numeric-significant-digits" min="1" max="17" step="1" value="4" />
                                 <span class="hint-text">包含整数位，例如 6 位显示为 1.23456e+2；按 e 对齐，预留负号位置，仅调整显示精度。</span>
                             </div>
                         </div>
@@ -675,7 +675,7 @@
                         <label class="chk-label"><input type="checkbox" id="monitor-fold-long" />折叠长帧</label>
                         <div class="input-group" id="monitor-fold-lines-wrap" hidden>
                             <label for="monitor-fold-lines">折叠后显示行数</label>
-                            <input type="number" id="monitor-fold-lines" min="1" max="64" step="1" value="8" />
+                            <input type="number" id="monitor-fold-lines" min="1" max="64" step="1" value="2" />
                         </div>
                     </div>
                     <div class="control-group monitor-settings-panel" id="monitor-color-panel">
@@ -765,7 +765,7 @@
                 <section id="data-engine" class="data-engine tab-group" aria-label="数据引擎">
                     <div class="sidebar-section-header config-pane-heading">
                         <span>已应用模式</span>
-                        <span id="engine-applied-mode" class="scope-badge">Data_Array</span>
+                        <span id="engine-applied-mode" class="scope-badge">Raw_Data</span>
                     </div>
                     <div class="tab-bar"><button class="tab-btn" data-tab="engine-communication">通讯</button><button class="tab-btn active" data-tab="engine-parsing">帧解析</button><button class="tab-btn" data-tab="engine-raw-records">原始记录</button><button class="tab-btn" data-tab="engine-channels">通道管理</button></div>
                     <div id="engine-communication" class="tab-content" hidden>
@@ -900,7 +900,7 @@
                     <div id="engine-parsing" class="tab-content active">
                         <h3 id="engine-parsing-heading" class="engine-pane-heading" tabindex="-1">帧解析</h3>
                         <div class="engine-pane-body">
-                            <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">数据引擎</label><select id="engine-mode"><option value="Raw_Data">原生数据 · Raw_Data</option><option value="Data_Array" selected>数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。规则作用于使用该来源的控件。</span></div>
+                            <div class="control-group"><div class="section-title">解析方式 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-mode">数据引擎</label><select id="engine-mode"><option value="Raw_Data" selected>原生数据 · Raw_Data</option><option value="Data_Array">数组 · Data_Array</option><option value="Self_Defined_Frame">自定义帧 · Self_Defined_Frame</option></select></div><span class="hint-text">草稿未应用时，继续使用当前规则采集。规则作用于使用该来源的控件。</span></div>
                             <div class="control-group" id="engine-residual-timeout-settings"><div class="section-title">解析残帧超时 <span class="scope-badge">全局共用</span></div><div class="input-group"><label for="engine-idle-timeout">解析残帧超时（ms）</label><input id="engine-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-idle-hint" /></div><span id="engine-idle-hint" class="hint-text">完整帧立即解析，残帧超时后重新同步。0 关闭。两项计时都开启时，建议与「原始记录空闲间隔」设为相同值。</span></div>
                             <div id="engine-array-settings"><div id="shared-numeric-settings" class="numeric-frame-settings">
                                 <div class="control-group" id="frame-numeric-settings">
@@ -936,7 +936,7 @@
                                 </div>
                                 <div class="control-group" id="frame-header-settings">
                                     <div class="section-title">帧首 <span class="scope-badge">全局共用</span></div>
-                                    <label class="chk-label"><input type="checkbox" id="chk-header" checked />启用帧首特征匹配</label>
+                                    <label class="chk-label"><input type="checkbox" id="chk-header" />启用帧首特征匹配</label>
                                     <div class="input-group" id="header-config">
                                         <label>帧首字节序列 (Hex, 空格分隔)</label>
                                         <input type="text" id="frame-header" value="AB" placeholder="如: AB CD" />
@@ -945,10 +945,10 @@
                                 </div>
                                 <div class="control-group" id="frame-footer-settings">
                                     <div class="section-title">帧尾 <span class="scope-badge">全局共用</span></div>
-                                    <label class="chk-label"><input type="checkbox" id="chk-footer" />启用帧尾特征匹配</label>
+                                    <label class="chk-label"><input type="checkbox" id="chk-footer" checked />启用帧尾特征匹配</label>
                                     <div class="input-group" id="footer-config">
                                         <label>帧尾字节序列 (Hex, 空格分隔)</label>
-                                        <input type="text" id="frame-footer" value="0D 0A" placeholder="如: 0D 0A" />
+                                        <input type="text" id="frame-footer" value="00 00 80 7F" placeholder="如: 00 00 80 7F" />
                                     </div>
                                 </div>
                                 <div class="control-group" id="frame-checksum-settings">
@@ -982,7 +982,7 @@
                         <div class="engine-pane-body">
                             <div class="control-group">
                                 <div class="section-title">原始记录空闲间隔 <span class="scope-badge">全局共用</span></div>
-                                <div class="input-group"><label for="engine-raw-idle-timeout">空闲间隔（ms） · <span id="engine-raw-mode">数组</span></label><input id="engine-raw-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-raw-idle-hint" /></div>
+                                <div class="input-group"><label for="engine-raw-idle-timeout">空闲间隔（ms） · <span id="engine-raw-mode">原生数据</span></label><input id="engine-raw-idle-timeout" type="number" min="0" max="2147483647" step="any" value="50" aria-describedby="engine-raw-idle-hint" /></div>
                                 <span id="engine-raw-idle-hint" class="hint-text">各模式分别保存，0 关闭计时。点击“应用设置”生效。数组和自定义帧模式下，两项计时都开启时建议与「解析残帧超时」设为相同值。此间隔较短时，原始记录可能在残帧超时前收尾。</span>
                             </div>
                             <div class="control-group">

@@ -165,4 +165,10 @@ function bootApplication(config = null, options = {}) {
     };
 }
 
-module.exports = { bootApplication };
+function bootArrayApplication(config, options) {
+    // Numeric interaction tests can start with a previously configured array source.
+    return bootApplication(config ?? { version: 3, global: {}, dataEngine: { mode: 'Data_Array' },
+        widgets: [], workspace: { step: 10, rects: {} } }, options);
+}
+
+module.exports = { bootApplication, bootArrayApplication };

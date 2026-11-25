@@ -76,10 +76,11 @@ test('temporary compact layout and sender clamping preserve imported layout pref
     assert.equal(f.get('app-container').classList.contains('right-collapsed'), true);
 });
 
-test('buffer memory budget defaults to 4096 MiB validates input and survives config import', async t => {
+test('buffer memory budget defaults to 8192 MiB validates input and survives config import', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
-    assert.equal(f.get('capture-memory-mib').value, '4096');
-    assert.equal(f.app.service.memoryUsage().limitBytes, 4096 * 1048576);
+    assert.equal(f.get('capture-memory-mib').value, '8192');
+    assert.equal(f.get('capture-memory-mib').max, '8192');
+    assert.equal(f.app.service.memoryUsage().limitBytes, 8192 * 1048576);
     f.get('capture-memory-mib').value = '64';
     f.get('capture-memory-mib').dispatchEvent({ type: 'change' });
     assert.equal(f.app.service.memoryUsage().limitBytes, 64 * 1048576);
@@ -130,7 +131,7 @@ test('capture shortcut ignores editing composition browser shortcuts and detache
     assert.equal(f.app.service.paused, false);
 });
 const { GLOBAL_DEFAULTS } = require('../widgetConfig');
-const config = widgets => ({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false },
+const config = widgets => ({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, enableFooter: false },
     widgets, workspace: { step: 10, rects: {} }, nextNumber: 10 });
 const wave = id => ({ id, type: 'wave', title: id, settings: {} });
 const bytes = (id, settings = {}) => ({ id, type: 'byte', title: id, settings: { captureMode: 'hex', ...settings } });
@@ -454,16 +455,34 @@ test('wave axes use shared arrival-based sampling rate instead of a jittering st
     assert.equal(first.sampleRateHz, 1000);
 });
 
-test('a fresh page has no widgets while persistent acquisition continues', async t => {
-    const f = boot(t);
+test('a fresh page records raw bytes and only decodes after applying array mode', async t => {
+    const f = boot(t, null);
     assert.equal(f.app.widgets.widgets.size, 0);
     assert.equal(f.get('workspace-empty').hidden, false);
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xab, 0, 0, 128, 63));
+    assert.equal(f.app.service.capacity, 60000);
+    assert.equal(f.get('max-points').value, '60000');
+    assert.equal(f.get('chk-header').checked, false);
+    assert.equal(f.get('frame-header').value, 'AB');
+    assert.equal(f.get('chk-footer').checked, true);
+    assert.equal(f.get('frame-footer').value, '00 00 80 7F');
+    assert.deepEqual([0, 1, 2, 3].map(index => f.app.widgets.channelColor(index)),
+        ['#ff0000', '#00ff00', '#00ffff', '#ff0000']);
+    assert.equal(f.app.dataEngine.mode, 'Raw_Data');
+    const frame = Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127);
+    f.app.serialAdapter.onDataCallback(frame);
     await f.tick();
-    assert.equal(f.app.service.numericSource.frames.length, 1);
+    assert.equal(f.app.service.numericSource.frames.length, 0);
     assert.equal(f.app.service.baseSource.frames.length, 1);
-    assert.equal(f.app.service.stats.rxBytes, 5);
+    assert.equal(f.app.service.stats.rxBytes, 8);
     assert.equal(f.writes, 0, 'bootstrap must not overwrite missing or existing stored settings');
+    f.change('engine-mode', 'Data_Array');
+    assert.equal(f.app.dataEngine.mode, 'Raw_Data', 'selecting the mode only changes the draft');
+    f.change('rebuild-history', false);
+    await f.app.engineView.apply();
+    assert.equal(f.app.service.numericSource.frames.length, 0);
+    f.app.serialAdapter.onDataCallback(frame);
+    assert.equal(f.app.service.numericSource.frames.length, 1);
+    assert.equal(f.app.service.numericSource.frames.getValue(0, 0), 1);
 });
 
 test('disposing during serial selection prevents a late connection and retains detached callbacks', async t => {

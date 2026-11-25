@@ -418,7 +418,8 @@ class WidgetController {
     }
 
     channelColor(index, colors = this.globals.channelColors) {
-        return colors[index] ?? ['#ff0000', '#00ff00', '#00ffff', '#ffff00', '#ff00ff', '#ffffff'][index % 6];
+        const palette = SerialPlotter.Limits.defaultChannelColors;
+        return colors[index] ?? palette[index % palette.length];
     }
 
     channelVisible(widget, index) {

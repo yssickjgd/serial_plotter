@@ -54,13 +54,15 @@ test('phase unit changes convert manual bounds and both live and inactive respon
 test('response time count stays independent through object switches capacity changes and reload', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave' });
+    assert.equal(f.get('plot-window-points').value, '5000');
     f.app.widgets.addChannel('constant');
     f.change('plot-window-points', '128');
     f.change('plot-content', 'response');
     assert.equal(f.get('plot-window-control').hidden, false);
-    assert.equal(f.get('plot-window-points').value, '1000');
-    assert.equal(wave.responseFrames.length, 1000);
-    assert.equal(wave.view.plotWindowPoints, 1000);
+    assert.equal(f.get('plot-window-points').value, '20');
+    assert.equal(f.get('plot-response-sample-rate').value, '1000');
+    assert.equal(wave.responseFrames.length, 20);
+    assert.equal(wave.view.plotWindowPoints, 20);
     f.change('plot-window-points', '64');
     f.change('plot-content', 'samples');
     assert.equal(wave.view.plotWindowPoints, 128);
@@ -102,9 +104,9 @@ test('sampled and response spectra share global count while response time remain
     const second = f.app.widgets.create({ type: 'wave', settings: { plotContent: 'response', plotViewMode: 'frequency' } });
     f.change('plot-window-points', '128');
     assert.equal(first.view.plotWindowPoints, 128);
-    assert.equal(second.view.plotWindowPoints, 1000);
+    assert.equal(second.view.plotWindowPoints, 20);
     assert.equal(second.responseFrames.gridSize, 128);
-    assert.equal(second.responseFrames.count, 1000);
+    assert.equal(second.responseFrames.count, 20);
     f.app.widgets.activate(first.id);
     assert.equal(f.get('plot-window-points').value, '128');
     f.change('plot-window-points', '64');
@@ -119,7 +121,7 @@ test('sampled and response spectra share global count while response time remain
     assert.ok(config.widgets.every(widget => !Object.hasOwn(widget.settings, 'plotWindowPoints')));
     const restored = bootApplication(config); t.after(() => restored.app.dispose());
     for (const widget of restored.app.widgets.widgets.values())
-        assert.equal(widget.view.plotWindowPoints, widget.id === second.id ? 1000 : 32);
+        assert.equal(widget.view.plotWindowPoints, widget.id === second.id ? 20 : 32);
     restored.app.widgets.activate(second.id);
     restored.change('plot-view-mode', 'time');
     restored.change('plot-window-points', '256');
@@ -132,6 +134,7 @@ test('sampled and response spectra share global count while response time remain
 
 test('raising the shared plot count expands all source capacities and survives switching and reload', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
+    f.change('max-points', '1000');
     const first = f.app.widgets.create({ type: 'wave' });
     const raw = f.app.widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
     const response = f.app.widgets.create({ type: 'wave', settings: { plotContent: 'response', plotViewMode: 'frequency' } });
@@ -151,7 +154,7 @@ test('raising the shared plot count expands all source capacities and survives s
     assert.equal(raw.source.frames.length, retained);
     assert.equal(first.view.plotWindowPoints, 5000);
     assert.equal(response.responseFrames.gridSize, 5000);
-    assert.equal(response.responseFrames.count, 1000);
+    assert.equal(response.responseFrames.count, 20);
     f.app.widgets.activate(first.id);
     assert.equal(f.get('plot-window-points').value, '5000');
     const restored = bootApplication(config); t.after(() => restored.app.dispose());
@@ -166,6 +169,7 @@ test('raising the shared plot count expands all source capacities and survives s
 
 test('independent response time counts and invalid shared counts never expand capture storage', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
+    f.change('max-points', '1000');
     const response = f.app.widgets.create({ type: 'wave', settings: { plotContent: 'response' } });
     f.change('plot-window-points', '5000');
     assert.equal(response.settings.plotResponseTimePoints, '5000');

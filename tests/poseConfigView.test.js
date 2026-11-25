@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { bootApplication } = require('./helpers/widgetAppHarness');
+const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 async function applyEngine(f) {
     const applied = f.app.engineView.apply();
     await f.settle(); await applied;
@@ -23,8 +23,8 @@ test('two pose widgets share numeric acquisition while their settings, inspector
     f.change('pose-bindings-euler-0', '0'); f.change('pose-bindings-euler-1', '1'); f.change('pose-bindings-euler-2', '2');
     f.change('pose-euler-unit', 'degrees');
     assert.equal(b.settings.euler.unit, 'degrees'); assert.equal(a.settings.euler.unit, 'radians');
-    const bytes = new Uint8Array(13); bytes[0] = 0xAB;
-    new DataView(bytes.buffer).setFloat32(1, 90, true);
+    const bytes = new Uint8Array(16); bytes.set([0, 0, 128, 127], 12);
+    new DataView(bytes.buffer).setFloat32(0, 90, true);
     f.app.serialAdapter.onDataCallback(bytes); await f.tick();
     assert.equal(a.source.frames.length, 1);
     assert.equal(b.view.target.valid, true); assert.equal(a.view.target.valid, false);
@@ -66,7 +66,7 @@ test('mixed overlay inspector edits apply live without changing another pose or 
     const groups = f.get('tab-pose-display').children.filter(group => group.classList.contains('control-group'));
     assert.ok(groups.findIndex(group => group.id === 'pose-overlay-settings') > groups.findIndex(group => group.id === 'pose-camera-settings'));
     assert.equal(f.get('pose-overlay-bindings-euler-1').closest('#tab-pose-channels')?.id, 'tab-pose-channels');
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 0, 0)); await f.tick();
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0, 0, 0, 0, 0, 0, 128, 127)); await f.tick();
     assert.equal(b.view.target.valid, true);
     const result = f.S.PoseMath.apply(b.view.target.matrix, [1, 0, 0]);
     result.forEach((value, index) => assert.ok(Math.abs(value - [0, 1, 0][index]) < 1e-8));
@@ -117,10 +117,10 @@ test('pose binding identity follows channel reorder/delete and invalid imports l
 test('clearing pose history before another receive discards old orientation and shared capacity/settings remain usable', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const widget = f.app.widgets.create({ type: 'pose', settings: { bindings: { euler: [0, 0, 0] } } });
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 128, 63)); await f.tick();
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0, 0, 128, 63, 0, 0, 128, 127)); await f.tick();
     assert.equal(widget.view.lastValid.valid, true);
     f.click('btn-clear');
-    f.app.serialAdapter.onDataCallback(Uint8Array.of(0xAB, 0, 0, 192, 127)); await f.tick();
+    f.app.serialAdapter.onDataCallback(Uint8Array.of(0, 0, 192, 127, 0, 0, 128, 127)); await f.tick();
     assert.equal(widget.view.lastValid, null); assert.equal(widget.view.target.valid, false);
     f.change('channels-count', '2'); await applyEngine(f);
     assert.equal(widget.source.frames.channelCount, 2);
@@ -134,7 +134,7 @@ test('shrinking the applied array preserves catalog identities and pose bindings
     f.change('channels-count', '3'); await applyEngine(f);
     const widget = f.app.widgets.create({ type: 'pose', settings: { bindings: { euler: [0, 1, 2] },
         overlay: { bindings: { quaternion: [2, 1, 0, null] } } } });
-    const bytes = new Uint8Array(13); bytes[0] = 0xAB;
+    const bytes = new Uint8Array(16); bytes.set([0, 0, 128, 127], 12);
     f.app.serialAdapter.onDataCallback(bytes); await f.tick();
     const channelIds = [1, 2, 3].map(number => f.app.widgets.getChannelRegistry().get(number).id);
     f.change('channels-count', '1'); await applyEngine(f);
