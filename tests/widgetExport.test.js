@@ -11,6 +11,105 @@ function boot(t, global = {}) {
     return f;
 }
 
+test('widget SVG downloads the selected wave at click time and survives preference reload', async t => {
+    const f = boot(t);
+    const wave = f.app.widgets.create({ type: 'wave' });
+    f.app.widgets.activate(wave.id);
+    assert.ok(f.get('widget-export-format').options.some(option => option.value === 'svg'));
+    f.change('widget-export-format', 'svg');
+    f.app.service.receive(Uint8Array.of(1, 2, 3, 4)); f.app.service.endStream(); await f.tick();
+    assert.equal(f.get('widget-export-text-metadata').hidden, true);
+    assert.equal(f.get('btn-widget-export').disabled, false);
+    wave.view.setChannelVisible(0, true);
+    wave.view.setChannelColor(0, '#23abcd');
+    const saving = f.app.exportWidgetData();
+    wave.view.setChannelColor(0, '#fedcba');
+    f.app.service.receive(Uint8Array.of(5, 6));
+    assert.equal(await saving, true);
+    assert.match(f.downloads.at(-1).download, /\.svg$/);
+    assert.match(f.blobs.at(-1).type, /^image\/svg\+xml/);
+    const svg = await f.blobs.at(-1).text();
+    assert.match(svg, /<svg\s/);
+    assert.match(svg, /stroke="#23abcd"/);
+    assert.doesNotMatch(svg, /#fedcba/);
+    assert.ok(svg.includes(wave.title));
+    const restored = bootApplication(f.app.getConfig());
+    t.after(() => restored.app.dispose());
+    assert.equal(restored.get('widget-export-format').value, 'svg');
+    f.app.widgets.create({ type: 'byte' });
+    assert.equal(f.get('btn-widget-export').disabled, true);
+    assert.equal(await f.app.exportWidgetData(), false);
+});
+
+test('an offscreen wave exports fresh time and frequency geometry without waking its renderer', async t => {
+    const f = boot(t), wave = f.app.widgets.create({ type: 'wave' });
+    wave.view.setVisible(false);
+    f.change('widget-export-format', 'svg');
+    f.app.service.receive(Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
+    f.app.service.endStream(); await f.tick();
+    f.app.widgets.setChannelVisible(0, true);
+    wave.view.setChannelColor(0, '#123cab');
+    const before = wave.view.completedDraws;
+    for (const mode of ['time', 'frequency']) {
+        wave.view.setDisplayOptions({ displayMode: mode, freqXUnit: 'bins', freqXScale: 'linear' });
+        assert.equal(f.get('btn-widget-export').disabled, false);
+        assert.equal(await f.app.exportWidgetData(), true, mode + ' ' + f.get('widget-export-source-status').textContent);
+        const svg = await f.blobs.at(-1).text();
+        assert.match(svg, /stroke="#123cab"/);
+        assert.ok(svg.includes(mode === 'time' ? '采样点' : '频点 (bin)'));
+        assert.equal(wave.view._drawState, null);
+        assert.equal(wave.view.canvas.width, 1);
+        assert.equal(wave.view._raf, null);
+        assert.equal(wave.view.completedDraws, before);
+    }
+});
+
+test('XY and histogram export their active vector traces, bins and titles', async t => {
+    const f = boot(t);
+    const xy = f.app.widgets.create({ type: 'xy', title: 'XY <台架>', settings: { pairs: [
+        { x: 0, y: 1, color: '#239abc' }, { x: 1, y: 0, color: '#654321' },
+        { x: 0, y: 0, color: '#fedcba', visible: false }
+    ] } });
+    f.app.service.receive(Uint8Array.of(1, 2, 0, 1, 1, 3)); f.app.service.endStream(); await f.tick();
+    f.app.widgets.activate(xy.id);
+    f.change('widget-export-format', 'svg');
+    assert.equal(await f.app.exportWidgetData(), true);
+    const trajectory = await f.blobs.at(-1).text();
+    assert.match(trajectory, /XY &lt;台架&gt;/);
+    for (const color of ['#239abc', '#654321'])
+        assert.ok(trajectory.match(/<path\b[^>]+>/g).some(path => path.includes('stroke="' + color + '"') && path.includes('L')));
+    assert.doesNotMatch(trajectory, /#fedcba|<image/);
+    f.app.service.receive(Uint8Array.of(2, 0, 3, 0)); f.app.service.endStream(); await f.tick();
+    const chart = f.app.widgets.create({ type: 'histogram', title: '计数', settings: { channel: 0, values: [0, 1, 2, 3] } });
+    assert.equal(await f.app.exportWidgetData(), true);
+    const histogram = await f.blobs.at(-1).text();
+    assert.match(histogram, /<title>计数<\/title>/);
+    assert.match(histogram, /已归类 5/);
+    const bar = histogram.match(/<path\b[^>]*fill="#ffffff"[^>]*>/)?.[0];
+    assert.equal(bar?.match(/Z/g)?.length, 4);
+    f.change('histogram-color', '#ed7521');
+    assert.equal(await f.app.exportWidgetData(), true);
+    assert.match(await f.blobs.at(-1).text(), /<path\b[^>]*fill="#ed7521"/);
+    const restored = bootApplication(f.app.getConfig()); t.after(() => restored.app.dispose());
+    assert.equal(restored.app.widgets.widgets.get(chart.id).settings.color, '#ed7521');
+    assert.match(histogram, /<clipPath\b/);
+    assert.match(histogram, /xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+});
+
+test('static system response exports its visible phase without received frames', async t => {
+    const f = boot(t);
+    const wave = f.app.widgets.create({ type: 'wave' });
+    const kernel = f.app.widgets.addChannel('constant');
+    f.change('plot-content', 'response'); f.app.widgets.setChannelVisible(kernel - 1, true);
+    f.change('plot-view-mode', 'phase'); f.change('plot-phase-unit', 'radians');
+    f.change('widget-export-format', 'svg');
+    assert.equal(wave.source.frames.length, 0);
+    assert.equal(await f.app.exportWidgetData(), true);
+    const svg = await f.blobs.at(-1).text();
+    assert.match(svg, / rad</);
+    assert.ok(svg.includes(wave.title));
+});
+
 test('left export keeps unmatched bytes while right BIN and Hex use only successful frames', async t => {
     const f = boot(t, { enableHeader: true, headerHex: 'AB' });
     const wave = f.app.widgets.create({ type: 'wave' });

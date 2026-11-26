@@ -38,6 +38,62 @@ test('resuming capture clears navigation and makes every retained widget follow 
 });
 const { bootArrayApplication: bootApplication } = require('./helpers/widgetAppHarness');
 
+test('axis display precision is editable and survives configuration round trips per widget', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const widgets = f.app.widgets;
+    const make = (type, x, y) => {
+        const w = widgets.create({ type });
+        const field = (axis, key) => f.get(type === 'wave'
+            ? 'plot-' + axis + '-' + key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase())
+            : type + '-' + axis + key[0].toUpperCase() + key.slice(1));
+        const change = (axis, key, value) => {
+            const input = field(axis, key);
+            assert.ok(input, type + ' ' + axis + ' ' + key);
+            input.value = value; input.dispatchEvent({ type: 'change' });
+        };
+        change('x', 'significantDigits', x);
+        change('x', 'numberNotation', 'plain');
+        change('y', 'precisionMode', 'decimal');
+        change('y', 'decimalPlaces', y);
+        change('y', 'numberNotation', 'scientific');
+        assert.deepEqual([w.settings.xSignificantDigits, w.settings.yDecimalPlaces], [x, y]);
+        change('y', 'precisionMode', 'significant');
+        assert.ok(!field('y', 'significantDigits').parentElement.hidden);
+        change('y', 'precisionMode', 'decimal');
+        assert.equal(field('y', 'decimalPlaces').value, String(y));
+        return w.id;
+    };
+    const ids = [make('wave', 4, 9), make('xy', 3, 7), make('histogram', 5, 2)];
+    const config = JSON.parse(JSON.stringify(f.app.getConfig()));
+    f.app.applyConfig(config); await f.settle();
+    assert.deepEqual(ids.map(id => {
+        const { xSignificantDigits, xNumberNotation, yPrecisionMode, yDecimalPlaces, yNumberNotation } = widgets.widgets.get(id).settings;
+        return [xSignificantDigits, xNumberNotation, yPrecisionMode, yDecimalPlaces, yNumberNotation];
+    }), [[4, 'plain', 'decimal', 9, 'scientific'], [3, 'plain', 'decimal', 7, 'scientific'], [5, 'plain', 'decimal', 2, 'scientific']]);
+    const { validateWorkspaceConfig } = f.S.WidgetConfig;
+    config.widgets.find(widget => widget.type === 'wave').settings.ySignificantDigits = 16;
+    assert.throws(() => validateWorkspaceConfig(config), /有效数字位数/);
+});
+
+test('wave trace style defaults to both and restores each widget selection across data sources', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const native = f.app.widgets.create({ type: 'wave' });
+    assert.equal(native.view.traceMode, 'both');
+    f.change('plot-trace-mode', 'line');
+    f.click('workspace-channel-auto-map');
+    const globalWave = f.app.widgets.create({ type: 'wave', settings: { connectionSource: 'workspace' } });
+    f.change('plot-trace-mode', 'points');
+    assert.equal(globalWave.view.traceMode, 'points');
+    f.app.widgets.activate(native.id);
+    assert.equal(f.get('plot-trace-mode').value, 'line');
+    const config = f.app.getConfig(), restored = bootApplication(config);
+    t.after(() => restored.app.dispose());
+    assert.equal(restored.app.widgets.widgets.get(native.id).view.traceMode, 'line');
+    assert.equal(restored.app.widgets.widgets.get(globalWave.id).view.traceMode, 'points');
+    config.widgets[0].settings.plotTraceMode = 'invalid';
+    assert.throws(() => require('../widgetConfig').validateWorkspaceConfig(config), /轨迹样式/);
+});
+
 test('byte logs keep following across the native scroll events from entering and leaving title focus', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const { workspace, widgets, service } = f.app;
@@ -314,6 +370,38 @@ test('creating after restoring a colliding nextNumber allocates another stable i
     const created = f.app.widgets.create({ type: 'wave' });
     assert.equal(created.id, 'wave-2');
     assert.equal(f.app.widgets.widgets.size, 2);
+});
+
+test('workspace analysis plots stay frozen throughout the pause drain and respect page visibility', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const { widgets } = f.app;
+    const xy = widgets.create({ type: 'xy', settings: { connectionSource: 'workspace' } });
+    const histogram = widgets.create({ type: 'histogram' });
+    widgets.setWorkspacePresentationDeferred(true);
+    assert.equal(xy.view.visible, false);
+    assert.equal(histogram.view.visible, true);
+    widgets.setCaptureHidden(true);
+    widgets.setWorkspacePresentationDeferred(false);
+    assert.equal(xy.view.visible, false);
+    assert.equal(histogram.view.visible, false);
+    widgets.setCaptureHidden(false);
+    assert.equal(xy.view.visible, true);
+    assert.equal(histogram.view.visible, true);
+});
+
+test('removing a formula unbinds its XY axis and histogram without reusing the next channel', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const { widgets } = f.app;
+    await widgets.updateChannelDefinition({ id: 'one', number: 2, type: 'formula', expression: 'CH1' });
+    await widgets.updateChannelDefinition({ id: 'two', number: 3, type: 'formula', expression: 'CH1+2' });
+    const xy = widgets.create({ type: 'xy', settings: { pairs: [{ x: 1, y: 2 }] } });
+    const histogram = widgets.create({ type: 'histogram', settings: { channel: 1 } });
+    await widgets.removeChannel(2);
+    const reloaded = bootApplication(f.app.getConfig()); t.after(() => reloaded.app.dispose());
+    const pair = reloaded.app.widgets.widgets.get(xy.id).settings.pairs[0];
+    assert.equal(pair.x, null);
+    assert.equal(pair.y, 1);
+    assert.equal(reloaded.app.widgets.widgets.get(histogram.id).settings.channel, null);
 });
 
 test('direct creation rejects reserved source identities without modifying the workspace', t => {

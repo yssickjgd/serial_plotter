@@ -10,10 +10,12 @@ function widgetExportSelection(widget, channelNames = [], engineMode) {
         type === 'wave' && settings.plotContent === 'response') return null;
     if (type === 'byte' && source.kind === 'protocol' && typeof source.decodeRecord === 'function')
         return { widget, source, fieldPaths: settings.protocolFieldPaths ?? null };
-    if (!['wave', 'pose', 'byte'].includes(type) || source.kind !== 'numeric') return null;
+    if (!['wave', 'pose', 'byte', 'xy', 'histogram'].includes(type) || source.kind !== 'numeric') return null;
     const { frames } = source;
     const visible = type === 'wave' ? new Set(settings.channels.flatMap((item, index) => item?.visible ? [index] : []))
-        : type === 'pose' ? new Set(engineExportUtils.PoseConfig.boundChannels(settings)) : null;
+        : type === 'pose' ? new Set(engineExportUtils.PoseConfig.boundChannels(settings))
+        : type === 'xy' ? new Set(settings.pairs.filter(pair => pair.visible).flatMap(pair => [pair.x, pair.y]))
+        : type === 'histogram' ? new Set([settings.channel]) : null;
     const hidden = type === 'byte' ? new Set(settings.monitorDisplay.numericHiddenChannels) : null;
     const channels = Array.from({ length: frames.channelCount }, (_, index) => ({
         name: channelNames[index] || engineExportUtils.formatChannelId(index),

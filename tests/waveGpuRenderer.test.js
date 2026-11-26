@@ -71,6 +71,19 @@ test('GPU connects gap estimates with the trace and leaves their markers to the 
     renderer.dispose();
 });
 
+test('GPU scatter omits line strips and line-only mode omits isolated sample markers', () => {
+    const { WaveGpuRenderer } = require('../waveGpuRenderer');
+    const f = gpuFixture();
+    const renderer = new WaveGpuRenderer(f.canvas, () => {});
+    renderer.resize(100, 80, 100, 80);
+    const points = [{ x: 0, y: 1 }, { x: 1, y: 2 }];
+    renderer.render([{ color: '#ff0000', points, lines: false, dots: true },
+        { color: '#ffffff', points: points.slice(0, 1), lines: true, dots: false }], 100, 80, 30, 25);
+    assert.deepEqual(f.calls.filter(call => call[0] === 'drawArrays' && call[1] !== f.gl.LINES)
+        .map(call => [call[1], call[3]]), [[f.gl.POINTS, 2]]);
+    renderer.dispose();
+});
+
 test('disposing a GPU renderer releases its context and CPU vertex storage immediately', () => {
     const { WaveGpuRenderer } = require('../waveGpuRenderer');
     const f = gpuFixture();

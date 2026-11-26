@@ -159,11 +159,11 @@ class WaveGpuRenderer {
         let cursor = grid.vertices.length / 2;
         for (const trace of traces) {
             const first = cursor, strips = [], dots = [];
-            const drawDots = trace.dots || trace.points.length === 1;
+            const drawDots = trace.dots ?? trace.points.length === 1;
             let stripStart = cursor, dotStart = -1;
             for (const point of trace.points) {
                 if (point.break || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
-                    if (cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
+                    if (trace.lines !== false && cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
                     stripStart = cursor;
                 }
                 if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
@@ -177,7 +177,7 @@ class WaveGpuRenderer {
                 this.vertices[cursor * 2 + 1] = point.y;
                 cursor++;
             }
-            if (cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
+            if (trace.lines !== false && cursor - stripStart >= 2) strips.push([stripStart, cursor - stripStart]);
             if (dotStart >= 0) dots.push([dotStart, cursor - dotStart]);
             commands.push({ count: cursor - first, strips, color: trace.color, dots });
         }

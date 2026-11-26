@@ -96,11 +96,12 @@ test('custom search colors update shared waveform markers without changing data 
 
 test('seconds labels stay inside the plotted width and leave room between adjacent labels', () => {
     const context = vm.createContext({});
-    for (const file of ['projectLimits.js', 'plotter.js'])
+    for (const file of ['projectLimits.js', 'plotMath.js', 'plotter.js'])
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context);
     const labels = [], measureText = text => ({ width: text.length * 7 });
     const view = Object.assign(Object.create(context.SerialPlotter.Plotter.prototype), {
         displayMode: 'time', frames: { originTimestamp: 0 },
+        axisNumberFormats: { x: context.SerialPlotter.readAxisNumberFormat({}, 'x') },
         ctx: { measureText, fillText(text, left) { labels.push({ text, left }); },
             beginPath() {}, moveTo() {}, lineTo() {}, stroke() {} }
     });

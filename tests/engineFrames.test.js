@@ -2,6 +2,32 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { SynchronizedFrames } = require('../engineFrames');
 
+test('native protocol analysis preserves sub-tick packet time without revising published grid samples', () => {
+    const { readPairs, HistogramWindow } = require('../analysisPlot');
+    const { AnalysisSettings } = require('../analysisSettings');
+    const frames = new SynchronizedFrames(2, 8);
+    const packet = (time, value) => frames.ingest(time, [[0, value], [1, value * 10]], { order: value });
+    packet(100, 1);
+    const version = frames.version;
+    packet(100, 2);
+    assert.ok(frames.version > version, 'new packets must invalidate native views even within one grid tick');
+    packet(100.5, 3);
+    assert.equal(frames.latestNativeTime, 100.5);
+    frames.advance(101);
+    assert.deepEqual(frames.channelSlice(0), [1, 3]);
+    const bounds = { first: 100, last: 100 };
+    const pairs = [];
+    readPairs(frames, { x: 0, y: 1 }, 0, 1, bounds, (x, y, time) => pairs.push([x, y, time]));
+    assert.deepEqual(pairs, [[1, 10, 100], [2, 20, 100]]);
+    const histogram = new HistogramWindow(AnalysisSettings.normalize('histogram', { values: [1, 2, 3] }));
+    histogram.update(frames, 0, 1, bounds);
+    assert.deepEqual([...histogram.counts], [1, 1, 0]);
+    histogram.update(frames, 0, 2, { first: 100.5, last: 101 });
+    assert.deepEqual([...histogram.counts], [0, 0, 1]);
+    frames.clear();
+    assert.equal(frames.latestNativeTime, -Infinity);
+});
+
 test('synchronized frames honor persisted symbol versions and require uppercase edits', () => {
     const legacy = new SynchronizedFrames(1, 10, { definitions: [{ number: 2, type: 'formula', expression: 'int(CH1)' }] });
     assert.equal(legacy.definitions[0].expression, 'INT(CH00001)');

@@ -84,6 +84,8 @@ test('23-to-25 array cutover shifts the same channels and keeps both wire widths
     const wave = widgets.create({ type: 'wave' });
     widgets.setChannelVisible(23, true);
     const pose = widgets.create({ type: 'pose', settings: { bindings: { euler: [23, 24, 1] } } });
+    const xy = widgets.create({ type: 'xy', settings: { pairs: [{ x: 1, y: 23, color: '#aabbcc' }] } });
+    const histogram = widgets.create({ type: 'histogram', settings: { channel: 24 } });
     const byte = widgets.create({ type: 'byte', settings: { captureMode: 'hex' } });
     const old = frame(23, 1), otherOld = frame(23, 51), next = frame(25, 101);
     service.receive(old); service.receive(otherOld);
@@ -111,6 +113,8 @@ test('23-to-25 array cutover shifts the same channels and keeps both wire widths
     assert.equal(history.length, 2);
     assert.equal(widgets.getChannelRegistry().get('total').number, 24);
     assert.equal(pose.settings.bindings.euler[0], 23);
+    assert.equal(xy.settings.pairs[0].y, 23);
+    assert.equal(histogram.settings.channel, 24);
 
     const applying = engineView.apply();
     await f.settle();
@@ -126,6 +130,9 @@ test('23-to-25 array cutover shifts the same channels and keeps both wire widths
     assert.deepEqual([...pose.settings.bindings.euler], [25, 26, 1]);
     assert.equal(widgets.globals.channelDefinitions[1].expression, 'CH00026+CH00003');
     assert.equal(engineView.channels.drafts.get('calibrated').expression, 'CH00026+');
+    assert.equal(xy.settings.pairs[0].x, 1);
+    assert.equal(xy.settings.pairs[0].y, 25);
+    assert.equal(histogram.settings.channel, 26);
     assert.equal(numeric.errors.at(-1).type, 'incomplete');
     assert.deepEqual([...numeric.errors.at(-1).bytes], [...tail]);
     assert.equal(numeric.frames, history);
@@ -152,7 +159,10 @@ test('23-to-25 array cutover shifts the same channels and keeps both wire widths
     assert.deepEqual(rawLengths(text.source), [93, 93, 2, 101]);
     assert.deepEqual(rawLengths(numeric), [93, 93, 101]);
     const saved = JSON.parse(JSON.stringify(f.app.getConfig()));
-    assert.equal(f.S.WidgetConfig.validateWorkspaceConfig(saved).dataEngine.array.channelsCount, '25');
+    const validated = f.S.WidgetConfig.validateWorkspaceConfig(saved);
+    assert.equal(validated.dataEngine.array.channelsCount, '25');
+    assert.deepEqual(validated.widgets.find(item => item.id === xy.id).settings.pairs[0], xy.settings.pairs[0]);
+    assert.equal(validated.widgets.find(item => item.id === histogram.id).settings.channel, 26);
 });
 
 test('raw mode preserves receive history without sampled values or widget parsing editors', async t => {

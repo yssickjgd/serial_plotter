@@ -17,7 +17,7 @@
         return time >= a && time <= b ? frames.nearestTimestampIndex(time) : -1;
     };
     const isWave = widget => widget?.type === 'wave' || widget?.type === 'waveform';
-    const hasMarkers = widget => isWave(widget) || widget?.type === 'pose';
+    const hasMarkers = widget => isWave(widget) || ['pose', 'xy', 'histogram'].includes(widget?.type);
     const endAt = (frames, index) => frames.rawEndByteAt?.(index) ?? frames.rawByteOffsetAt(index) + frames.rawBytesAt(index).length;
     const indexAt = (frames, offset) => {
         if (!frames?.length || !Number.isFinite(offset)) return -1;
@@ -182,10 +182,14 @@
             if (widget?.source?.kind === 'numeric') return 'number';
             return hasMarkers(widget) ? 'number' : widget?.settings?.captureMode === 'engine' ? 'hex' : widget?.settings?.captureMode ?? 'hex';
         }
-        _poseChannels() {
+        _boundChannels() {
             const widget = this._source(), frames = framesOf(widget);
-            return widget?.type === 'pose' ? PoseConfig.boundChannels(widget.settings)
-                .filter(index => index < frames.channelCount && (!frames.isSignal || frames.isSignal(index))) : null;
+            let indices;
+            if (widget?.type === 'pose') indices = PoseConfig.boundChannels(widget.settings);
+            else if (widget?.type === 'xy') indices = widget.settings.pairs.filter(pair => pair.visible).flatMap(pair => [pair.x, pair.y]);
+            else if (widget?.type === 'histogram') indices = [widget.settings.channel];
+            else return null;
+            return [...new Set(indices)].filter(index => Number.isInteger(index) && index < frames.channelCount && (!frames.isSignal || frames.isSignal(index)));
         }
         _syncSearchFields() {
             const kind = this._kind(), structured = kind === 'protocol', type = structured ? this.protocolControls.kind.value : kind;
@@ -215,7 +219,7 @@
                 this._listen(picker.next, 'click', () => { this.channelPage++; this._renderChannelPage(); });
             }
             container.replaceChildren(this.channelPicker.toolbar, this.channelPicker.rows);
-            const frames = framesOf(this._source()), count = frames?.channelCount ?? 0, allowed = this._poseChannels();
+            const frames = framesOf(this._source()), count = frames?.channelCount ?? 0, allowed = this._boundChannels();
             this.eligibleChannels = [];
             for (let channel = 0; channel < count; channel++) {
                 if (allowed && !allowed.includes(channel) || frames?.isSignal && !frames.isSignal(channel)) continue;
@@ -230,7 +234,7 @@
         }
 
         _channelLabel(channel, names = this.getChannelNames()) {
-            if (channel < 0) return this._source()?.type === 'pose' ? '全部绑定通道' : '全部通道';
+            if (channel < 0) return this._boundChannels() !== null ? '全部绑定通道' : '全部通道';
             const number = `CH${String(channel + 1).padStart(5, '0')}`;
             const name = names[channel] ?? this._source()?.view?.channels?.[channel]?.name;
             const defaultName = /^CH0*\d+$/i.test(name ?? '') && Number(name.slice(2)) === channel + 1;
@@ -503,8 +507,8 @@
                 if (!Number.isFinite(position)) { this._searchStatus('参考控件没有可用的时间位置'); return Promise.resolve(false); }
                 const positionField = byFrame ? 'startFrame' : 'startByte';
                 const query = this._el('monitor-search-query').value, tolerance = this._el('monitor-search-tolerance').value;
-                const channels = this.selectedChannels ? [...this.selectedChannels].sort((a, b) => a - b) : this._poseChannels() ?? -1;
-                if (Array.isArray(channels) && !channels.length) throw new Error('请先绑定姿态来源通道');
+                const channels = this.selectedChannels ? [...this.selectedChannels].sort((a, b) => a - b) : this._boundChannels() ?? -1;
+                if (Array.isArray(channels) && !channels.length) throw new Error(widget.type === 'pose' ? '请先绑定姿态来源通道' : '请先为当前控件绑定有效的数值通道');
                 const kind = this._kind(), encoding = widget.settings.textEncoding ?? 'utf-8';
                 const caseSensitive = this._el('monitor-search-case-sensitive').checked;
                 const structured = kind === 'protocol', fieldKind = this.protocolControls.kind.value;

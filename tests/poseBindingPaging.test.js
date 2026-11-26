@@ -45,4 +45,29 @@ test('pose binding pagination exposes later channels while keeping filtering sep
     picker.filter.value = '不存在'; picker.filter.dispatchEvent({ type: 'input' });
     assert.equal(input.options.length, 2, 'placeholder and current binding survive an empty filter result');
     assert.equal(input.value, '99');
+    assert.equal(picker.summary.textContent, '无匹配通道');
+    picker.filter.value = 'CH67'; picker.filter.dispatchEvent({ type: 'input' });
+    const selected = picker.popup.querySelectorAll('input').find(radio => radio.type === 'radio' && radio.value === '66');
+    selected.click();
+    assert.equal(picker.popup.hidden, true);
+    assert.equal(widget.settings.bindings.euler[0], 66);
+    assert.match(picker.trigger.textContent, /CH00067/);
+});
+
+test('changing the active widget clears pose menu filters and closes open channel choices', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const widgets = f.app.widgets, first = widgets.create({ type: 'pose' });
+    widgets.selectTab('tab-pose-channels');
+    const picker = widgets.poseConfigView.channelPickers.get('bindings.euler.0');
+    picker.trigger.click(); picker.filter.value = '窄范围'; picker.filter.dispatchEvent({ type: 'input' });
+    widgets.create({ type: 'pose' });
+    assert.equal(picker.popup.hidden, true);
+    assert.equal(picker.filter.value, '');
+    widgets.selectTab('tab-pose-channels');
+    picker.trigger.click();
+    widgets.create({ type: 'xy' });
+    assert.equal(picker.popup.hidden, true);
+    widgets.activate(first.id);
+    assert.equal(picker.filter.value, '');
+    assert.equal(picker.popup.hidden, true);
 });

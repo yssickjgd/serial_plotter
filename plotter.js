@@ -96,14 +96,17 @@ class Plotter {
         this.isVisible    = true;
         this.maxPoints    = 1000;
         this.plotWindowPoints = 1000;
-        this.pX           = 90;  // right margin for Y axis (needs room for 6 decimal places)
+        this.pX           = 90;  // right margin for Y axis
         this.pY           = 22;  // bottom margin for X axis
         this.displayMode  = 'time';
+        this.traceMode = 'both';
         this.sampleRateHz = 0;
         this.timeXUnit = 'samples';
         this.freqXUnit = 'hz';
         this.freqXScale = 'linear';
         this.freqYScale = 'linear';
+        this.axisNumberFormats = { x: globalThis.SerialPlotter.readAxisNumberFormat({}, 'x'),
+            y: globalThis.SerialPlotter.readAxisNumberFormat({}, 'y') };
         this.magnitudeUnit = 'amplitude'; this.dbFactor = 20; this.phaseUnwrap = false; this.responseSampleRate = 0;
         this.phaseUnit = 'degrees';
         this.yScaleModes = { time: 'auto', frequency: 'auto', phase: 'auto' };
@@ -297,6 +300,7 @@ class Plotter {
             this.canvas.releasePointerCapture?.(this._selection.pointerId);
         this._selection = null;
         this._timeSeriesCache = null;
+        this._drawState = null;
         this._frequencyPositions = null;
         this._spectrumDisplayCache = new WeakMap();
         this._fftCache.clear();
@@ -504,6 +508,7 @@ class Plotter {
             frequency: { ...this.yBounds.frequency }, phase: { ...this.yBounds.phase }
         };
         if (opts.displayMode || opts.viewMode) this.displayMode = opts.displayMode || opts.viewMode;
+        if (opts.traceMode) this.traceMode = opts.traceMode;
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
         if (opts.yScaleModeTime) this.yScaleModes.time = opts.yScaleModeTime;
         if (opts.yScaleModeFreq) this.yScaleModes.frequency = opts.yScaleModeFreq;
@@ -511,6 +516,8 @@ class Plotter {
         if (opts.freqXUnit) this.freqXUnit = opts.freqXUnit;
         if (opts.freqXScale) this.freqXScale = opts.freqXScale;
         if (opts.freqYScale) this.freqYScale = opts.freqYScale;
+        for (const axis of ['x', 'y'])
+            this.axisNumberFormats[axis] = globalThis.SerialPlotter.readAxisNumberFormat(opts, axis, this.axisNumberFormats[axis]);
         if (opts.magnitudeUnit) this.magnitudeUnit = opts.magnitudeUnit;
         if (opts.dbFactor !== undefined) this.dbFactor = Number(opts.dbFactor);
         if (opts.phaseUnwrap !== undefined) this.phaseUnwrap = opts.phaseUnwrap;
@@ -634,7 +641,17 @@ class Plotter {
     }
 
     _formatAxisNumber(value) {
-        return Number(value > 0 && value < 0.001 ? value.toPrecision(4) : value.toFixed(3));
+        const { customAxisNumberFormat, formatAxisValue } = globalThis.SerialPlotter;
+        const format = this.axisNumberFormats.x;
+        if (customAxisNumberFormat(format)) return formatAxisValue(value, format);
+        return Number(value && Math.abs(value) < 0.001 ? value.toPrecision(4) : value.toFixed(3));
+    }
+
+    _formatYValue(value, logarithmic) {
+        const { customAxisNumberFormat, formatAxisValue } = globalThis.SerialPlotter;
+        const format = this.axisNumberFormats.y;
+        if (customAxisNumberFormat(format)) return formatAxisValue(value, format, logarithmic ? 4 : 6);
+        return logarithmic ? Number(value.toPrecision(4)).toString() : value.toFixed(6);
     }
 
     _formatTimeIndex(index, unit = this.timeXUnit, samplePrecision = 0) {
@@ -642,7 +659,7 @@ class Plotter {
         if (!(this.sampleRateHz > 0)) return '-- s';
         const first = this.fixedTimeRate ? this.frames.frameOrdinalAt?.(0) : 0;
         const seconds = ((Number.isFinite(first) ? first : 0) + index) / this.sampleRateHz;
-        if (!samplePrecision) return `${this._formatAxisNumber(seconds)} s`;
+        if (!samplePrecision || globalThis.SerialPlotter.customAxisNumberFormat(this.axisNumberFormats.x)) return `${this._formatAxisNumber(seconds)} s`;
         // Keep fractional samples visible even when a full sample is under a millisecond.
         const decimals = Math.max(3, Math.min(15, Math.ceil(Math.log10(this.sampleRateHz)) + samplePrecision));
         return `${Number(seconds.toFixed(decimals))} s`;
@@ -1069,15 +1086,10 @@ class Plotter {
         // Wheel events may round client coordinates that pointermove reports fractionally.
         const samePixel = pointer && Math.abs(pointer.clientX - e.clientX) < 1 && Math.abs(pointer.clientY - e.clientY) < 1;
         const point = this._pointFromPointer(samePixel ? pointer : e);
-        const plotW = this.width - this.pX;
-        const plotH = this.height - this.pY;
-        if (point.x > plotW && point.x <= this.width &&
-            point.y >= 0 && point.y <= this.height) {
-            this._zoomYAt(point.y, e.deltaY);
-        } else if (point.x >= 0 && point.x <= plotW &&
-            point.y >= 0 && point.y <= this.height) {
-            this._zoomXAt(point.x, e.deltaY);
-        }
+        const axis = globalThis.SerialPlotter.plotWheelAxis(point.x, point.y,
+            { right: this.width - this.pX, width: this.width, height: this.height });
+        if (axis === 'y') this._zoomYAt(point.y, e.deltaY);
+        else if (axis === 'x') this._zoomXAt(point.x, e.deltaY);
     }
 
     _zoomXAt(mouseX, deltaY) {
@@ -1098,17 +1110,14 @@ class Plotter {
                 : Math.round(start + ratio * (count - nextCount));
             this._timeCenterOrder = null;
         } else {
-            const { axisToDomain, axisFromDomain } = globalThis.SerialPlotter;
+            const { axisToDomain, axisFromDomain, zoomAxisBounds } = globalThis.SerialPlotter;
             const scale = this.freqXScale, minimum = this._minimumXIndex(), maximum = total - 1;
             const { first, last } = this._frequencyViewport(total);
-            if (!(last > first)) return;
-            const lower = axisToDomain(minimum, scale), upper = axisToDomain(maximum, scale);
-            const start = axisToDomain(first, scale), span = axisToDomain(last, scale) - start;
-            const nextSpan = Math.min(upper - lower, span * factor);
-            const anchor = start + ratio * span;
-            const left = Math.max(lower, Math.min(upper - nextSpan, anchor - ratio * nextSpan));
-            nextStart = Math.max(minimum, axisFromDomain(left, scale));
-            const nextLast = Math.min(maximum, axisFromDomain(left + nextSpan, scale));
+            const limits = [axisToDomain(minimum, scale), axisToDomain(maximum, scale)];
+            const bounds = zoomAxisBounds(axisToDomain(first, scale), axisToDomain(last, scale), ratio, deltaY, limits);
+            if (!bounds) return;
+            nextStart = Math.max(minimum, axisFromDomain(bounds[0], scale));
+            const nextLast = Math.min(maximum, axisFromDomain(bounds[1], scale));
             if (nextLast - nextStart < 1 - 1e-9) return;
             nextCount = nextLast - nextStart + 1;
         }
@@ -1146,22 +1155,13 @@ class Plotter {
         const base = this._zoomBaseY[mode] || { min: state.min, max: state.max, yScale: scale };
         const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
         const currentMin = toDomain(state.min), currentMax = toDomain(state.max);
-        const baseSpan = baseMax - baseMin;
-        const currentSpan = currentMax - currentMin;
-        if (!(baseSpan > 0) || !(currentSpan > 0)) return;
         const anchorRatio = 1 - Math.max(0, Math.min(1, mouseY / state.plotH));
-        const factor = deltaY < 0 ? 0.8 : 1.25;
-        const nextSpan = Math.min(baseSpan, currentSpan * factor);
-        if (nextSpan >= baseSpan * (1 - 1e-12)) {
-            this._clearYZoom(mode);
-        } else {
-            const anchor = currentMin + anchorRatio * currentSpan;
-            const nextMin = Math.max(baseMin,
-                Math.min(baseMax - nextSpan, anchor - anchorRatio * nextSpan));
+        const bounds = globalThis.SerialPlotter.zoomAxisBounds(currentMin, currentMax, anchorRatio, deltaY, [baseMin, baseMax]);
+        if (!bounds) return;
+        if (bounds[0] === baseMin && bounds[1] === baseMax) this._clearYZoom(mode);
+        else {
             this._zoomBaseY[mode] = base;
-            this._boxZoomY[mode] = {
-                min: fromDomain(nextMin), max: fromDomain(nextMin + nextSpan)
-            };
+            this._boxZoomY[mode] = { min: fromDomain(bounds[0]), max: fromDomain(bounds[1]) };
         }
         this._markViewDirty();
         this._updateYScrollbar();
@@ -1497,6 +1497,10 @@ class Plotter {
         if ((this.plotHeader?.offsetHeight ?? 0) !== this._layoutHeaderHeight) this._syncCanvasSize();
         const W = this.width, H = this.height;
         this.ctx.setTransform(this.canvas.width / W, 0, 0, this.canvas.height / H, 0, 0);
+        const { mode, decimalPlaces, significantDigits } = this.axisNumberFormats.y;
+        const digits = mode === 'decimal' ? decimalPlaces : significantDigits;
+        const axisMargin = Math.max(90, (digits + 8) * 6 + 8);
+        this.pX = Math.min(axisMargin, Math.max(90, W * .4));
         const plotW = Math.max(1, W - this.pX), plotH = Math.max(1, H - this.pY);
 
         // —— 背景与网格 ——
@@ -1509,8 +1513,43 @@ class Plotter {
         return { W, H, plotW, plotH, gpuAvailable };
     }
 
+    exportSvg(title) {
+        if (!this._drawState || this._viewDirty) this.draw();
+        let state = this._drawState;
+        if ((!state || this._viewDirty) && !this._disposed) state = this._prepareExportFrame();
+        if (!state) throw new Error('当前视图没有可导出的波形。');
+        const time = this.displayMode === 'time';
+        let xLabel;
+        if (time) xLabel = this.frames.responseMode || this.timeXUnit !== 's' ? '采样点' : '时间 (s)';
+        else if (this.freqXUnit === 'bins') xLabel = '频点 (bin)';
+        else xLabel = this.frames.responseMode && !(this.responseSampleRate > 0) ? '频率 (cycles/sample)' : '频率 (Hz)';
+        const yLabel = this.displayMode === 'phase' ? '相位 (' + this._phaseSuffix().trim() + ')'
+            : time ? '数值' : this.magnitudeUnit === 'db' ? '幅值 (dB)' : '幅值';
+        return globalThis.SerialPlotter.renderWaveSvg(state, { title, xLabel, yLabel,
+            fontFamily: this.fontFamily, lineWidth: Math.max(1.2, 1 / this._traceDensity), markerSize: plotSampleMarkerSize });
+    }
+
+    /** Offscreen views release their render state. Prepare one snapshot without waking them or queuing a worker. */
+    _prepareExportFrame() {
+        const canvas = this.document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const snapshot = Object.assign(Object.create(this), {
+            canvas, ctx: canvas.getContext('2d'), gpuRenderer: null, fftWorkerPool: null,
+            _fftPending: null, _fftCache: new Map(), _fftVersion: -1, _spectrumDisplayCache: new WeakMap(),
+            _timeSeriesCache: null, scrollbarWrap: null, plotHeader: null, _layoutHeaderHeight: 0,
+            onStatsUpdate: null, onStatusUpdate: null
+        });
+        snapshot._renderFrame(true);
+        return snapshot._drawState;
+    }
+
+    _drawAxisText(text, x, y, vertical = false, tickX = null) {
+        this.ctx.fillText(text, x, y);
+        this._drawState?.labels?.push({ text, x, y, vertical, tickX });
+    }
+
     /** Prepare statistics and layout before drawing background, axes, traces and hover. */
-    _renderFrame() {
+    _renderFrame(exportOnly = false) {
         if (this.onStatusUpdate) this.onStatusUpdate(this.frames.responseMode && this.displayMode !== 'time' ? this.channels
             .flatMap((channel, index) => {
                 const error = channel.visible ? this.frames.frequencyForChannel(index).error : '';
@@ -1555,7 +1594,7 @@ class Plotter {
             return;
         }
 
-        const summaryText = this._buildSummary(series, this.displayMode);
+        const summaryText = exportOnly ? null : this._buildSummary(series, this.displayMode);
         const { W, H, plotW, plotH, gpuAvailable } = this._startCanvasFrame(summaryText);
         const xScale = this.displayMode !== 'time' ? this.freqXScale : 'linear';
         const tracePixels = Math.max(1, Math.floor(plotW * this._traceDensity));
@@ -1622,7 +1661,8 @@ class Plotter {
                 if (Number.isFinite(value) && value > peak) peak = value;
             yScale = globalThis.SerialPlotter.adaptiveLogScale(peak, max);
         }
-        this._drawState = { plotW, plotH, startIdx, visibleCnt, min, max, xScale, yScale, aligned,
+        this._drawState = { width: W, height: H, plotW, plotH, startIdx, visibleCnt, min, max, xScale, yScale, aligned,
+            labels: [], navigation: [], traces: [],
             xFirst: frequency?.first ?? startIdx, xLast: frequency?.last ?? actualEnd - 1 };
 
         // —— Y 轴标签（刻度线向绘图区内绘制，避免与负号混淆）——
@@ -1630,18 +1670,24 @@ class Plotter {
         this.ctx.textAlign = 'left'; this.ctx.textBaseline = 'middle';
         const yTicks = Array.from({ length: 9 }, (_, i) =>
             globalThis.SerialPlotter.axisValueAtFraction(i / 8, min, max, yScale));
-        let tickPrecision = 0;
-        if (logY) tickPrecision = 3;
-        else if (new Set(yTicks.map(value => value.toFixed(6))).size < yTicks.length) tickPrecision = 7;
-        if (tickPrecision) {
+        const { customAxisNumberFormat, formatAxisValue } = globalThis.SerialPlotter;
+        const yFormat = this.axisNumberFormats.y;
+        const customY = customAxisNumberFormat(yFormat);
+        let tickPrecision = yFormat.significantDigits;
+        if (!tickPrecision && logY) tickPrecision = 3;
+        else if (!tickPrecision && new Set(yTicks.map(value => value.toFixed(6))).size < yTicks.length) tickPrecision = 7;
+        if (tickPrecision && !yFormat.significantDigits && yFormat.mode === 'significant') {
             while (tickPrecision < 15 && new Set(yTicks.map(value =>
                 Number(value.toPrecision(tickPrecision)).toString())).size < yTicks.length) tickPrecision++;
         }
+        let previousYLabel;
         for (let i = 0; i <= 8; i++) {
             const py = plotH - (i/8) * plotH;
             const v = yTicks[i];
-            const label = tickPrecision ? Number(v.toPrecision(tickPrecision)).toString() : v.toFixed(6);
-            this.ctx.fillText(label + this._phaseSuffix(), plotW + 6, py);
+            const label = customY ? formatAxisValue(v, yFormat, tickPrecision || 6)
+                : tickPrecision ? Number(v.toPrecision(tickPrecision)).toString() : v.toFixed(6);
+            if (label !== previousYLabel) this._drawAxisText(label + this._phaseSuffix(), plotW + 6, py, true);
+            previousYLabel = label;
             // Tick: draw leftward into the plot area, not rightward into the label area
             this.ctx.beginPath(); this.ctx.moveTo(plotW, py); this.ctx.lineTo(plotW - 4, py);
             this.ctx.strokeStyle = '#888'; this.ctx.lineWidth = 1; this.ctx.stroke();
@@ -1649,8 +1695,8 @@ class Plotter {
 
         this._drawXAxisLabels(plotW, plotH, startIdx, visibleCnt, total, xScale, series[0], aligned);
 
-        // —— 波形绘制：稀疏窗口显示点标记，密集窗口保留像素极值 ——
-        const traces = [], recoveredTraces = [];
+        // 连线和标记使用同一组可见采样点，密集窗口保留像素极值。
+        const traces = this._drawState.traces, recoveredTraces = [];
         const { axisFraction } = globalThis.SerialPlotter;
         for (const item of series) {
             for (const point of item.points) {
@@ -1658,10 +1704,14 @@ class Plotter {
                     logY ? Math.max(point.value, min) : point.value, min, max, yScale);
                 point.y = plotH - yRatio * plotH;
             }
-            const trace = { points: item.points, color: item.ch.color,
-                dots: item.mags.length <= tracePixels || item.points.length === 1 };
+            const trace = { points: item.points, color: item.ch.color, name: item.ch.name,
+                lines: this.traceMode !== 'points', dots: this.traceMode !== 'line' };
             traces.push(trace);
             if (trace.dots && item.direct?.recoveredIndices?.size) recoveredTraces.push(trace);
+        }
+        if (exportOnly) {
+            this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
+            return;
         }
         if (!gpuAvailable || !this.gpuRenderer.render(traces, W, H, plotW, plotH)) {
             if (gpuAvailable) this._drawGrid2D(plotW, plotH);
@@ -1694,18 +1744,20 @@ class Plotter {
         }
     }
 
-    _drawTrace2D({ points, color, dots }) {
+    _drawTrace2D({ points, color, lines = true, dots }) {
         if (!points.length) return;
-        this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = Math.max(1.2, 1 / this._traceDensity);
-        this.ctx.beginPath();
-        for (let i = 0; i < points.length; i++) {
-            const { x, y } = points[i];
-            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-            if (i === 0 || points[i].break) this.ctx.moveTo(x, y);
-            else this.ctx.lineTo(x, y);
+        if (lines) {
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = Math.max(1.2, 1 / this._traceDensity);
+            this.ctx.beginPath();
+            for (let i = 0; i < points.length; i++) {
+                const { x, y } = points[i];
+                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                if (i === 0 || points[i].break) this.ctx.moveTo(x, y);
+                else this.ctx.lineTo(x, y);
+            }
+            this.ctx.stroke();
         }
-        this.ctx.stroke();
         if (dots) {
             this.ctx.fillStyle = color;
             const halfSize = plotSampleMarkerSize / 2;
@@ -1749,10 +1801,13 @@ class Plotter {
         if (!Number.isFinite(span) || span <= 0) return false;
 
         const ctx = this.ctx;
-        const format = (value, precision) => seconds ? Number(value.toFixed(precision)) + ' s' : String(value);
+        const customX = globalThis.SerialPlotter.customAxisNumberFormat(this.axisNumberFormats.x);
+        const format = (value, precision) => seconds
+            ? (customX ? this._formatAxisNumber(value) : Number(value.toFixed(precision))) + ' s' : String(value);
         const precisionFor = step => Math.max(0, Math.min(15, -Math.floor(Math.log10(step))));
         const maxPrecision = precisionFor(span / 10);
-        const measure = value => ctx.measureText(seconds ? value.toFixed(maxPrecision) + ' s' : String(value)).width;
+        const measure = value => ctx.measureText(seconds && !customX ? value.toFixed(maxPrecision) + ' s'
+            : format(value, maxPrecision)).width;
         const labelWidth = Math.max(measure(first), measure(last));
         const divisions = Math.max(1, Math.min(10, width / (labelWidth + 8)));
         const required = Math.max(seconds ? 0 : 1, span / divisions);
@@ -1770,7 +1825,7 @@ class Plotter {
         const firstTick = Math.ceil(first / step), lastTick = Math.floor(last / step);
         ctx.textAlign = 'left';
         ctx.beginPath();
-        let boundary = -Infinity;
+        let boundary = -Infinity, previousLabel;
         const visibleTicks = Math.min(10, lastTick - firstTick);
         for (let i = 0; i <= visibleTicks; i++) {
             const value = (firstTick + i) * step;
@@ -1779,8 +1834,9 @@ class Plotter {
             const x = (value - first) / span * width;
             const left = x - pixels / 2;
             // A tick leaves the axis only at its own edge; it never displaces the rest.
-            if (left < 0 || left + pixels > width || left < boundary) continue;
-            ctx.fillText(text, left, height + 3);
+            if (left < 0 || left + pixels > width || left < boundary || text === previousLabel) continue;
+            previousLabel = text;
+            this._drawAxisText(text, left, height + 3, false, x);
             ctx.moveTo(x, height); ctx.lineTo(x, height + 3);
             boundary = left + pixels + 8;
         }
@@ -1790,7 +1846,7 @@ class Plotter {
             const middle = (first + last) / 2;
             const text = format(seconds ? middle : Math.round(middle), Math.max(precision, maxPrecision));
             const pixels = ctx.measureText(text).width;
-            if (pixels <= width) ctx.fillText(text, (width - pixels) / 2, height + 3);
+            if (pixels <= width) this._drawAxisText(text, (width - pixels) / 2, height + 3);
         }
         return true;
     }
@@ -1829,7 +1885,7 @@ class Plotter {
         for (const label of labels) {
             if (label.left < boundary || (label !== last && boundary !== -Infinity &&
                 label.left + label.pixels + 8 > last.left)) continue;
-            ctx.fillText(label.text, label.left, height + 3);
+            this._drawAxisText(label.text, label.left, height + 3);
             boundary = label.left + label.pixels + 8;
         }
     }
@@ -1871,6 +1927,7 @@ class Plotter {
             if (i !== currentMatch) {
                 ctx.moveTo(x, 0);
                 ctx.lineTo(x, plotH);
+                this._drawState?.navigation?.push({ x, color: this.navigationColors?.match ?? '#745a00', width: 1 });
                 painted++;
             }
             // Search results can be much denser than pixels; skip the whole pixel bucket.
@@ -1889,6 +1946,7 @@ class Plotter {
             if (x === null) return;
             ctx.strokeStyle = color;
             ctx.lineWidth = 2;
+            this._drawState?.navigation?.push({ x, color, width: 2 });
             ctx.beginPath();
             ctx.moveTo(x, 0);
             ctx.lineTo(x, plotH);
@@ -1951,13 +2009,14 @@ class Plotter {
 
         const validSample = cursorIndex >= 0 && cursorIndex < total;
         const cursorTime = aligned ? aligned.first + (aligned.last - aligned.first) * mx / Math.max(1, plotW) : NaN;
+        const formatIndex = index => Number.isInteger(index) ? String(index) : this._formatAxisNumber(index);
         const tipLines = this.displayMode !== 'time'
-            ? [`Freq: ${this._formatFrequencyBin(cursorIndex, series[0].fftSize, 'hz')} (Bin ${this._formatAxisNumber(cursorIndex)})`,
-                `${this.displayMode === 'phase' ? 'Phase' : 'Mag'}: ${logY ? Number(yVal.toPrecision(4)) : yVal.toFixed(6)}${unit}`]
-            : [this.frames.responseMode ? `Sample: [${this._formatAxisNumber(cursorIndex - startIdx)}]`
+            ? [`Freq: ${this._formatFrequencyBin(cursorIndex, series[0].fftSize, 'hz')} (Bin ${formatIndex(cursorIndex)})`,
+                `${this.displayMode === 'phase' ? 'Phase' : 'Mag'}: ${this._formatYValue(yVal, logY)}${unit}`]
+            : [this.frames.responseMode ? `Sample: [${formatIndex(cursorIndex - startIdx)}]`
                 : aligned ? `Time: ${this._formatAxisNumber((cursorTime - plotTimeOrigin(this)) / 1000)} s`
-                    : `Time: ${validSample ? this._formatTimeIndex(cursorIndex, 's', 3) : '-- s'} (Sample ${validSample ? this._formatAxisNumber(cursorIndex) : '--'})`,
-                `Value: ${yVal.toFixed(6)}`];
+                    : `Time: ${validSample ? this._formatTimeIndex(cursorIndex, 's', 3) : '-- s'} (Sample ${validSample ? formatIndex(cursorIndex) : '--'})`,
+                `Value: ${this._formatYValue(yVal, false)}`];
         ctx.font = `12px ${this.fontFamily}`;
         const lineH = 16, tipPad = 6;
         const tw = Math.max(120, ...tipLines.map(l => ctx.measureText(l).width + tipPad*2));
@@ -2021,7 +2080,7 @@ class Plotter {
 
         // Determine label column: right of crosshair, or left if near right edge
         ctx.font = `11px ${this.fontFamily}`;
-        const sampleLbl = labels.length > 0 ? `${labels[0].ch.name}: ${labels[0].val.toFixed(6)}` : '';
+        const sampleLbl = labels.length > 0 ? `${labels[0].ch.name}: ${this._formatYValue(labels[0].val, logY)}${unit}` : '';
         const LW = ctx.measureText(sampleLbl).width + 16;
         const labelX = (mx + 8 + LW < plotW) ? mx + 8 : mx - LW - 8;
 
@@ -2033,8 +2092,7 @@ class Plotter {
             ctx.beginPath(); ctx.arc(mx, item.origY, 4, 0, Math.PI*2); ctx.stroke();
 
             // Value label box
-            const lbl = `${item.ch.name}: ${logY
-                ? Number(item.val.toPrecision(4)) : item.val.toFixed(6)}${unit}`;
+            const lbl = `${item.ch.name}: ${this._formatYValue(item.val, logY)}${unit}`;
             ctx.font   = `11px ${this.fontFamily}`;
             const lw   = ctx.measureText(lbl).width + 10;
             const lh   = 16;

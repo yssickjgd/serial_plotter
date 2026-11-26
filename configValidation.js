@@ -72,6 +72,7 @@ function validateConfig(config) {
         dataType: [['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64', 'float32', 'float64'], '数据类型'],
         endianness: [['little', 'big'], '字节序'],
         plotViewMode: [['time', 'frequency', 'phase'], '绘图模式'],
+        plotTraceMode: [['line', 'points', 'both'], '轨迹样式'],
         plotContent: [['samples', 'response'], '显示对象'],
         plotMagnitudeUnit: [['auto', 'amplitude', 'db'], '幅值单位'],
         plotDbFactor: [['10', '20'], 'dB 系数'],

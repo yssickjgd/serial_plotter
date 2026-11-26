@@ -138,6 +138,8 @@
                 <div class="tab-content" id="tab-widget-library">
                     <div class="control-group"><div class="section-title">控件库</div>
                         <div class="widget-library-item" data-widget-type="wave" draggable="false"><span>波形</span><small>时域、频域与多通道分析</small><button type="button" data-add-widget="wave">添加</button></div>
+                        <div class="widget-library-item" data-widget-type="xy" draggable="false"><span>李萨如图</span><small>多组通道的 XY 轨迹</small><button type="button" data-add-widget="xy">添加</button></div>
+                        <div class="widget-library-item" data-widget-type="histogram" draggable="false"><span>频度直方图</span><small>数值与区间的出现次数、占比</small><button type="button" data-add-widget="histogram">添加</button></div>
                         <div class="widget-library-item" data-widget-type="byte" draggable="false"><span>字节流</span><small>Hex、文本与数值记录</small><button type="button" data-add-widget="byte">添加</button></div>
                         <div class="widget-library-item" data-widget-type="pose" draggable="false"><span>位姿</span><small>Euler 角、四元数与旋转矩阵</small><button type="button" data-add-widget="pose">添加</button></div>
                         <span class="hint-text">拖动条目到工作区。标题可移动控件，边缘可调整大小。</span>
@@ -365,7 +367,7 @@
         <div class="h-resizer right-resizer" id="right-resizer" role="separator" aria-orientation="vertical" aria-label="调整监视台配置宽度"></div>
         <aside class="channel-sidebar" id="channel-sidebar" aria-label="监视台配置">
             <div class="inspector-heading"><div class="sidebar-section-header config-pane-heading"><span id="active-monitor-caption" aria-live="polite">控件属性</span><span id="active-widget-type" class="scope-badge active-widget-type" hidden></span></div><button id="sidebar-close-right" class="sidebar-close" type="button" aria-label="收起控件设置">收起</button></div>
-            <div id="widget-selection-prompt" class="widget-selection-prompt"><strong>选择一个控件</strong><span>点击工作区中的波形、字节流或位姿控件，右侧将显示该控件的设置。也可从左侧“控件”添加新控件。</span></div>
+            <div id="widget-selection-prompt" class="widget-selection-prompt"><strong>选择一个控件</strong><span>点击工作区中的控件，可在这里调整它的设置。也可从左侧“控件”添加新控件。</span></div>
             <div id="widget-title-tools" class="widget-title-tools" hidden><input id="widget-title" aria-label="控件标题" /><button id="widget-delete" type="button" class="btn btn-danger">删除</button></div>
             <div id="widget-connection-source-wrap" class="widget-engine-source input-group" hidden><label for="widget-connection-source">接收来源</label><select id="widget-connection-source"></select></div>
             <div id="widget-engine-source-wrap" class="widget-engine-source input-group" hidden><label for="widget-engine-source">显示数据源</label><select id="widget-engine-source"></select><span class="hint-text">仅选择该控件读取的采样输出，不修改解析规则。</span></div>
@@ -375,6 +377,8 @@
                     <button class="tab-btn active" id="tab-monitor-config-button" data-tab="tab-monitor-config">显示方式</button>
                     <button class="tab-btn" id="tab-waveform-channels-button" data-tab="tab-waveform-channels">通道配置</button>
                     <button class="tab-btn" id="tab-monitor-channels-button" data-tab="tab-monitor-channels">通道配置</button>
+                    <button class="tab-btn" data-tab="tab-analysis-display">显示方式</button>
+                    <button class="tab-btn" data-tab="tab-analysis-channels">通道配置</button>
                     <button class="tab-btn" data-tab="tab-pose-display">显示方式</button>
                     <button class="tab-btn" data-tab="tab-pose-channels">通道配置</button>
                     <button class="tab-btn" id="tab-widget-export-button" data-tab="tab-widget-export">导出数据</button>
@@ -394,6 +398,7 @@
                                     <option value="text">文本（.txt）</option>
                                     <option value="engine-text">数据引擎文本（.txt）</option>
                                     <option value="csv" selected>数据引擎 CSV（.csv）</option>
+                                    <option value="svg">当前视图 SVG（.svg）</option>
                                 </select>
                             </div>
                             <p class="hint-text" id="widget-export-scope-hint"></p>
@@ -422,6 +427,8 @@
                     </div>
                 </div>
 
+                <div class="tab-content" id="tab-analysis-display" hidden></div>
+                <div class="tab-content" id="tab-analysis-channels" hidden></div>
                 <div class="tab-content" id="tab-pose-display" hidden></div>
                 <div class="tab-content" id="tab-pose-channels" hidden></div>
 
@@ -442,6 +449,14 @@
                                     <option value="phase">相频图</option>
                                 </select>
                             </div>
+                            <div class="input-group">
+                                <label for="plot-trace-mode">轨迹样式</label>
+                                <select id="plot-trace-mode">
+                                    <option value="line">连线</option>
+                                    <option value="points">散点</option>
+                                    <option value="both" selected>连线和散点</option>
+                                </select>
+                            </div>
                         </div>
                         <div class="control-group">
                             <div class="section-title">采样与响应</div>
@@ -450,7 +465,7 @@
                                 <input type="number" step="1" min="2" max="65536" id="plot-window-points" value="5000" />
                             </div>
                             <p id="plot-workspace-sampling-hint" class="hint-text" hidden>全局通道按同步采样频率确定窗口时长、运算波形和频谱。映射的原始曲线按各来源时基绘制。</p>
-                            <p id="plot-recovered-markers-hint" class="hint-text" hidden>放大到可逐点查看时，空心圆表示用欠采样恢复策略补出的点。</p>
+                            <p id="plot-recovered-markers-hint" class="hint-text" hidden>空心圆表示用欠采样恢复策略补出的点。</p>
                             <div id="wrap-response-options" class="sidebar-stack" hidden>
                                 <div class="input-group"><label for="plot-response-sample-rate">响应采样率（Hz，0 表示未设置）</label><input id="plot-response-sample-rate" type="number" min="0" step="any" value="1000" /></div>
                                 <p class="hint-text">时域为零状态单位脉冲响应，左侧固定为 [0]，向右递增。未设置采样率时，频率单位为 cycles/sample。</p>
@@ -459,6 +474,31 @@
                         </div>
                         <div class="control-group" id="plot-horizontal-settings">
                             <div class="section-title">横轴设置</div>
+                            <div class="input-group">
+                                <label for="plot-x-precision-mode">精度方式</label>
+                                <select id="plot-x-precision-mode">
+                                    <option value="significant">有效数字</option>
+                                    <option value="decimal">小数位数</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label for="plot-x-significant-digits">有效数字位数</label>
+                                <input id="plot-x-significant-digits" type="number" min="0" max="15" step="1" value="0" aria-describedby="plot-x-precision-hint" />
+                                <span id="plot-x-precision-hint" class="hint-text">0 为自动。采样点编号和整数 Bin 保留原值。</span>
+                            </div>
+                            <div class="input-group" hidden>
+                                <label for="plot-x-decimal-places">小数位数</label>
+                                <input id="plot-x-decimal-places" type="number" min="0" max="15" step="1" value="6" aria-describedby="plot-x-decimal-hint" />
+                                <span id="plot-x-decimal-hint" class="hint-text">科学计数法下设置尾数的小数位数。</span>
+                            </div>
+                            <div class="input-group">
+                                <label for="plot-x-number-notation">计数法</label>
+                                <select id="plot-x-number-notation">
+                                    <option value="auto">自动</option>
+                                    <option value="plain">普通小数</option>
+                                    <option value="scientific">科学计数法</option>
+                                </select>
+                            </div>
                             <div id="wrap-plot-time-axis" class="input-group">
                                 <label class="option-label" for="plot-time-x-unit">时域横轴单位</label>
                                 <select id="plot-time-x-unit">
@@ -481,6 +521,31 @@
                         </div>
                         <div class="control-group" id="plot-vertical-settings">
                             <div class="section-title">纵轴设置</div>
+                            <div class="input-group">
+                                <label for="plot-y-precision-mode">精度方式</label>
+                                <select id="plot-y-precision-mode">
+                                    <option value="significant">有效数字</option>
+                                    <option value="decimal">小数位数</option>
+                                </select>
+                            </div>
+                            <div class="input-group">
+                                <label for="plot-y-significant-digits">有效数字位数</label>
+                                <input id="plot-y-significant-digits" type="number" min="0" max="15" step="1" value="0" aria-describedby="plot-y-precision-hint" />
+                                <span id="plot-y-precision-hint" class="hint-text">0 为自动。适用于刻度和悬浮值。</span>
+                            </div>
+                            <div class="input-group" hidden>
+                                <label for="plot-y-decimal-places">小数位数</label>
+                                <input id="plot-y-decimal-places" type="number" min="0" max="15" step="1" value="6" aria-describedby="plot-y-decimal-hint" />
+                                <span id="plot-y-decimal-hint" class="hint-text">科学计数法下设置尾数的小数位数。</span>
+                            </div>
+                            <div class="input-group">
+                                <label for="plot-y-number-notation">计数法</label>
+                                <select id="plot-y-number-notation">
+                                    <option value="auto">自动</option>
+                                    <option value="plain">普通小数</option>
+                                    <option value="scientific">科学计数法</option>
+                                </select>
+                            </div>
                             <div class="input-group" id="wrap-magnitude-scale">
                                 <label class="option-label" for="plot-freq-y-scale">纵轴刻度</label>
                                 <select id="plot-freq-y-scale">
@@ -1042,6 +1107,7 @@
     <script src="channelAutocomplete.js"></script>
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
+    <script src="pairSpectrum.js"></script>
     <script src="textCodec.js"></script>
     <script src="protocolSymbols.js"></script>
     <script src="protocolEngine.js"></script>
@@ -1063,6 +1129,7 @@
     <script src="configView.js"></script>
     <script src="configStore.js"></script>
     <script src="waveGpuRenderer.js"></script>
+    <script src="waveSvg.js"></script>
     <script src="plotter.js"></script>
     <script src="numericCodec.js"></script>
     <script src="dataParser.js"></script>
@@ -1091,7 +1158,7 @@
                                     <div data-role="plot-channel-stats" class="plot-channel-stats monitor-stat-grid"></div>
                                 </div>
                             </div>
-                            <canvas data-role="waveform-canvas"></canvas>
+                            <canvas class="widget-content-focus" data-role="waveform-canvas" tabindex="0" aria-label="波形绘图区"></canvas>
                             <div class="plot-y-scrollbar-wrap" data-role="plot-y-scrollbar-wrap" hidden>
                                 <div class="plot-y-scrollbar-thumb" data-role="plot-y-scrollbar-thumb"></div>
                             </div>
@@ -1110,7 +1177,7 @@
                                 <span data-role="stat-fail" class="monitor-stat-item"><span data-role="stat-fail-label" class="monitor-stat-label">校验失败:</span><span data-role="stat-fail-value" class="monitor-stat-value">0%</span></span>
                             </div>
                             <!-- 可滚动的窗口原始帧记录；只渲染可见行 -->
-                            <div data-role="data-log" class="log-content"></div>
+                            <div data-role="data-log" class="log-content widget-content-focus" tabindex="0" aria-label="字节流记录" role="region"></div>
 
                             <!-- 日志/发送区分隔条（暂未启用） -->
                             <!-- <div class="v-resizer-inner" data-role="log-send-resizer"></div> -->
@@ -1119,11 +1186,20 @@
 
 
                         </div></template>
+    <template id="analysis-widget-template"><div class="analysis-panel box-border workspace-panel" data-role="analysis-panel">
+        <div class="monitor-title-row pose-header" data-role="analysis-header" title="拖动标题移动；双击聚焦或返回">
+            <span class="monitor-title"></span><span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
+        </div>
+        <svg class="analysis-plot widget-content-focus" data-role="analysis-svg" role="img" tabindex="0"></svg>
+    </div></template>
+    <script src="analysisSettings.js"></script>
+    <script src="analysisInspector.js"></script>
+    <script src="analysisPlot.js"></script>
     <template id="pose-widget-template"><div class="pose-panel box-border workspace-panel" data-role="pose-panel">
         <div class="monitor-title-row pose-header" data-role="pose-header" title="拖动标题移动；双击聚焦或返回">
             <span class="monitor-title">位姿</span><span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
         </div>
-        <canvas data-role="pose-canvas" aria-label="三维位姿：odom 与 body 坐标轴和飞机模型"></canvas>
+        <canvas class="widget-content-focus" data-role="pose-canvas" tabindex="0" aria-label="三维位姿：odom 与 body 坐标轴和飞机模型"></canvas>
         <div class="pose-status" data-role="pose-status" role="status">无保留数据</div>
     </div></template>
     <script src="poseMath.js"></script>

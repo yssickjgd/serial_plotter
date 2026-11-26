@@ -198,12 +198,111 @@ function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
     };
 }
 
+/** The plot and the horizontal tick band zoom X. The right tick band zooms Y. */
+function plotWheelAxis(x, y, { left = 0, top = 0, right, width, height }) {
+    if (!(x >= left && x <= width && y >= top && y <= height)) return null;
+    return x > right ? 'y' : 'x';
+}
+
+function zoomAxisBounds(min, max, anchorRatio, delta, limits) {
+    const factor = delta < 0 ? .8 : 1.25;
+    const span = max - min;
+    if (!(span > 0)) return null;
+    if (!limits) {
+        const anchor = min * (1 - anchorRatio) + max * anchorRatio;
+        const next = [anchor * (1 - factor) + min * factor, anchor * (1 - factor) + max * factor];
+        return next.every(Number.isFinite) && next[1] > next[0] ? next : null;
+    }
+    const [lower, upper] = limits, available = upper - lower;
+    const nextSpan = Math.min(available, span * factor);
+    if (!(nextSpan > 0)) return null;
+    if (nextSpan >= available * (1 - 1e-12)) return [...limits];
+    const anchor = min + anchorRatio * span;
+    const first = Math.max(lower, Math.min(upper - nextSpan, anchor - anchorRatio * nextSpan));
+    const next = [first, first + nextSpan];
+    return next.every(Number.isFinite) && next[1] > next[0] ? next : null;
+}
+
+/** Round the displayed decimal without converting it back to a binary float. */
+function formatDisplayNumber(value, digits = 6) {
+    if (!Number.isFinite(value)) return String(value);
+    return trimDecimalZeros(value.toPrecision(digits));
+}
+
+function trimDecimalZeros(text) {
+    return text.replace(/(\.\d*?[1-9])0+(?=e|$)|\.0+(?=e|$)/g, '$1');
+}
+
+function expandExponential(text) {
+    const match = /^(-?)(\d+)(?:\.(\d+))?e([+-]?\d+)$/.exec(text);
+    if (!match) return text;
+    const [, sign, whole, decimals = '', exponent] = match;
+    const digits = whole + decimals, point = whole.length + Number(exponent);
+    if (point <= 0) return sign + '0.' + '0'.repeat(-point) + digits;
+    if (point >= digits.length) return sign + digits + '0'.repeat(point - digits.length);
+    return sign + digits.slice(0, point) + '.' + digits.slice(point);
+}
+
+const maxAxisSignificantDigits = 15;
+const axisNumberDefaults = Object.freeze({ mode: 'significant', significantDigits: 0, decimalPlaces: 6, notation: 'auto' });
+const axisNumberFieldNames = ['PrecisionMode', 'SignificantDigits', 'DecimalPlaces', 'NumberNotation'];
+
+function readAxisNumberFormat(settings, axis, defaults = axisNumberDefaults) {
+    const get = (key, fallback) => settings[axis + key] === undefined ? fallback : settings[axis + key];
+    return { mode: get('PrecisionMode', defaults.mode), significantDigits: get('SignificantDigits', defaults.significantDigits),
+        decimalPlaces: get('DecimalPlaces', defaults.decimalPlaces), notation: get('NumberNotation', defaults.notation) };
+}
+
+function normalizeAxisNumberSettings(settings) {
+    const result = {};
+    const integer = (value, name) => {
+        const text = String(value).trim(), digits = Number(text);
+        if (!['number', 'string'].includes(typeof value) || !/^\d+$/.test(text) || digits > maxAxisSignificantDigits)
+            throw new RangeError(name + '须为 0 至 ' + maxAxisSignificantDigits + ' 的整数');
+        return digits;
+    };
+    for (const [axis, label] of [['x', '横轴'], ['y', '纵轴']]) {
+        const { mode, significantDigits, decimalPlaces, notation } = readAxisNumberFormat(settings, axis);
+        if (!['significant', 'decimal'].includes(mode)) throw new Error(label + '精度方式无效');
+        if (!['auto', 'plain', 'scientific'].includes(notation)) throw new Error(label + '计数法无效');
+        result[axis + 'PrecisionMode'] = mode;
+        result[axis + 'SignificantDigits'] = integer(significantDigits, label + '有效数字位数');
+        result[axis + 'DecimalPlaces'] = integer(decimalPlaces, label + '小数位数');
+        result[axis + 'NumberNotation'] = notation;
+    }
+    return result;
+}
+
+function customAxisNumberFormat(format) {
+    return format.mode === 'decimal' || format.significantDigits > 0 || format.notation !== 'auto';
+}
+
+function formatAxisValue(value, format = axisNumberDefaults, autoDigits = 6) {
+    if (!Number.isFinite(value)) return String(value);
+    if (format.mode === 'decimal') {
+        const places = format.decimalPlaces;
+        if (format.notation === 'scientific' || format.notation === 'auto' && Math.abs(value) >= 1e21)
+            return value.toExponential(places);
+        if (Math.abs(value) >= 1e21) return expandExponential(String(value)) + (places ? '.' + '0'.repeat(places) : '');
+        const text = value.toFixed(places);
+        return text.startsWith('-') && Number(text) === 0 ? text.slice(1) : text;
+    }
+    const digits = format.significantDigits || autoDigits;
+    if (format.notation === 'scientific') return trimDecimalZeros(value.toExponential(digits - 1));
+    const text = formatDisplayNumber(value, digits);
+    return format.notation === 'plain' ? expandExponential(text) : text;
+}
+
 if (typeof module !== 'undefined') module.exports = {
     adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
-    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds
+    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
+    formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
+    customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
     adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
-    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds
+    bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
+    formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
+    customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds
 });

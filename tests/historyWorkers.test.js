@@ -310,6 +310,30 @@ test('FFT worker fallback remains asynchronous on systems without spare worker c
     assert.equal(pool.workerCount, 0);
 });
 
+test('pair spectrum jobs preserve shared sample views and compute signed phase across separate runs', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const x = Float64Array.from({ length: 25 }, (_, i) => [101, 100, 99, 100][i % 4]);
+    const y = Float64Array.from({ length: 25 }, (_, i) => [20, 19, 20, 21][i % 4]);
+    const segments = [{ x: x.subarray(0, 12), y: y.subarray(0, 12) },
+        { x: x.subarray(13), y: y.subarray(13) }];
+    const task = { kind: 'pairSpectrum', segments,
+        options: { fftSize: 8, fftWindow: 'rectangular', fftRemoveDc: true, fftOverlap: 50 } };
+    const before = [x.slice(), y.slice()];
+    for (const [hardwareConcurrency, crash] of [[2, false], [3, false], [3, true]]) {
+        const pool = new HistoryWorkerPool({ hardwareConcurrency, workerFactory: nodeWorkerFactory({ crash }) });
+        t.after(() => pool.dispose());
+        const result = await pool.runTask(task);
+        assert.equal(pool.peakWorkers, hardwareConcurrency - 2);
+        assert.equal(pool.workerCount, crash ? 0 : hardwareConcurrency - 2);
+        assert.equal(result.blocks, 4);
+        assert.ok(result.phase instanceof Float64Array && result.coherence instanceof Float64Array);
+        assert.ok(Math.abs(result.phase[2] - Math.PI / 2) < 1e-12);
+        assert.ok(result.coherence[2] > 1 - 1e-12 && result.coherence[2] <= 1);
+        assert.ok(Number.isNaN(result.coherence[0]));
+        assert.deepEqual([x, y], before);
+    }
+});
+
 test('matching plots share FFT snapshots while input, range, transforms and windows stay independent', async t => {
     const { HistoryWorkerPool } = loadPool();
     const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });

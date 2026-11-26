@@ -9,7 +9,7 @@ function bootApplication(config = null, options = {}) {
     let clock = 1000, nextId = 0, writes = 0;
     class Element {
         constructor(tag = 'div') {
-            this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.listeners = new Map();
+            this.localName = tag; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.listeners = new Map();
             this.style = { setProperty(name, value) { this[name] = value; } };
             this.attributes = {}; this.className = ''; this._text = ''; this._value = undefined;
             this.checked = false; this.hidden = false; this.disabled = false;
@@ -86,7 +86,8 @@ function bootApplication(config = null, options = {}) {
         }
         querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
         cloneNode(deep) {
-            const copy = new Element(this.tagName);
+            const copy = new Element(this.localName);
+            copy.namespaceURI = this.namespaceURI;
             for (const [key, value] of Object.entries(this.attributes)) copy.setAttribute(key, value);
             copy._text = this._text; copy._value = this._value;
             if (deep) this.children.forEach(child => copy.appendChild(child.cloneNode(true)));
@@ -103,6 +104,24 @@ function bootApplication(config = null, options = {}) {
     document.hidden = Boolean(options.hidden);
     Object.defineProperty(document, 'visibilityState', { get: () => document.hidden ? 'hidden' : 'visible' });
     document.createElement = tag => { const node = new Element(tag); if (tag === 'a') downloads.push(node); return node; };
+    document.createElementNS = (namespace, tag) => {
+        const node = new Element(tag);
+        node.namespaceURI = namespace;
+        return node;
+    };
+    class XMLSerializer {
+        serializeToString(root) {
+            const escape = value => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/>/g, '&gt;');
+            const serialize = (el, namespace) => {
+                const attrs = { ...el.attributes };
+                if (el.namespaceURI && el.namespaceURI !== namespace) attrs.xmlns ??= el.namespaceURI;
+                const attributes = Object.entries(attrs).map(([key, value]) => ' ' + key + '="' + escape(value) + '"').join('');
+                return '<' + el.localName + attributes + '>' + escape(el._text) +
+                    el.children.map(child => serialize(child, el.namespaceURI)).join('') + '</' + el.localName + '>';
+            };
+            return serialize(root, null);
+        }
+    }
     document.createDocumentFragment = () => new Element('#fragment');
     document.getElementById = id => document.querySelectorAll('*').find(node => node.id === id) ?? null;
     document.getSelection = () => null;
@@ -112,7 +131,8 @@ function bootApplication(config = null, options = {}) {
         if (token.startsWith('</')) { if (stack.length > 1) stack.pop(); continue; }
         if (token.startsWith('<')) {
             const match = /^<([\w-]+)/.exec(token); if (!match) continue;
-            const tag = match[1], node = new Element(tag);
+            const tag = match[1], node = tag === 'svg' || stack.at(-1).namespaceURI
+                ? document.createElementNS('http://www.w3.org/2000/svg', tag) : new Element(tag);
             for (const attribute of token.slice(match[0].length).matchAll(/([\w-]+)(?:="([^"]*)")?/g))
                 node.setAttribute(attribute[1], attribute[2] ?? '');
             stack.at(-1).appendChild(node);
@@ -123,10 +143,11 @@ function bootApplication(config = null, options = {}) {
     document.body = document.querySelector('body');
     const window = new Element('window'); document.defaultView = window;
     window.matchMedia = options.matchMedia;
+    window.XMLSerializer = XMLSerializer;
     const storage = new Map(config === null ? [] : [['serialplot_v3_config', typeof config === 'string' ? config : JSON.stringify(config)]]);
     if (options.layout) storage.set('serialplot_v3_workspace', JSON.stringify(options.layout));
     const context = vm.createContext({ document, window, navigator: {}, performance: { now: () => clock },
-        Uint8Array, Float64Array, TextEncoder, TextDecoder, Blob, Date, console,
+        Uint8Array, Float64Array, TextEncoder, TextDecoder, Blob, XMLSerializer, Date, console,
         URL: { createObjectURL(blob) { blobs.push(blob); return 'blob:test'; }, revokeObjectURL() {} },
         localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { writes++; storage.set(key, value); } },
         alert: message => alerts.push(message),

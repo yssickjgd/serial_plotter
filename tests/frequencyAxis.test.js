@@ -10,7 +10,7 @@ function createPlotter(responseFrames = null, options = {}) {
     const canvasOps = [];
     const markers = [], dots = [];
     const canvasEvents = new Map();
-    const ctx = new Proxy({}, { get: (_, key) => key === 'measureText'
+    const ctx = new Proxy({}, { get: (target, key) => key === 'measureText'
         ? text => ({ width: String(text).length * 6 })
         : key === 'fillText' ? text => { labels.push(String(text)); }
             : key === 'clearRect' || key === 'fillRect' ? (...args) => {
@@ -18,6 +18,7 @@ function createPlotter(responseFrames = null, options = {}) {
                 if (key === 'fillRect' && args[2] === 3 && args[3] === 3) dots.push(args);
                 assert.ok(args.every(Number.isFinite));
             }
+            : key === 'stroke' ? () => { canvasOps.push('stroke:' + target.strokeStyle); }
             : key === 'arc' ? (x, y) => { markers.push({ x, y }); }
             : key === 'moveTo' || key === 'lineTo' ? (x, y) => {
                 assert.ok(Number.isFinite(x) && Number.isFinite(y));
@@ -42,7 +43,7 @@ function createPlotter(responseFrames = null, options = {}) {
     const context = vm.createContext({ document, window: { addEventListener() {} },
         performance, requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'systemResponse.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'systemResponse.js', 'waveSvg.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
@@ -55,6 +56,36 @@ function createPlotter(responseFrames = null, options = {}) {
     plotter.setDisplayOptions({ displayMode: 'frequency' });
     return { plotter, labels, canvasEvents, canvasOps, context, markers, dots };
 }
+
+test('axis number formats support fixed decimal places and explicit scientific or plain decimal notation', () => {
+    const { formatAxisValue, readAxisNumberFormat } = require('../plotMath');
+    const format = (value, settings) => formatAxisValue(value, readAxisNumberFormat(settings, 'x'));
+    assert.equal(format(51.00000000000001, { xPrecisionMode: 'decimal', xDecimalPlaces: 2, xNumberNotation: 'plain' }), '51.00');
+    assert.equal(format(99.6, { xPrecisionMode: 'decimal', xDecimalPlaces: 0 }), '100');
+    assert.equal(format(.0012345, { xPrecisionMode: 'decimal', xDecimalPlaces: 2, xNumberNotation: 'scientific' }), '1.23e-3');
+    assert.equal(format(2500, { xSignificantDigits: 4, xNumberNotation: 'scientific' }), '2.5e+3');
+    assert.equal(format(1.2345e-8, { xSignificantDigits: 3, xNumberNotation: 'plain' }), '0.0000000123');
+    assert.equal(format(Number.MAX_VALUE, { xSignificantDigits: 2, xNumberNotation: 'scientific' }), '1.8e+308');
+});
+
+test('wave axis precision applies independently to ticks, hover and SVG', () => {
+    const { plotter, canvasEvents, labels } = createPlotter();
+    plotter.setDisplayOptions({ displayMode: 'time', yScaleModeTime: 'manual',
+        yMinTime: 1.23456, yMaxTime: 2.34567, xSignificantDigits: 5, ySignificantDigits: 3 });
+    assert.equal(plotter._formatAxisNumber(1.2345678), '1.2346');
+    labels.length = 0; plotter.draw();
+    assert.equal(labels[0], '1.23');
+    assert.match(plotter.exportSvg(), />2\.35</);
+    canvasEvents.get('pointermove')({ clientX: 200, clientY: 100 });
+    labels.length = 0; plotter.draw();
+    assert.ok(labels.some(text => /^Value: \d\.\d{2}$/.test(text)));
+    plotter.setDisplayOptions({ xPrecisionMode: 'decimal', xDecimalPlaces: 2, xNumberNotation: 'scientific',
+        yPrecisionMode: 'decimal', yDecimalPlaces: 4, yNumberNotation: 'plain' });
+    assert.equal(plotter._formatAxisNumber(.0012345678), '1.23e-3');
+    labels.length = 0; plotter.draw();
+    assert.equal(labels[0], '1.2346');
+    assert.match(plotter.exportSvg(), />2\.3457</);
+});
 
 test('dB conversion only processes frequency bins inside the visible viewport', () => {
     const { plotter, context } = createPlotter();
@@ -257,6 +288,73 @@ function createResponsePlotter(expression) {
         freqXUnit: 'hz', freqXScale: 'log', freqYScale: 'linear' });
     return result;
 }
+
+test('wave SVG preserves log coordinates, gaps, sample markers and axis ticks on Canvas and WebGL', () => {
+    for (const gpuRenderer of [null, { available: true, resize() {}, render: () => true }]) {
+        const { plotter, labels } = createPlotter(null, { gpuRenderer });
+        plotter._computeFftForVisibleChannels = () => new Map([[0, {
+            mags: [0, 1, 10, NaN, 100], phases: [0, 1, 2, 3, 4], fftSize: 8
+        }]]);
+        plotter.setSampleRateHz(8);
+        plotter.setDisplayOptions({ freqXScale: 'log', freqYScale: 'log',
+            yScaleModeFreq: 'manual', yMinFreq: 1, yMaxFreq: 100 });
+        plotter.draw();
+        const svg = plotter.exportSvg('FFT <A&B>');
+        assert.match(svg, /FFT &lt;A&amp;B&gt;/);
+        assert.match(svg, /M0 378 L355 189 M710 0/);
+        assert.match(svg, /clip-path="url\(#.+?\)"/);
+        assert.match(svg, /stroke="#ff0000"/);
+        assert.equal((svg.match(/width="3" height="3"/g) ?? []).length, 3);
+        for (const label of labels) assert.ok(svg.includes('>' + label + '<'), label);
+        assert.doesNotMatch(svg, /<image|data:image|NaN|Infinity/);
+    }
+});
+
+test('time SVG uses the selected window and explicit y bounds with hidden channels excluded', () => {
+    const { plotter } = createPlotter();
+    plotter.clear(); plotter.setChannelCount(2); plotter.setChannelVisible(1, false);
+    for (const value of [99, 5, NaN, 15, 99]) plotter.addFrame([value, 27]);
+    plotter.setDisplayOptions({ displayMode: 'time', yScaleModeTime: 'manual', yMinTime: 0, yMaxTime: 10 });
+    Object.assign(plotter.vp.time, { autoFollow: false, scrollOffset: 1, displayCount: 3 });
+    const svg = plotter.exportSvg('时域');
+    assert.match(svg, /d="M0 189 M710 -189"/);
+    assert.match(svg, /10\.000000</);
+    assert.equal((svg.match(/width="3" height="3"/g) ?? []).length, 2);
+    assert.doesNotMatch(svg, /#00ff00/i);
+});
+
+test('wave trace styles select the same geometry on Canvas and SVG across domains', () => {
+    const { plotter, canvasOps, dots } = createPlotter();
+    plotter.clear();
+    for (const value of [0, 1, 0, -1, 0, 1, 0, -1]) plotter.addFrame([value]);
+    for (const displayMode of ['time', 'frequency', 'phase']) {
+        for (const traceMode of ['line', 'points', 'both']) {
+            plotter.setDisplayOptions({ displayMode, traceMode });
+            canvasOps.length = dots.length = 0;
+            plotter.draw();
+            const svg = plotter.exportSvg('轨迹');
+            const label = displayMode + '/' + traceMode;
+            assert.equal(canvasOps.includes('stroke:#ff0000'), traceMode !== 'points', label);
+            assert.equal(dots.length > 0, traceMode !== 'line', label);
+            assert.equal(svg.includes('<path fill="none" stroke="#ff0000"'), traceMode !== 'points', label);
+            assert.equal(svg.includes('width="3" height="3"'), traceMode !== 'line', label);
+        }
+    }
+});
+
+test('system response SVG follows time, normalized frequency, calibrated dB and phase units', () => {
+    const { plotter } = createResponsePlotter('[0]=1,[1]=0.001');
+    for (const [options, unit] of [
+        [{ displayMode: 'time' }, '采样点'],
+        [{ displayMode: 'frequency' }, 'cycles/sample'],
+        [{ responseSampleRate: 512, magnitudeUnit: 'db' }, 'dB'],
+        [{ displayMode: 'phase', phaseUnit: 'radians', phaseUnwrap: true }, 'rad'],
+        [{ phaseUnit: 'degrees', phaseUnwrap: false }, '°']
+    ]) {
+        plotter.setDisplayOptions(options);
+        assert.ok(plotter.exportSvg('响应').includes(unit), unit);
+    }
+});
 
 test('automatic linear magnitude fits the visible system response instead of forcing zero', () => {
     const { plotter } = createResponsePlotter('[0]=1,[1]=0.001');
@@ -664,7 +762,8 @@ test('sparse spectra show true bin markers and hover between bins in GPU and Can
     plotter.mousePos = null;
     plotter._computeFftForVisibleChannels = () => new Map([[0, { mags: Array(1025).fill(1), fftSize: 2048 }]]);
     plotter.draw();
-    assert.equal(traces[0].dots, false, 'dense spectra still draw a line without per-bin markers');
+    assert.equal(traces[0].dots, true, 'dense spectra mark the extrema retained for display');
+    assert.ok(traces[0].points.length < 1025, 'dense markers reuse the pixel buckets');
 });
 
 test('logarithmic frequency hover interpolates along the plotted segment on both axes', () => {

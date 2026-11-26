@@ -855,7 +855,7 @@ async function startSerialPlotterApplication() {
 
     function applyWorkspaceMappings(mappings, legacy = []) {
         if (!mappings.length && [...widgets.widgets.values()].some(widget => widget.capture === workspaceChannels))
-            throw new Error('仍有波形使用全局通道，请先更改其接收来源');
+            throw new Error('仍有控件使用全局通道，请先更改其接收来源');
         const local = workspaceChannels.dataEngine.globals;
         const plan = S.planWorkspaceChannels(workspaceChannels.settings, mappings, legacy);
         const { channelNames, channelColors, channelDefinitions } = plan.globals;
@@ -1522,15 +1522,23 @@ async function startSerialPlotterApplication() {
             syncExportAvailability();
         } finally { bindingExport = false; }
     }
-    function widgetSelectionForFormat(format, selected = widgetExportSelection) {
-        if (format !== 'text') return selected;
+    function widgetSelectionForFormat(format, refresh = false) {
         const widget = widgets.active;
+        if (format === 'svg') {
+            return typeof widget?.view?.exportSvg === 'function' ? { widget } : null;
+        }
+        if (format !== 'text') {
+            if (!refresh) return widgetExportSelection;
+            const engine = widget?.capture.dataEngine;
+            return S.widgetExportSelection(widget, engine?.globals.channelNames, engine?.mode);
+        }
         return widget?.type === 'byte' && widget.settings.captureMode === 'text' && widget.source.kind === 'raw'
             ? { widget, source: widget.source, encoding: widget.settings.textEncoding } : null;
     }
     function widgetExportIssue(format, selected) {
+        if (format === 'svg') return selected ? '' : '请选择波形、XY 或直方图控件。';
         if (!selected) return format === 'text' ? '请选择显示「文本」的字节流控件。'
-            : '请选择有解析数据的波形、位姿或显示「数据引擎」的字节流控件。';
+            : '请选择有解析数据的波形、XY、直方图、位姿或显示「数据引擎」的字节流控件。';
         if (selected.widget.capture === workspaceChannels && (format === 'binary' || format === 'hex-text'))
             return '请在左侧「导出数据」中按通讯来源导出原始字节。此处可导出全局通道的 TXT 或 CSV。';
         if (pauseDrain && selected.widget.capture === workspaceChannels) return '正在整理暂停前的数据。';
@@ -1571,12 +1579,13 @@ async function startSerialPlotterApplication() {
         status('export-source-status', rawIssue);
 
         const format = widgetExport.format, selected = widgetSelectionForFormat(format), issue = widgetExportIssue(format, selected);
-        widgetExportView.sync({ busy: exporting, available: !issue, syncAvailable: Boolean(selected?.source.frames.provenanceAt) });
+        widgetExportView.sync({ busy: exporting, available: !issue, syncAvailable: Boolean(selected?.source?.frames.provenanceAt) });
         const title = widgets.active?.title;
         el('widget-export-scope-hint').textContent = title ? '当前控件：' + title : '';
         const hint = format === 'binary' || format === 'hex-text' ? '导出成功解析的原始帧。'
             : format === 'text' ? '按控件的字符集和记录边界导出。' : '导出该控件采用的通道或字段。';
-        el('widget-export-range-summary').textContent = selected ? hint + '\n' + exportTimeRange([selected.source.frames]) : '';
+        el('widget-export-range-summary').textContent = !selected ? '' : format === 'svg'
+            ? '保存点击导出时的图形、刻度和坐标范围。' : hint + '\n' + exportTimeRange([selected.source.frames]);
         status('widget-export-source-status', issue);
     }
     listen(el('export-source'), 'change', () => {
@@ -1594,7 +1603,8 @@ async function startSerialPlotterApplication() {
     async function writeExport(view, options, buffers, check, makeChunks, metadataSize = 0) {
         const csv = options.format === 'csv', binary = options.format === 'binary';
         const text = options.format === 'text' || options.format === 'engine-text';
-        const extension = csv ? 'csv' : binary ? 'bin' : text ? 'txt' : 'hex';
+        const svg = options.format === 'svg';
+        const extension = svg ? 'svg' : csv ? 'csv' : binary ? 'bin' : text ? 'txt' : 'hex';
         const filename = 'Scientific_Plot_Export_' + Date.now() + '.' + extension;
         const large = buffers.reduce((sum, buffer) => sum + buffer.length, 0) > 50000 ||
             buffers.reduce((sum, buffer) => sum + buffer.retainedByteLength, metadataSize) > 32 * 1024 * 1024;
@@ -1649,7 +1659,7 @@ async function startSerialPlotterApplication() {
                 updateProgress('正在完成文件保存');
                 await writable.close(); writable = null;
             }
-            else download(parts, filename, binary ? 'application/octet-stream' : csv ? 'text/csv;charset=utf-8' :
+            else download(parts, filename, svg ? 'image/svg+xml;charset=utf-8' : binary ? 'application/octet-stream' : csv ? 'text/csv;charset=utf-8' :
                 'text/plain;charset=' + (text ? options.outputEncoding : 'utf-8'));
             return true;
         } catch (error) {
@@ -1689,8 +1699,17 @@ async function startSerialPlotterApplication() {
         if (exporting || disposed) return false;
         const options = widgetExportView.read(), format = options.format;
         const active = widgets.active, engine = active?.capture.dataEngine;
-        const selected = widgetSelectionForFormat(format, S.widgetExportSelection(active, engine?.globals.channelNames, engine?.mode));
+        const selected = widgetSelectionForFormat(format, true);
         if (widgetExportIssue(format, selected)) return false;
+        if (format === 'svg') {
+            let svg;
+            try { svg = active.view.exportSvg(active.title); }
+            catch (error) { status('widget-export-source-status', '导出失败：' + error.message); return false; }
+            // The image is immutable before the first await, even if live acquisition wraps the source buffer.
+            return writeExport(widgetExportView, options, [], () => {
+                if (disposed) throw new Error('当前工作区已关闭');
+            }, () => [svg], svg.length * 2);
+        }
         const { widget, source, channels, channelIndices, fieldPaths } = selected, { frames } = source;
         const wire = format === 'binary' || format === 'hex-text';
         const protocolSource = wire && source.kind === 'numeric' && engine.mode === 'Self_Defined_Frame'
@@ -2037,9 +2056,9 @@ async function startSerialPlotterApplication() {
             rates.set(source, { count, epoch: capture.epoch, generation: source.generation });
         }
         for (const widget of widgets.widgets.values()) {
-            if (widget.type === 'wave' || widget.type === 'pose') {
+            if (widget.type !== 'byte') {
                 const count = widget.type === 'wave' && widget.view.displayMode !== 'time' ? widget.view.completedSpectrumDraws : widget.view.completedDraws;
-                const previous = draws.get(widget.id), mode = widget.type === 'pose' ? 'pose' : widget.view.displayMode;
+                const previous = draws.get(widget.id), mode = widget.type === 'wave' ? widget.view.displayMode : widget.type;
                 const fps = previous?.mode === mode ? Math.max(0, count - previous.count) / elapsed : 0;
                 draws.set(widget.id, { count, mode });
                 widget.refs['stat-plot-fps'].textContent = '绘图帧率: ' + Math.round(fps) + ' FPS';

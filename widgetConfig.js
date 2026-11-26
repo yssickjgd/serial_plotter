@@ -20,8 +20,8 @@ const GLOBAL_DEFAULTS = {
     footerHex: '00 00 80 7F', enableChecksum: false, channelNames: ['CH00001'], channelColors: [], channelDefinitions: [], channelRecords: []
 };
 const WAVE_DEFAULTS = {
-    connectionSource: 'primary', engineSource: null, plotViewMode: 'time',
-    plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotFreqXUnit: 'hz',
+    connectionSource: 'primary', engineSource: null, plotViewMode: 'time', plotTraceMode: 'both',
+    plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotFreqXUnit: 'hz', xSignificantDigits: 0, ySignificantDigits: 0,
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
     plotResponseSampleRate: '1000', plotResponseTimePoints: '20', responseChannels: [], responseViewport: null,
@@ -94,7 +94,7 @@ function normalizeBufferExportSettings(input, defaultFormat = 'hex-text') {
 }
 
 function normalizeWidgetExportPreferences(input, legacyFormat, legacyProfiles = {}) {
-    const formats = ['binary', 'hex-text', 'text', 'engine-text', 'csv'];
+    const formats = ['binary', 'hex-text', 'text', 'engine-text', 'csv', 'svg'];
     if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input) ||
         !formats.includes(input.format) || !input.formats || typeof input.formats !== 'object' ||
         Array.isArray(input.formats) || Object.keys(input.formats).some(key => !formats.includes(key))))
@@ -118,11 +118,15 @@ function legacyWindowPoints(settings = {}) {
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
     const connectionSource = settings.connectionSource ?? 'primary';
-    if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && type === 'wave') &&
+    if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && ['wave', 'xy', 'histogram'].includes(type)) &&
         !/^(?:primary|serial-[1-9]\d*)$/.test(connectionSource))
         throw new Error('控件接收来源无效');
     if (settings.engineSource !== undefined && settings.engineSource !== null &&
         (typeof settings.engineSource !== 'string' || settings.engineSource.length > 512)) throw new Error('控件数据源无效');
+    if (type === 'xy' || type === 'histogram') {
+        const analysis = typeof module !== 'undefined' ? require('./analysisSettings').AnalysisSettings : globalThis.SerialPlotter.AnalysisSettings;
+        return { ...analysis.normalize(type, settings), engineSource: settings.engineSource ?? null, connectionSource };
+    }
     if (type === 'pose') {
         const originalCount = Number(globals.channelsCount);
         const engine = new widgetChannelUtils.ChannelOperations(originalCount, globals.channelDefinitions ?? [], { names: globals.channelNames, symbolVersion: globals.symbolVersion });
@@ -131,6 +135,8 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
+        const { normalizeAxisNumberSettings } = typeof module !== 'undefined' ? require('./plotMath') : globalThis.SerialPlotter;
+        Object.assign(result, normalizeAxisNumberSettings(settings));
         result.plotResponseTimePoints = settings.plotResponseTimePoints ?? settings.plotResponsePoints ?? WAVE_DEFAULTS.plotResponseTimePoints;
         widgetConfigUtils.parseIntInRange(result.plotResponseTimePoints, 2, 65536, '系统响应时域采样点数');
         result.plotResponseTimePoints = String(result.plotResponseTimePoints);
@@ -313,7 +319,7 @@ function validateWorkspaceConfig(config) {
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
-        if (!['wave', 'byte', 'pose'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
+        if (!['wave', 'byte', 'pose', 'xy', 'histogram'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
             throw new Error('控件类型或标题无效');
         ids.add(widget.id);
         if (widget.settings?.engineSource !== undefined && widget.settings.engineSource !== null &&

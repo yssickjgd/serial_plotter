@@ -134,6 +134,16 @@ function createHistoryTaskProcessor(task, dependencies) {
             result() { return result; }
         };
     }
+    if (task?.kind === 'pairSpectrum') {
+        let result;
+        return {
+            step() {
+                result = dependencies.pairSpectrum(task.segments, task.options);
+                return true;
+            },
+            result() { return result; }
+        };
+    }
     if (!(task?.bytes instanceof Uint8Array)) throw new TypeError('History task bytes must be a Uint8Array');
     if (task.kind === 'hex-assemble') {
         if (!Array.isArray(task.parts) || task.parts.some(part => !(part instanceof Uint8Array)))
@@ -262,6 +272,7 @@ function historyWorkerDependencies() {
     const layout = typeof module !== 'undefined' ? require('./monitorView').MonitorTextLayout
         : globalThis.SerialPlotter.MonitorTextLayout;
     const spectrum = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
+    const pairs = typeof module !== 'undefined' ? require('./pairSpectrum') : globalThis.SerialPlotter;
     const phase = typeof module !== 'undefined' ? require('./systemResponse') : globalThis.SerialPlotter;
     const Protocol = typeof module !== 'undefined' ? require('./protocolEngine').Protocol : globalThis.SerialPlotter.Protocol;
     const search = typeof module !== 'undefined' ? require('./monitorSearch') : globalThis.SerialPlotter.MonitorSearch;
@@ -271,6 +282,7 @@ function historyWorkerDependencies() {
     const hex = typeof module !== 'undefined' ? require('./captureExport') : globalThis.SerialPlotter;
     const bytes = typeof module !== 'undefined' ? require('./byteUtils') : globalThis.SerialPlotter;
     return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
+        pairSpectrum: pairs.pairSpectrum, createPairSpectrumSource: pairs.createPairSpectrumSource,
         formatCsvExportRow: csv.formatCsvExportRow, formatHexExportRecord: hex.formatHexExportRecord, ByteUtils: bytes.ByteUtils,
         TYPE_LENGTH: parser.TYPE_LENGTH, Protocol, search, records, searchTransform: channels.transformChannelValue,
         createMonitorSearchProcessor: search.createMonitorSearchProcessor, scanTimestampRange: search.scanTimestampRange };
@@ -287,6 +299,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
         `const FFT_WINDOWS = ${JSON.stringify(dependencies.FFT_WINDOWS)};\n` +
         ['nextPow2', 'fftInPlace', 'windowCoefficient', 'prepareFrequencySeries', 'unwrapPhaseDegrees']
             .map(name => dependencies[name].toString()).join('\n') + '\n' +
+        `const pairSpectrum = ${dependencies.createPairSpectrumSource()};\n` +
         dependencies.decodeNumericPayload.toString() + '\n' +
         functions.map(name => dependencies[name].toString()).join('\n') + '\n' +
         `const Protocol = (${dependencies.Protocol.createFactorySource()})(globalThis,
@@ -307,6 +320,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
                         TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees,
+                        pairSpectrum,
                         Protocol, createMonitorSearchProcessor, scanTimestampRange, formatCsvExportRow, formatHexExportRecord });
                 if (data.reportProgress) {
                     while (!processor.step(${protocolStreamProgressBytes}))
@@ -316,6 +330,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
                 if (data.task.kind === 'fft') transfer.push(result.mags.buffer, result.phases.buffer,
                     result.logMags.buffer, result.unwrappedPhases.buffer);
+                if (data.task.kind === 'pairSpectrum') transfer.push(result.phase.buffer, result.coherence.buffer);
                 if (data.task.kind === 'protocol-decode') {
                     const buffers = new Set(), seen = new Set();
                     const visit = value => {
@@ -344,6 +359,10 @@ function historyAbortError() {
     const error = new Error('History worker pool disposed');
     error.name = 'AbortError';
     return error;
+}
+
+function isLiveSpectrumTask(task) {
+    return task.kind === 'fft' || task.kind === 'pairSpectrum';
 }
 
 class HistoryWorkerPool {
@@ -465,11 +484,15 @@ class HistoryWorkerPool {
         if (this.disposed || signal?.aborted) return Promise.reject(historyAbortError());
         if (['fft', 'time-scan', 'csv-export'].includes(task?.kind) && !(task.values instanceof Float64Array))
             return Promise.reject(new TypeError(task.kind === 'fft' ? 'FFT values must be a Float64Array' : '历史采样必须是双精度浮点数数组'));
+        if (task?.kind === 'pairSpectrum' && (!Array.isArray(task.segments) || task.segments.some(segment =>
+            !(segment?.x instanceof Float64Array) || !(segment.y instanceof Float64Array) || segment.x.length !== segment.y.length)))
+            return Promise.reject(new TypeError('双通道频谱的每个分段需要两个等长的双精度浮点数组'));
         if (task?.kind === 'protocol-decode') {
             try { validateProtocolHistoryTask(task); }
             catch (error) { return Promise.reject(error); }
         }
-        if (!['fft', 'time-scan', 'csv-export', 'hex-export', 'protocol-decode', 'monitor-search'].includes(task?.kind) && !(task?.bytes instanceof Uint8Array))
+        if (!['fft', 'pairSpectrum', 'time-scan', 'csv-export', 'hex-export', 'protocol-decode', 'monitor-search'].includes(task?.kind) &&
+            !(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
         if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
             task.parts.some(part => !(part instanceof Uint8Array))))
@@ -495,8 +518,8 @@ class HistoryWorkerPool {
                 job.removeAbortListener = () => signal.removeEventListener('abort', cancel);
             }
             this.jobs.add(job);
-            if (task.kind === 'fft') {
-                const firstOther = this.queue.findIndex(queued => queued.task.kind !== 'fft');
+            if (isLiveSpectrumTask(task)) {
+                const firstOther = this.queue.findIndex(queued => !isLiveSpectrumTask(queued.task));
                 this.queue.splice(firstOther < 0 ? this.queue.length : firstOther, 0, job);
             } else this.queue.push(job);
             this._pump();
@@ -545,9 +568,25 @@ class HistoryWorkerPool {
                 try {
                     const kind = job.task.kind, samples = ['fft', 'time-scan', 'csv-export'].includes(kind);
                     const protocol = kind === 'protocol-decode', search = kind === 'monitor-search', hex = kind === 'hex-export';
-                    const data = samples ? new Float64Array(job.task.values) : protocol || search || hex ? null : new Uint8Array(job.task.bytes);
+                    const pair = kind === 'pairSpectrum';
+                    const data = samples ? new Float64Array(job.task.values)
+                        : protocol || search || hex || pair ? null : new Uint8Array(job.task.bytes);
                     const task = samples ? { ...job.task, values: data } : data ? { ...job.task, bytes: data } : { ...job.task };
                     const transfer = data ? [data.buffer] : [];
+                    if (pair) {
+                        // One packed buffer preserves subview boundaries and leaves the source usable for fallback.
+                        const values = new Float64Array(task.segments.reduce((total, { x, y }) => total + x.length + y.length, 0));
+                        let offset = 0;
+                        task.segments = task.segments.map(({ x, y }) => {
+                            const yStart = offset + x.length, end = yStart + y.length;
+                            values.set(x, offset);
+                            values.set(y, yStart);
+                            const copy = { x: values.subarray(offset, yStart), y: values.subarray(yStart, end) };
+                            offset = end;
+                            return copy;
+                        });
+                        transfer.push(values.buffer);
+                    }
                     if (protocol) task.records = task.records.map(record => {
                         const bytes = new Uint8Array(record instanceof Uint8Array ? record : record.bytes);
                         transfer.push(bytes.buffer); return { bytes };

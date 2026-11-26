@@ -30,9 +30,15 @@ class WidgetController {
         this.register('wave', { template: 'wave-widget-template', title: '波形' });
         this.register('byte', { template: 'byte-widget-template', title: '字节流' });
         this.register('pose', { template: 'pose-widget-template', title: '位姿' });
+        this.register('xy', { template: 'analysis-widget-template', title: '李萨如图' });
+        this.register('histogram', { template: 'analysis-widget-template', title: '频度直方图' });
         this.fieldIds = {
-            plotViewMode: 'plot-view-mode', plotTimeXUnit: 'plot-time-x-unit',
+            plotViewMode: 'plot-view-mode', plotTraceMode: 'plot-trace-mode', plotTimeXUnit: 'plot-time-x-unit',
             plotFreqXScale: 'plot-freq-x-scale', plotFreqYScale: 'plot-freq-y-scale',
+            xPrecisionMode: 'plot-x-precision-mode', yPrecisionMode: 'plot-y-precision-mode',
+            xSignificantDigits: 'plot-x-significant-digits', ySignificantDigits: 'plot-y-significant-digits',
+            xDecimalPlaces: 'plot-x-decimal-places', yDecimalPlaces: 'plot-y-decimal-places',
+            xNumberNotation: 'plot-x-number-notation', yNumberNotation: 'plot-y-number-notation',
             plotFftWindow: 'plot-fft-window', plotFftRemoveDc: 'plot-fft-remove-dc',
             plotContent: 'plot-content',
             plotPhaseUnwrap: 'plot-phase-unwrap', plotPhaseUnit: 'plot-phase-unit', plotResponseSampleRate: 'plot-response-sample-rate',
@@ -65,6 +71,14 @@ class WidgetController {
         cleanups.push(() => element.removeEventListener(event, callback));
     }
     register(type, definition) { this.registry.set(type, definition); }
+
+    _isAnalysis(type) { return type === 'xy' || type === 'histogram'; }
+    _refreshWidgetVisibility(widget) {
+        const deferred = this._isAnalysis(widget.type) && widget.settings.connectionSource === 'workspace' &&
+            this.workspacePresentationDeferred;
+        widget.view.setVisible(widget.intersecting !== false && (widget.type === 'wave' || !this.captureHidden && !deferred));
+    }
+    _supportsWorkspace(type) { return type === 'wave' || this._isAnalysis(type); }
 
     captureFor(id = 'primary') {
         if (id === 'primary') return this.service;
@@ -104,7 +118,7 @@ class WidgetController {
         if (title === undefined) title = `${definition.title} ${number}`;
         if (typeof title !== 'string' || !title.trim()) throw new Error('控件标题无效');
         const capture = this.captureFor(settings.connectionSource);
-        if (!capture || settings.connectionSource === 'workspace' && type !== 'wave') throw new Error('控件引用了不存在的接收来源');
+        if (!capture || settings.connectionSource === 'workspace' && !this._supportsWorkspace(type)) throw new Error('控件引用了不存在的接收来源');
         const local = this.globalsFor(capture);
         const textRules = type === 'byte' && (settings.textEncoding !== undefined || settings.textBoundary !== undefined)
             ? { textEncoding: settings.textEncoding ?? this.globals.textEncoding,
@@ -118,20 +132,25 @@ class WidgetController {
             .map(node => [node.dataset.role, node]));
         refs[element.dataset.role] = element;
         for (const [role, node] of Object.entries(refs)) node.id = `${id}-${role}`;
-        const handle = refs[type === 'wave' ? 'waveform-drag-handle' : type === 'pose' ? 'pose-header' : 'monitor-header'];
+        const handle = refs['waveform-drag-handle'] ?? refs['pose-header'] ?? refs['analysis-header'] ?? refs['monitor-header'];
         handle.querySelector('span').textContent = title;
         const remove = this.document.createElement('button');
         remove.className = 'widget-close'; remove.type = 'button'; remove.textContent = '×';
         remove.setAttribute('aria-label', `删除${title}`);
         handle.append(remove);
         const source = this._acquire(capture, type, settings);
-        const widget = { id, type, title, settings, element, refs, capture, source, lastTab: null, disposed: false };
+        const widget = { id, type, title, settings, element, handle, refs, capture, source, lastTab: null, disposed: false };
         widget.engineNotice = this.document.createElement('div'); widget.engineNotice.className = 'widget-engine-notice';
         widget.engineNotice.setAttribute('role', 'status'); widget.engineNotice.hidden = true;
         element.append(widget.engineNotice);
         if (type === 'wave') widget.pendingViewport = settings[settings.plotContent === 'response' ? 'responseViewport' : 'viewport'];
         this.widgets.set(id, widget);
         this.workspace.add({ id, type, title, element, handle, rect, minWidth: 280, minHeight: 180 });
+        // Canvas drag handlers prevent the browser's default pointer focus.
+        const canvas = refs['waveform-canvas'] ?? refs['pose-canvas'];
+        if (canvas) this._listen(canvas, 'pointerdown', event => {
+            if (event.button === 0 && !event.ctrlKey && !event.metaKey) canvas.focus({ preventScroll: true });
+        }, widget.cleanups ??= []);
         if (type === 'wave') {
             widget.responseFrames = new SerialPlotter.SystemResponseFrames();
             widget.view = new SerialPlotter.Plotter(refs['waveform-canvas'], source.frames, {
@@ -165,7 +184,18 @@ class WidgetController {
                 this.onChange();
             }
         });
-        else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
+        else if (this._isAnalysis(type)) {
+            refs['analysis-svg'].setAttribute('aria-label', definition.title);
+            widget.view = new SerialPlotter.AnalysisPlot(refs['analysis-svg'], type, source.frames, settings, Number(this.globals.plotWindowPoints), index => {
+                const timing = this.getWorkspaceCapture()?.timebases?.[widget.settings.connectionSource];
+                const timeline = this.getSourcePlotTimeline(widget.source), frames = widget.source.frames;
+                const ordinal = index >= 0 ? frames.frameOrdinalAt?.(index) : null;
+                const section = timeline?.valid && ordinal != null ? timeline.sections.findLast(entry => entry.from <= ordinal) : null;
+                const estimate = widget.source.sampleRate?.rate ?? 0;
+                if (section) return { rate: section.rate || estimate, from: section.from - frames.frameOrdinalAt(0) };
+                return { rate: timing?.mode === 'fixed' ? timing.sampleRate : estimate };
+            }, type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null);
+        } else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: capture.txFrames, getSourceErrors: () => widget.source.errors,
             getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.(),
             onTextPreparation: this.onTextPreparation && ((fraction, done, total) => this.onTextPreparation(widget, fraction, done, total))
@@ -181,11 +211,11 @@ class WidgetController {
         this._listen(remove, 'click', event => { event.stopPropagation(); this.requestRemove(id); }, widget.cleanups ??= []);
         this.applySettings(widget);
         widget.intersecting = true;
-        widget.view.setVisible(type === 'wave' || !this.captureHidden);
+        this._refreshWidgetVisibility(widget);
         if (typeof IntersectionObserver === 'function') {
             widget.visibility = new IntersectionObserver(entries => {
                 widget.intersecting = entries.at(-1).isIntersecting;
-                widget.view.setVisible(widget.intersecting && (type === 'wave' || !this.captureHidden));
+                this._refreshWidgetVisibility(widget);
             }, { root: this.element('workspace-viewport') });
             widget.visibility.observe(element);
         }
@@ -264,7 +294,9 @@ class WidgetController {
             const db = this._magnitudeUnit(settings) === 'db';
             // A fixed-rate source defaults to seconds until the user chooses a unit.
             const useSeconds = !response && (combined || ((view.fixedTimeRate || view.timeProjection) && !settings.plotTimeXUnitExplicit));
-            view.setDisplayOptions({ displayMode: settings.plotViewMode, timeXUnit: useSeconds ? 's' : settings.plotTimeXUnit,
+            view.setDisplayOptions({ displayMode: settings.plotViewMode, traceMode: settings.plotTraceMode,
+                timeXUnit: useSeconds ? 's' : settings.plotTimeXUnit,
+                ...SerialPlotter.normalizeAxisNumberSettings(settings),
                 freqXUnit: settings.plotFreqXUnit, freqXScale: settings.plotFreqXScale, freqYScale: settings.plotFreqYScale,
                 magnitudeUnit: this._magnitudeUnit(settings), dbFactor: settings.plotDbFactor,
                 phaseUnwrap: settings.plotPhaseUnwrap, phaseUnit: settings.plotPhaseUnit, responseSampleRate: settings.plotResponseSampleRate,
@@ -286,6 +318,10 @@ class WidgetController {
             widget.appliedContent = settings.plotContent;
             if (view.isPaused !== capture.paused) view.togglePause();
             view.resize();
+        } else if (this._isAnalysis(widget.type)) {
+            this._refreshWidgetVisibility(widget);
+            view.setSettings(settings, Number(this.globals.plotWindowPoints));
+            view.setPaused(capture.paused);
         } else if (widget.type === 'pose') {
             view.setFrames(widget.source.frames); view.setSettings(settings); view.setPaused(capture.paused); view.resize();
         } else {
@@ -305,12 +341,14 @@ class WidgetController {
         if (nextId !== this.activeId) this._commitTitle();
         this.activeId = nextId;
         const widget = this.active;
+        if (!this._isAnalysis(widget?.type)) SerialPlotter.AnalysisInspector.clear(this.element('tab-analysis-display'));
+        if (widget?.type !== 'pose') this.poseConfigView.clear();
         this.element('widget-selection-prompt').hidden = Boolean(widget);
         this.element('widget-title-tools').hidden = !widget;
         this.element('monitor-settings-tabs').hidden = !widget;
         const sourceWrap = this.element('widget-engine-source-wrap'), sourceSelect = this.element('widget-engine-source');
         const connections = [{ id: 'primary', name: this.getPrimaryConnectionName() }, ...this.getConnections()];
-        if (widget?.type === 'wave' && this.getWorkspaceCapture()?.mappings.length)
+        if (this._supportsWorkspace(widget?.type) && this.getWorkspaceCapture()?.mappings.length)
             connections.push({ id: 'workspace', name: '全局通道（多来源）' });
         const connection = this.element('widget-connection-source');
         this.element('widget-connection-source-wrap').hidden = !widget || connections.length === 1;
@@ -331,7 +369,7 @@ class WidgetController {
         this.element('active-monitor-caption').textContent = widget?.title ?? '控件属性';
         const typeLabel = this.element('active-widget-type');
         typeLabel.hidden = !widget;
-        typeLabel.textContent = widget ? { wave: '波形控件', byte: '字节流控件', pose: '位姿控件' }[widget.type] : '';
+        typeLabel.textContent = widget ? this.registry.get(widget.type).title + '控件' : '';
         if (!widget) {
             for (const id of ['channel-config-list', 'monitor-channel-list']) this.channelView.clear(this.element(id));
             this.onActivate(null); return;
@@ -349,13 +387,13 @@ class WidgetController {
         this.syncGlobals();
         if (widget.type === 'wave') this._bindYBounds(widget);
         else if (widget.type === 'byte') { this.displayView.apply(widget.settings.monitorDisplay); this.displayView.setMode(widget.view.mode); }
-        else this.poseConfigView.render(widget);
-        this.displayView.setChannels(this.channelMeta());
+        else if (widget.type === 'pose') this.poseConfigView.render(widget);
+        if (!this._isAnalysis(widget.type)) this.displayView.setChannels(this.channelMeta());
         this._renderChannels(widget);
         this._syncSections(widget);
         this.binding = false;
         this.onActivate(widget);
-        this.selectTab(widget.lastTab ?? (widget.type === 'wave' ? 'tab-waveform-config' : widget.type === 'pose' ? 'tab-pose-display' : 'tab-monitor-config'));
+        this.selectTab(widget.lastTab);
     }
 
     channelGlobals(capture = this.service) {
@@ -423,7 +461,7 @@ class WidgetController {
     }
 
     channelVisible(widget, index) {
-        if (widget.type === 'pose') return false;
+        if (widget.type !== 'wave' && widget.type !== 'byte') return false;
         if (!(widget.type === 'wave' ? widget.view.frames : widget.capture.numericSource.frames).isSignal(index)) return false;
         return widget.type === 'wave' ? widget.view.getChannelMeta()[index]?.visible === true
             : !widget.settings.monitorDisplay.numericHiddenChannels.includes(index);
@@ -431,7 +469,7 @@ class WidgetController {
 
     setChannelVisible(index, visible) {
         const widget = this.active;
-        if (widget?.type === 'pose') return;
+        if (widget?.type !== 'wave' && widget?.type !== 'byte') return;
         if (!widget || !(widget.type === 'wave' ? widget.view.frames : widget.capture.numericSource.frames).isSignal(index)) return;
         if (widget.type === 'wave') {
             widget.view.setChannelVisible(index, visible); widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
@@ -573,7 +611,11 @@ class WidgetController {
                 widget.settings[key] = Array.from(reorder(widget.settings[key]), (channel, index) => ({ visible: false, ...channel,
                     index, name: channelNames[index], color: channelColors[index] }));
             else if (widget.type === 'pose') widget.settings = { ...SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap), engineSource: widget.settings.engineSource ?? null, connectionSource: widget.settings.connectionSource };
-            else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
+            else if (this._isAnalysis(widget.type)) {
+                const remap = index => index !== null && numberMap.has(index + 1) ? numberMap.get(index + 1) - 1 : null;
+                if (widget.type === 'histogram') widget.settings.channel = remap(widget.settings.channel);
+                else widget.settings.pairs = widget.settings.pairs.map(pair => ({ ...pair, x: remap(pair.x), y: remap(pair.y) }));
+            } else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
             for (const profile of Object.values(widget.settings.exportSettings?.formats ?? {}))
                 if (profile.channelIndices !== null) profile.channelIndices = indices(profile.channelIndices);
         }
@@ -603,7 +645,7 @@ class WidgetController {
                 for (const group of [widget.settings.bindings, widget.settings.overlay.bindings]) for (const key of Object.keys(group))
                     group[key] = group[key].map(index => index !== null && !isScalar(index) ? null : index);
                 this.applySettings(widget);
-            } else if (widget.type === 'wave') this.applySettings(widget);
+            } else if (this._supportsWorkspace(widget.type)) this.applySettings(widget);
             else {
                 widget.view.channelColors = Array.from({ length: capture.numericSource.frames.channelCount }, (_, index) => this.channelColor(index, local.channelColors));
                 widget.view.setDisplayOptions(widget.settings.monitorDisplay);
@@ -625,14 +667,16 @@ class WidgetController {
             source.frames.channelNames = local.channelNames; source.frames.names = local.channelNames;
         }
         for (let i = 0; i < local.channelNames.length; i++) local.channelNames[i] ??= SerialPlotter.formatChannelId(i);
-        for (const widget of this.widgets.values()) if (widget.type === 'wave' && widget.capture === capture) {
-            widget.view.setChannelName(index, name);
-            widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
+        for (const widget of this.widgets.values()) if (widget.capture === capture) {
+            if (widget.type === 'wave') {
+                widget.view.setChannelName(index, name);
+                widget.settings[this._channelSettingsKey(widget)] = widget.view.getChannelMeta();
+            } else if (this._isAnalysis(widget.type)) widget.view.invalidateLabels();
         }
         if (this.active?.capture === capture) {
             this.displayView.setChannels(this.channelMeta(), { render: false });
             this.channelView.setChannelName(index, name);
-            if (this.active.type === 'pose') this.poseConfigView.render(this.active);
+            if (this.active.type === 'pose' || this._isAnalysis(this.active.type)) this._renderChannels(this.active);
         }
         this.onChannelMetadataChange(index, { name }, capture);
         this.onChange();
@@ -685,10 +729,13 @@ class WidgetController {
         const widget = this.active;
         if (!widget) return;
         const wave = widget.type === 'wave';
-        const valid = new Set(widget.type === 'pose' ? ['tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-config', 'tab-waveform-channels']
+        const valid = new Set(this._isAnalysis(widget.type) ? ['tab-analysis-display', 'tab-analysis-channels']
+            : widget.type === 'pose' ? ['tab-pose-display', 'tab-pose-channels'] : wave ? ['tab-waveform-config', 'tab-waveform-channels']
             : ['tab-monitor-config', ...(widget.settings.captureMode === 'engine' && ['numeric', 'protocol'].includes(widget.source.kind) ? ['tab-monitor-channels'] : [])]);
         valid.add('tab-widget-export');
-        if (!valid.has(tab)) tab = widget.type === 'pose' ? 'tab-pose-display' : wave ? 'tab-waveform-config' : 'tab-monitor-config';
+        if (!valid.has(tab)) tab = valid.values().next().value;
+        if (tab !== 'tab-pose-channels') this.poseConfigView.closePickers();
+        if (tab !== 'tab-analysis-channels') SerialPlotter.AnalysisInspector.closePickers(this.element('tab-analysis-display'));
         widget.lastTab = tab;
         for (const button of this.element('monitor-settings-tabs').querySelectorAll('.tab-btn')) {
             const selected = button.dataset.tab === tab;
@@ -708,20 +755,25 @@ class WidgetController {
 
     _syncSections(widget) {
         const s = widget.settings;
-        if (widget.type === 'pose') return;
+        if (widget.type !== 'wave' && widget.type !== 'byte') return;
         this.element('plot-response-status').textContent = widget.responseStatus ?? '';
         this.element('plot-response-status').hidden = !widget.responseStatus;
         const response = s.plotContent === 'response', phase = s.plotViewMode === 'phase', db = this._magnitudeUnit(s) === 'db';
         this.element('wrap-response-options').hidden = !response;
         const workspaceSamples = !response && s.connectionSource === 'workspace';
         this.element('plot-workspace-sampling-hint').hidden = !workspaceSamples;
-        this.element('plot-recovered-markers-hint').hidden = !workspaceSamples || s.plotViewMode !== 'time';
+        this.element('plot-recovered-markers-hint').hidden = !workspaceSamples || s.plotViewMode !== 'time' || s.plotTraceMode === 'line';
         this.element('plot-sample-axis-hint').hidden = response || workspaceSamples;
         this.element('wrap-fft-window').hidden = response;
         this.element('wrap-magnitude-scale').hidden = s.plotViewMode !== 'frequency';
         this.element('plot-freq-y-scale').value = db ? `db${s.plotDbFactor}` : `amplitude-${s.plotFreqYScale}`;
         this.element('plot-freq-x-scale').value = `${s.plotFreqXUnit}-${s.plotFreqXScale}`;
         this.element('plot-horizontal-settings').hidden = response && s.plotViewMode === 'time';
+        for (const axis of ['x', 'y']) {
+            const decimal = s[axis + 'PrecisionMode'] === 'decimal';
+            this.element('plot-' + axis + '-significant-digits').parentElement.hidden = decimal;
+            this.element('plot-' + axis + '-decimal-places').parentElement.hidden = !decimal;
+        }
         this.element('plot-spectrum-settings').hidden = response || s.plotViewMode === 'time';
         this.element('plot-log-axis-hint').hidden = s.plotViewMode !== 'frequency' || db || s.plotFreqYScale !== 'log';
         this.element('wrap-phase-options').hidden = !phase;
@@ -752,7 +804,7 @@ class WidgetController {
         if (!title) { field.value = widget.title; return; }
         if (title === widget.title) return;
         widget.title = title;
-        widget.refs[widget.type === 'wave' ? 'waveform-drag-handle' : widget.type === 'pose' ? 'pose-header' : 'monitor-header'].querySelector('span').textContent = title;
+        widget.handle.querySelector('span').textContent = title;
         this.element('active-monitor-caption').textContent = title;
         const entry = this.workspace.entries.get(widget.id);
         if (entry) { entry.title = title; entry.handle.setAttribute('aria-label', `${title}: arrow keys move, Shift + arrows resize, Delete removes`); }
@@ -765,7 +817,7 @@ class WidgetController {
             const widget = this.active;
             if (!widget || this.binding) return;
             const id = this.element('widget-connection-source').value, capture = this.captureFor(id);
-            if (!capture || widget.capture === capture || id === 'workspace' && widget.type !== 'wave') return;
+            if (!capture || widget.capture === capture || id === 'workspace' && !this._supportsWorkspace(widget.type)) return;
             try {
                 widget.settings = SerialPlotter.WidgetConfig.normalizeWidgetSettings(widget.type,
                     { ...widget.settings, connectionSource: id, engineSource: null }, this.globalsFor(capture));
@@ -823,7 +875,7 @@ class WidgetController {
         });
         for (const [key, id] of Object.entries(this.fieldIds)) bindSetting(id, () => {
             const widget = this.active;
-            if (!widget || widget.type === 'pose' || this.binding) return;
+            if (!widget || !['byte', 'wave'].includes(widget.type) || this.binding) return;
             const field = this.element(id);
             if (key === 'plotTimeXUnit' && field.disabled) return;
             const candidate = { ...widget.settings, [key]: field.type === 'checkbox' ? field.checked : field.value };
@@ -898,6 +950,17 @@ class WidgetController {
     }
 
     _renderChannels(widget) {
+        if (this._isAnalysis(widget.type)) {
+            const channels = this.channelMeta(widget).filter(entry => entry.signal);
+            SerialPlotter.AnalysisInspector.render(this.document, widget, this.element('tab-analysis-display'),
+                this.element('tab-analysis-channels'), channels, next => {
+                    if (this.active !== widget) return;
+                    widget.settings = { ...widget.settings, ...next };
+                    this.applySettings(widget);
+                    this.onChange();
+                }, { windowPoints: Number(this.globals.plotWindowPoints), setWindowPoints: value => this.setPlotWindowPoints(value) });
+            return;
+        }
         if (widget.type === 'pose') { this.poseConfigView.render(widget); return; }
         this.channelView.showError(widget, '');
         if (widget.type === 'byte') this.element('channel-filters-byte').hidden = widget.source.kind === 'protocol';
@@ -944,11 +1007,15 @@ class WidgetController {
         if (!data) return;
         const frequencyUnit = view.freqXUnit === 'bins' ? 'Bin' : 'Hz';
         const periodUnit = view.timeXUnit === 's' ? 's' : 'Sample';
-        const number = value => Number.isFinite(value) ? value.toPrecision(6) : '--';
+        const number = (value, axis = 'y') => {
+            if (!Number.isFinite(value)) return '--';
+            const format = view.axisNumberFormats[axis];
+            return SerialPlotter.customAxisNumberFormat(format) ? SerialPlotter.formatAxisValue(value, format) : value.toPrecision(6);
+        };
         const entries = [['通道:', data.channelLabel], ['最大值:', number(data.max)], ['最小值:', number(data.min)],
             ['峰峰值:', number(data.pp)], ['均值:', number(data.mean)], ['标准差:', number(data.stdDev)],
-            ['主频:', `${number(frequencyUnit === 'Bin' ? data.dominantBin : view.sampleRateHz > 0 ? data.freq * view.sampleRateHz : NaN)} ${frequencyUnit}`],
-            ['主周期:', `${number(periodUnit === 'Sample' ? data.period : view.sampleRateHz > 0 ? data.period / view.sampleRateHz : NaN)} ${periodUnit}`]];
+            ['主频:', `${number(frequencyUnit === 'Bin' ? data.dominantBin : view.sampleRateHz > 0 ? data.freq * view.sampleRateHz : NaN, 'x')} ${frequencyUnit}`],
+            ['主周期:', `${number(periodUnit === 'Sample' ? data.period : view.sampleRateHz > 0 ? data.period / view.sampleRateHz : NaN, 'x')} ${periodUnit}`]];
         const target = refs['plot-channel-stats'];
         if (!target.children.length) target.replaceChildren(...entries.map(([label]) => {
             const cell = this.document.createElement('span'); cell.className = 'monitor-stat-item';
@@ -1023,7 +1090,7 @@ class WidgetController {
                 const deferred = this.workspacePresentationDeferred && widget.capture === this.getWorkspaceCapture() &&
                     widget.settings.plotContent !== 'response';
                 widget.view.setPresentationDeferred(hidden || Boolean(deferred));
-            } else widget.view.setVisible(!hidden && widget.intersecting);
+            } else this._refreshWidgetVisibility(widget);
         }
     }
     setWorkspacePresentationDeferred(deferred) {
@@ -1031,12 +1098,13 @@ class WidgetController {
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave' && widget.capture === this.getWorkspaceCapture() && widget.settings.plotContent !== 'response')
                 widget.view.setPresentationDeferred(this.captureHidden || deferred);
+            else if (this._isAnalysis(widget.type)) this._refreshWidgetVisibility(widget);
         }
     }
     setPaused(paused) {
         for (const widget of this.widgets.values()) {
             if (widget.type === 'wave' && widget.view.isPaused !== paused) widget.view.togglePause();
-            if (widget.type === 'pose') widget.view.setPaused(paused);
+            if (widget.type === 'pose' || this._isAnalysis(widget.type)) widget.view.setPaused(paused);
             if (!paused) {
                 this._cancelViewportRestore(widget); widget.pendingViewport = null;
                 widget.view.followLatest?.();
@@ -1069,13 +1137,13 @@ class WidgetController {
             this.element('max-points').value = String(capacity);
         }
         this.globals.plotWindowPoints = String(count);
-        for (const widget of this.widgets.values()) if (widget.type === 'wave') this.applySettings(widget);
+        for (const widget of this.widgets.values()) if (this._supportsWorkspace(widget.type)) this.applySettings(widget);
         this.activate(this.activeId);
         this.onChange();
     }
     setCapacity(capacity) {
         this.globals.plotWindowPoints = String(Math.min(Number(this.globals.plotWindowPoints), capacity));
-        for (const widget of this.widgets.values()) if (widget.type === 'wave') {
+        for (const widget of this.widgets.values()) if (this._supportsWorkspace(widget.type)) {
             this.applySettings(widget);
         }
         this.activate(this.activeId);
@@ -1118,8 +1186,10 @@ class WidgetController {
         this.disposed = true;
         this._closeDeleteDialog();
         this.channelView.dispose();
+        this.poseConfigView.dispose();
         for (const cleanup of this.cleanups.splice(0)) cleanup();
         this.displayView.dispose();
+        SerialPlotter.AnalysisInspector.clear(this.element('tab-analysis-display'));
         for (const widget of this.widgets.values()) {
             for (const cleanup of widget.cleanups ?? []) cleanup();
             this._cancelViewportRestore(widget);
