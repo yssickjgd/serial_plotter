@@ -7,6 +7,7 @@ async function startSerialPlotterApplication() {
     'use strict';
     const S = globalThis.SerialPlotter, el = id => document.getElementById(id);
     const CONFIG_KEY = 'serialplot_v3_config', WORKSPACE_KEY = 'serialplot_v3_workspace';
+    const WORKSPACE_RELOAD_KEY = WORKSPACE_KEY + '_reload';
     const cleanups = [], progressRows = new Map(), captureProgressSources = new Set(), rates = new Map(), draws = new Map();
     const taskProgress = el('history-rebuild-progress'), workspaceTaskSlot = el('workspace-task-slot');
     let disposed = false, restoring = true, saveTimer = null, exporting = false, importRevision = 0;
@@ -1328,6 +1329,7 @@ async function startSerialPlotterApplication() {
             connectionView.revealSource(settings.id);
         } catch (error) { status('serial-source-add-status', error.message); }
     });
+    listen(el('monitor-workspace'), 'contextmenu', event => event.preventDefault());
     const workspace = new S.WidgetWorkspace({ document, window, viewport: el('workspace-viewport'), surface: el('workspace-surface'),
         step: initial.workspace.step, zoom: initial.workspace.zoom,
         onZoomChange: zoom => {
@@ -1339,7 +1341,8 @@ async function startSerialPlotterApplication() {
             }
         },
         onActivate: id => widgets?.activate(id), onResize: id => widgets?.resize(id),
-        onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }), onLayoutChange: saveSoon });
+        onDelete: id => widgets?.requestRemove(id), onDrop: ({ type, rect }) => widgets?.create({ type, rect }),
+        onLayoutChange: saveSoon, onScrollChange: saveSoon });
     widgets = new S.WidgetController({ document, service, globals, workspace, getConnections: connectionChoices, getPrimaryConnectionName: primaryConnectionName,
         getWorkspaceCapture: () => workspaceChannels, projectReceiveTime: projectVisibleReceiveTime, getSourcePlotTimeline: source => sourcePlotTimelines.get(source),
         onTextPreparation: (widget, fraction, done, total) => setTaskProgress(widget,
@@ -2120,7 +2123,7 @@ async function startSerialPlotterApplication() {
         workspace.setStep(config.workspace.step);
         for (const widget of config.widgets) widgets.create(widget);
         widgets.nextNumber = Math.max(config.nextNumber, widgets.nextNumber);
-        workspace.restore(config.workspace); el('workspace-step').value = String(config.workspace.step);
+        el('workspace-step').value = String(config.workspace.step);
         tools.syncSources(config.tools);
         el('send-mode').value = config.send.mode; sendController.previousMode = config.send.mode;
         regularProtocolView.setValue(config.send.protocol ?? {}); syncProtocolSend();
@@ -2128,7 +2131,8 @@ async function startSerialPlotterApplication() {
         commandLibrary.replace(config.send.commands); commandView.selectedId = null; commandView.render();
         commandView.error.hidden = true; commandView.status.textContent = '拖动排序，名称直接修改';
         setSendTab(config.send.tab, false);
-        widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout); syncExportSources();
+        widgets.activate(null); workspace.activate(null); applyGlobalFields(); applyUiLayout(config.uiLayout);
+        workspace.restore(config.workspace); syncExportSources();
     }
     function applyConfig(input) {
         return applyValidatedConfig(validateStoredConfig(input));
@@ -2377,11 +2381,42 @@ async function startSerialPlotterApplication() {
         for (const adapter of new Set([serialAdapter, netAdapter, primarySource.adapter])) releaseTransport(adapter);
         return workspaceStorage.dispose();
     }
+    function recoverWorkspaceView(layout) {
+        // A reload can finish before the debounced IndexedDB transaction commits.
+        let pending;
+        try {
+            const raw = globalThis.sessionStorage?.getItem(WORKSPACE_RELOAD_KEY);
+            if (!raw) return false;
+            globalThis.sessionStorage.removeItem(WORKSPACE_RELOAD_KEY);
+            pending = JSON.parse(raw);
+        } catch { return false; }
+        if (storageBlocked || !pending?.rects || pending.step !== layout.step ||
+            !Number.isFinite(pending.zoom) || pending.zoom < 0.25 || pending.zoom > 5 ||
+            pending.view !== undefined && !S.validWorkspaceView(pending.view)) return false;
+        const ids = Object.keys(layout.rects);
+        if (ids.length !== Object.keys(pending.rects).length || ids.some(id => {
+            const rect = pending.rects[id];
+            return !rect || ['x', 'y', 'width', 'height'].some(key => rect[key] !== layout.rects[id][key]);
+        })) return false;
+        if (pending.zoom === layout.zoom && JSON.stringify(pending.view) === JSON.stringify(layout.view)) return false;
+        layout.zoom = pending.zoom;
+        if (pending.view === undefined) delete layout.view;
+        else layout.view = pending.view;
+        return true;
+    }
+    const recoveredView = recoverWorkspaceView(initial.workspace);
     installWidgets(initial); restoring = false; setTaskProgress('config-restore'); updateStats();
+    if (recoveredView) saveSoon();
     const statsTimer = setInterval(updateStats, 1000);
     S.application = { service, widgets, workspace, tools, serialAdapter, serialSources: connectionSources, netAdapter, sendController,
         protocolSession, regularProtocolView, commandLibrary, commandRunner, commandView, getConfig, applyConfig, dispose, exportData, exportWidgetData, updateStats,
         dataEngine, engineView, workspaceChannels, workspaceStorage, saveNow, saveSoon, flushConfig };
-    listen(window, 'pagehide', dispose);
+    listen(window, 'pagehide', () => {
+        if (!disposed && !restoring && !storageBlocked) {
+            try { globalThis.sessionStorage?.setItem(WORKSPACE_RELOAD_KEY, JSON.stringify(workspace.serialize())); }
+            catch { /* Normal configuration autosave remains available. */ }
+        }
+        return dispose();
+    });
     return S.application;
 }

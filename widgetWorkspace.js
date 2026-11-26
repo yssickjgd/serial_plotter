@@ -12,13 +12,18 @@
         a.y < b.y + b.height && a.y + a.height > b.y;
     const validRect = rect => rect && ['x', 'y', 'width', 'height'].every(key =>
         Number.isFinite(rect[key]) && rect[key] >= 0 && rect[key] <= 1e7) && rect.width > 0 && rect.height > 0;
+    const validViewOffset = value => Number.isFinite(value) && value >= 0 && value <= 2e8;
+    const validViewPoint = point => point && validViewOffset(point.x) && validViewOffset(point.y);
+    const validWorkspaceView = view => Boolean(view && !Array.isArray(view) && validViewPoint(view.origin) &&
+        (view.centerPoint === null || validViewPoint(view.centerPoint)) && typeof view.fitted === 'boolean' &&
+        validViewOffset(view.scrollLeft) && validViewOffset(view.scrollTop));
     const interactive = event => event.target?.closest?.('button,input,select,textarea,a,[contenteditable="true"]');
     const editing = event => event.target?.isContentEditable || event.target?.closest?.(
         'input,select,textarea,[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"]');
 
     class WidgetWorkspace {
         constructor({ viewport, surface, step = 10, zoom = 1, onActivate = () => {}, onResize = () => {}, onZoomChange = () => {},
-            onLayoutChange = () => {}, onDelete = () => {}, onDrop = () => {},
+            onLayoutChange = () => {}, onScrollChange = () => {}, onDelete = () => {}, onDrop = () => {},
             document = root.document, window = root.window }) {
             if (!STEPS.includes(step)) throw new RangeError('Workspace step must be 10, 20 or 40');
             if (!validZoom(zoom)) throw new RangeError('Workspace zoom must be between 0.25 and 5');
@@ -57,6 +62,7 @@
             this._listen(viewport, 'pointerdown', clearSelection);
             this._listen(viewport, 'pointerenter', () => { this.pointerInside = true; });
             this._listen(viewport, 'pointerleave', () => { this.pointerInside = false; });
+            this._listen(viewport, 'scroll', onScrollChange, this.cleanups, { passive: true });
             this._listen(viewport, 'wheel', event => this._horizontalWheel(event), this.cleanups, { capture: true, passive: false });
             this._listen(viewport, 'contextmenu', event => {
                 if (this._fromWidget(event) || interactive(event)) return;
@@ -189,28 +195,36 @@
                 this._restoreView(view);
                 return true;
             }
-            const view = { zoom: this.zoom, origin: { ...this.origin },
-                centerPoint: this.centerPoint ? { ...this.centerPoint } : null,
-                fitted: this.fitted, contextFitNext: this.contextFitNext,
-                scrollLeft: this.viewport.scrollLeft, scrollTop: this.viewport.scrollTop };
+            const view = { zoom: this.zoom, ...this._viewPlacement(), contextFitNext: this.contextFitNext };
             const bounds = entry.rect;
             if (!this._fitBounds(bounds))
                 this._centerAt({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
             this._setFocusState({ id, view });
             return true;
         }
+        _viewPlacement() {
+            return { origin: { ...this.origin }, centerPoint: this.centerPoint ? { ...this.centerPoint } : null,
+                fitted: this.fitted, scrollLeft: Math.max(0, this.viewport.scrollLeft),
+                scrollTop: Math.max(0, this.viewport.scrollTop) };
+        }
+        _setViewGeometry(view) {
+            this.origin = view ? { ...view.origin } : { x: 0, y: 0 };
+            this.centerPoint = view?.centerPoint ? { ...view.centerPoint } : null;
+            this.fitted = view?.fitted ?? false;
+        }
+        _restoreScroll(view) {
+            // The window or widget list may have changed since focus began.
+            this.viewport.scrollLeft = Math.max(0, Math.min(view?.scrollLeft ?? 0,
+                parseFloat(this.scaleLayer.style.width) - this.viewport.clientWidth));
+            this.viewport.scrollTop = Math.max(0, Math.min(view?.scrollTop ?? 0,
+                parseFloat(this.scaleLayer.style.height) - this.viewport.clientHeight));
+        }
         _restoreView(view) {
             this.zoom = view.zoom;
-            this.origin = { ...view.origin };
-            this.centerPoint = view.centerPoint ? { ...view.centerPoint } : null;
-            this.fitted = view.fitted;
+            this._setViewGeometry(view);
             this.contextFitNext = view.contextFitNext;
             this._surfaceSize();
-            // The window or widget list may have changed since focus began.
-            this.viewport.scrollLeft = Math.max(0, Math.min(view.scrollLeft,
-                parseFloat(this.scaleLayer.style.width) - this.viewport.clientWidth));
-            this.viewport.scrollTop = Math.max(0, Math.min(view.scrollTop,
-                parseFloat(this.scaleLayer.style.height) - this.viewport.clientHeight));
+            this._restoreScroll(view);
             this.onZoomChange(this.zoom);
             this.onLayoutChange(this.serialize());
         }
@@ -220,6 +234,7 @@
             this._surfaceSize();
             this.viewport.scrollLeft = Math.max(0, this.origin.x + this.centerPoint.x * this.zoom - this.viewport.clientWidth / 2);
             this.viewport.scrollTop = Math.max(0, this.origin.y + this.centerPoint.y * this.zoom - this.viewport.clientHeight / 2);
+            this.onLayoutChange(this.serialize());
         }
         _stepZoom(direction, anchor) {
             const target = Math.max(0.25, Math.min(5, Math.round((this.zoom + direction * 0.1) * 100) / 100));
@@ -590,13 +605,17 @@
         }
 
         getRect(id) { const rect = this.entries.get(id)?.rect; return rect ? { ...rect } : null; }
-        serialize() { return { step: this.step, zoom: this.zoom,
-            rects: Object.fromEntries([...this.entries].map(([id, entry]) => [id, { ...entry.rect }])) }; }
+        serialize() {
+            const view = this._viewPlacement();
+            const positioned = view.scrollLeft || view.scrollTop || view.origin.x || view.origin.y || view.fitted || view.centerPoint;
+            return { step: this.step, zoom: this.zoom, ...(positioned ? { view } : {}),
+                rects: Object.fromEntries([...this.entries].map(([id, entry]) => [id, { ...entry.rect }])) };
+        }
 
         restore(layout) {
             if (!layout || !STEPS.includes(layout.step) || !layout.rects || typeof layout.rects !== 'object' || Array.isArray(layout.rects)) return false;
             const zoom = layout.zoom === undefined ? 1 : layout.zoom;
-            if (!validZoom(zoom)) return false;
+            if (!validZoom(zoom) || layout.view !== undefined && !validWorkspaceView(layout.view)) return false;
             const ids = [...this.entries.keys()], rects = ids.map(id => layout.rects[id]);
             if (Object.keys(layout.rects).length !== ids.length || !ids.every(id => Object.hasOwn(layout.rects, id)) || !rects.every(validRect)) return false;
             for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
@@ -605,18 +624,16 @@
             this._finish(true);
             this.step = layout.step;
             this.zoom = Math.round(zoom * 100) / 100;
-            this.origin = { x: 0, y: 0 };
-            this.centerPoint = null;
+            this._setViewGeometry(layout.view);
             this._setFocusState(null);
-            this.fitted = false;
             this._select([]);
             for (const [id, entry] of this.entries) entry.rect = { ...layout.rects[id] };
-            this.refresh({ notifyResize: true });
-            this.onZoomChange(zoom);
+            this.refresh({ notifyResize: true, restoredView: layout.view ?? null });
+            this.onZoomChange(this.zoom);
             return true;
         }
 
-        refresh({ notifyResize = false } = {}) {
+        refresh({ notifyResize = false, restoredView } = {}) {
             if (this.disposed) return;
             const g = this.gesture;
             if (g) {
@@ -635,6 +652,7 @@
                 obstacles.push(rect);
             }
             this._surfaceSize();
+            if (restoredView !== undefined) this._restoreScroll(restoredView);
             this.onLayoutChange(this.serialize());
         }
 
@@ -670,6 +688,6 @@
     }
 
     root.SerialPlotter ??= {};
-    root.SerialPlotter.WidgetWorkspace = WidgetWorkspace;
-    if (typeof module !== 'undefined' && module.exports) module.exports = { WidgetWorkspace };
+    Object.assign(root.SerialPlotter, { WidgetWorkspace, validWorkspaceView });
+    if (typeof module !== 'undefined' && module.exports) module.exports = { WidgetWorkspace, validWorkspaceView };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

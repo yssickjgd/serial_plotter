@@ -231,6 +231,73 @@ test('confirmation cannot switch its target and stale or disposed deletion reque
     assert.equal(f.app.widgets.requestRemove(third.id), false);
 });
 
+test('workspace scroll position autosaves and round-trips through startup and config export/import', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const { workspace, widgets } = f.app;
+    widgets.create({ type: 'wave', rect: { x: 1200, y: 900, width: 500, height: 400 } });
+    workspace.setZoom(1.5);
+    await f.app.flushConfig();
+    workspace.viewport.scrollLeft = 725; workspace.viewport.scrollTop = 475;
+    workspace.viewport.dispatchEvent({ type: 'scroll' });
+    await f.tick(200);
+    const saved = JSON.parse(f.storage.get('serialplot_v3_config'));
+    assert.equal(saved.workspace.view?.scrollLeft, 725);
+    assert.equal(saved.workspace.view.scrollTop, 475);
+    f.click('btn-export-cfg');
+    const exported = JSON.parse(await f.blobs.at(-1).text());
+    assert.deepEqual(exported.workspace, saved.workspace);
+    const reloaded = bootApplication(saved); t.after(() => reloaded.app.dispose());
+    const restored = reloaded.app.workspace;
+    const position = () => [restored.zoom, restored.viewport.scrollLeft, restored.viewport.scrollTop];
+    assert.deepEqual(position(), [1.5, 725, 475]);
+    restored.viewport.scrollLeft = 0; restored.viewport.scrollTop = 0;
+    reloaded.app.applyConfig(exported);
+    assert.deepEqual(position(), [1.5, 725, 475]);
+});
+
+test('a refresh before autosave restores the latest workspace view for the same layout', async t => {
+    const sessionStorage = new Map();
+    const f = bootApplication(null, { sessionStorage });
+    const { workspace, widgets } = f.app;
+    widgets.create({ type: 'wave', rect: { x: 1200, y: 900, width: 500, height: 400 } });
+    await f.app.flushConfig();
+    const previous = f.storage.get('serialplot_v3_config');
+    workspace.setZoom(1.5);
+    workspace.viewport.scrollLeft = 725;
+    workspace.viewport.scrollTop = 475;
+    f.window.dispatchEvent({ type: 'pagehide' });
+    const reloaded = bootApplication(previous, { sessionStorage }); t.after(() => reloaded.app.dispose());
+    const restored = reloaded.app.workspace;
+    assert.deepEqual([restored.zoom, restored.viewport.scrollLeft, restored.viewport.scrollTop], [1.5, 725, 475]);
+    assert.equal(sessionStorage.size, 0);
+    assert.equal((await reloaded.app.flushConfig()).workspace.view.scrollLeft, 725);
+});
+
+test('workspace suppresses browser context menus and preserves the plot and workspace right-click actions', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const { workspace, widgets } = f.app;
+    const wave = widgets.create({ type: 'wave' });
+    let plotResets = 0;
+    wave.view.followLatest = () => { plotResets++; };
+    const rightClick = target => {
+        let prevented = false;
+        target.dispatchEvent({ type: 'contextmenu', bubbles: true, clientX: 50, clientY: 50,
+            preventDefault() { prevented = true; } });
+        return prevented;
+    };
+    workspace.setZoom(2);
+    assert.equal(rightClick(wave.refs['waveform-drag-handle']), true);
+    assert.equal(rightClick(wave.refs['plot-channel-stats']), true);
+    assert.equal(rightClick(f.get('workspace-toolbar')), true);
+    assert.equal(workspace.zoom, 2);
+    assert.equal(plotResets, 0);
+    assert.equal(rightClick(wave.view.canvas), true);
+    assert.equal(plotResets, 1);
+    assert.equal(rightClick(workspace.surface), true);
+    assert.equal(workspace.zoom, 1);
+    assert.equal(rightClick(f.get('widget-title')), false);
+});
+
 test('workspace shortcuts do not intercept title editing and Ctrl A works after keyboard focus', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const first = f.app.widgets.create({ type: 'wave' }), second = f.app.widgets.create({ type: 'byte' });

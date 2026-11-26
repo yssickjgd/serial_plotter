@@ -4,6 +4,7 @@ const widgetDisplayUtils = typeof module !== 'undefined' ? require('./monitorDis
 const widgetChannelUtils = typeof module !== 'undefined' ? require('./channelOperations') : globalThis.SerialPlotter;
 const widgetRegistryUtils = typeof module !== 'undefined' ? require('./channelRegistry') : globalThis.SerialPlotter;
 const widgetViewportUtils = () => typeof module !== 'undefined' ? require('./widgetViewport') : globalThis.SerialPlotter.WidgetViewport;
+const widgetWorkspaceUtils = () => typeof module !== 'undefined' ? require('./widgetWorkspace') : globalThis.SerialPlotter;
 const widgetPoseUtils = () => typeof module !== 'undefined' ? require('./poseConfig').PoseConfig : globalThis.SerialPlotter.PoseConfig;
 const widgetCommandUtils = () => typeof module !== 'undefined' ? require('./commandLibrary') : globalThis.SerialPlotter;
 const widgetLimits = typeof module !== 'undefined' ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
@@ -335,6 +336,8 @@ function validateWorkspaceConfig(config) {
     if (!Number.isFinite(workspace.zoom) || workspace.zoom < 0.25 || workspace.zoom > 5)
         throw new Error('工作区缩放比例需在 25%–500% 之间');
     workspace.zoom = Math.round(workspace.zoom * 100) / 100;
+    if (workspace.view !== undefined && !widgetWorkspaceUtils().validWorkspaceView(workspace.view))
+        throw new Error('工作区视图位置无效');
     if (![10, 20, 40].includes(workspace.step) || !workspace.rects || typeof workspace.rects !== 'object' || Array.isArray(workspace.rects))
         throw new Error('工作区布局无效');
     const rects = [];

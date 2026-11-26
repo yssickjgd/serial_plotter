@@ -185,6 +185,39 @@ test('restore rejects overlap in any pair atomically and accepts an empty worksp
     assert.deepEqual(f.workspace.serialize(), { step: 20, zoom: 1, rects: {} });
 });
 
+test('workspace view round-trips scroll and fit placement and clamps to the restored viewport', () => {
+    let scrollChanges = 0, lastLayout;
+    const f = fixture({ onScrollChange() { scrollChanges++; }, onLayoutChange(layout) { lastLayout = layout; } });
+    f.add('a', { rect: { x: 0, y: 0, width: 400, height: 240 } });
+    f.add('b', { rect: { x: 1800, y: 1300, width: 400, height: 240 } });
+    f.workspace.setZoom(1.7);
+    f.viewport.scrollLeft = 875; f.viewport.scrollTop = 560;
+    f.viewport.fire('scroll');
+    assert.equal(scrollChanges, 1);
+    const overview = JSON.parse(JSON.stringify(f.workspace.serialize()));
+    f.workspace.fitWidget('a');
+    const focused = JSON.parse(JSON.stringify(f.workspace.serialize()));
+    assert.deepEqual(lastLayout.view, focused.view);
+    const expected = [f.workspace.zoom, f.viewport.scrollLeft, f.viewport.scrollTop, f.surface.style.left, f.surface.style.top];
+    assert.ok(f.workspace.origin.x > 0 && f.workspace.origin.y > 0);
+    const fresh = fixture();
+    for (const [id, rect] of Object.entries(focused.rects)) fresh.add(id, { rect });
+    const position = () => [fresh.workspace.zoom, fresh.viewport.scrollLeft, fresh.viewport.scrollTop, fresh.surface.style.left, fresh.surface.style.top];
+    assert.equal(fresh.workspace.restore(focused), true);
+    assert.deepEqual(position(), expected);
+    assert.equal(fresh.workspace.restore(overview), true);
+    assert.deepEqual(position(), [1.7, 875, 560, '0px', '0px']);
+    assert.equal(fresh.workspace.restore({ ...overview, view: { ...overview.view, scrollTop: -1 } }), false);
+    assert.deepEqual(position(), [1.7, 875, 560, '0px', '0px']);
+    fresh.viewport.clientWidth = 5000; fresh.viewport.clientHeight = 5000;
+    assert.equal(fresh.workspace.restore({ ...overview, zoom: 1 }), true);
+    assert.deepEqual(position(), [1, 0, 0, '0px', '0px']);
+    const { view, ...legacy } = overview;
+    assert.equal(fresh.workspace.restore(legacy), true);
+    assert.deepEqual(position(), [1.7, 0, 0, '0px', '0px']);
+    f.workspace.dispose(); fresh.workspace.dispose();
+});
+
 test('viewport narrowing and step changes preserve widget widths on a horizontally scrollable surface', () => {
     const f = fixture();
     for (let i = 0; i < 8; i++) f.add(`w-${i}`);

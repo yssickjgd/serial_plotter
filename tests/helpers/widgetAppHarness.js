@@ -150,6 +150,11 @@ function bootApplication(config = null, options = {}) {
         Uint8Array, Float64Array, TextEncoder, TextDecoder, Blob, XMLSerializer, Date, console,
         URL: { createObjectURL(blob) { blobs.push(blob); return 'blob:test'; }, revokeObjectURL() {} },
         localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { writes++; storage.set(key, value); } },
+        sessionStorage: options.sessionStorage && {
+            getItem: key => options.sessionStorage.get(key) ?? null,
+            setItem: (key, value) => options.sessionStorage.set(key, value),
+            removeItem: key => options.sessionStorage.delete(key)
+        },
         alert: message => alerts.push(message),
         setTimeout(fn, delay = 0) { const id = ++nextId; timers.set(id, { fn, due: clock + delay }); return id; },
         clearTimeout: id => timers.delete(id),

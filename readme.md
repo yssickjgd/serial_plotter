@@ -355,6 +355,8 @@ git clone https://github.com/yssickjgd/serial_plotter
 
 `tools.exportFormat`、`tools.exportRecordSourceId` 和 `tools.exportProfiles` 保存左侧导出格式、记录范围及各格式的选项。`tools.widgetExport` 保存右侧导出格式及文件选项，实际数据来源由当前控件决定。`global.textEncoding` 和 `global.textBoundary` 保存共享文本规则。旧导出配置仍可导入。
 
+`workspace` 保存控件布局、缩放比例和当前工作区视图位置，包含横向和纵向滚动位置。刷新或导入配置时会恢复视图。窗口尺寸变化时，滚动位置会限制在可滚动范围内。缺少视图位置的旧配置从工作区左上角开始显示。
+
 ```json
 {
   "connType": "serial",

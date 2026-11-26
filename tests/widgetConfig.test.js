@@ -152,6 +152,19 @@ test('workspace zoom is backward compatible and invalid zoom imports are rejecte
     }
 });
 
+test('workspace view placement survives JSON and malformed positions are rejected', () => {
+    const config = migrateWorkspaceConfig(null);
+    assert.equal(config.workspace.view, undefined);
+    const view = { scrollLeft: 321.5, scrollTop: 120, origin: { x: 10, y: 20 },
+        centerPoint: { x: 430, y: 600 }, fitted: true };
+    config.workspace.view = view;
+    assert.deepEqual(validateWorkspaceConfig(JSON.parse(JSON.stringify(config))).workspace.view, view);
+    for (const invalid of [null, [], { ...view, scrollLeft: '321' }, { ...view, scrollTop: -1 },
+        { ...view, origin: { x: 10, y: null } }, { ...view, fitted: 'true' }]) {
+        assert.throws(() => validateWorkspaceConfig({ ...config, workspace: { ...config.workspace, view: invalid } }), /视图位置/);
+    }
+});
+
 test('widget identities cannot shadow shared export source identities', () => {
     for (const id of ['numeric', 'base']) {
         const config = migrateWorkspaceConfig({});
