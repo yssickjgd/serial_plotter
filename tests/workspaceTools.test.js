@@ -361,21 +361,46 @@ test('a view render failure settles asynchronous search without leaking a pendin
     assert.match(f.el('monitor-search-status').textContent, /render failed/);
 });
 
-test('65535 search channels render 40 candidates per page and preserve an off-page selection', () => {
+test('search channel buttons page through 65535 channels and preserve checks across filtering and paging', () => {
     const source = widget('large', [1]); source.source.frames.channelCount = 65535;
     const f = fixture([source]);
     f.service.channelNames = Array.from({ length: 65535 }, (_, index) => index === 65534 ? '末通道' : 'CH' + (index + 1));
     f.select('large');
-    assert.ok(f.tools.channelInputs.length <= 41);
-    const picker = f.tools.channelPicker; picker.filter.value = '末通道'; picker.filter.fire('input');
+    const picker = f.tools.channelPicker;
+    assert.equal(f.tools.channelInputs.length, 41);
+    assert.equal(picker.previous.disabled, true);
+    assert.equal(picker.next.disabled, false);
+    assert.deepEqual(picker.summary.textContent.match(/\d+/g), ['1', '40', '65535']);
+    picker.filter.value = '末通道'; picker.filter.fire('input');
     const target = f.tools.channelInputs.find(row => row.channel === 65534);
     assert.equal(target.text.textContent, 'CH65535 · 末通道');
     target.input.checked = true; target.input.fire('change');
-    picker.filter.value = ''; picker.filter.fire('input'); picker.next.fire('click');
-    assert.ok(f.tools.channelInputs.some(row => row.channel === 40));
+    assert.equal(picker.previous.disabled, true);
+    assert.equal(picker.next.disabled, true);
+    picker.filter.value = ''; picker.filter.fire('input');
+    picker.next.fire('click');
+    assert.deepEqual(picker.summary.textContent.match(/\d+/g), ['41', '80', '65535']);
     assert.deepEqual([...f.tools.selectedChannels], [65534]);
     assert.match(f.el('monitor-search-channel-toggle').textContent, /CH65535/);
+    const secondPage = f.tools.channelInputs.find(row => row.channel === 40);
+    secondPage.input.checked = true; secondPage.input.fire('change');
+    picker.previous.fire('click');
+    assert.equal(f.tools.channelInputs[1].channel, 0);
+    picker.next.fire('click');
+    assert.equal(f.tools.channelInputs[1].input.checked, true);
+    picker.filter.value = 'CH65535'; picker.filter.fire('input');
+    assert.equal(f.tools.channelInputs[1].input.checked, true);
+    assert.deepEqual([...f.tools.selectedChannels], [65534, 40]);
+    picker.filter.value = ''; picker.filter.fire('input');
+    f.service.paused = false; f.tools.syncPaused();
+    assert.equal(picker.filter.disabled, true);
+    assert.equal(picker.next.disabled, true);
+    f.service.paused = true; f.tools.syncPaused();
+    assert.equal(picker.filter.disabled, false);
+    assert.equal(picker.next.disabled, false);
     f.tools.dispose();
+    picker.next.fire('click');
+    assert.equal(f.tools.channelInputs[1].channel, 0);
 });
 
 test('engine numeric sources use scalar search while Raw_Data selects Hex search for every widget', async () => {

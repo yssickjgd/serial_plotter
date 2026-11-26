@@ -14,6 +14,12 @@ test('65535 pose binding choices use searchable pages and retain an off-page cur
     assert.equal(input.value, '65534');
     assert.ok(input.options.some(option => option.value === '65534' && option.textContent.includes('CH65535')));
     const picker = view.channelPickers.get('bindings.euler.0');
+    assert.equal(input.hidden, true);
+    assert.equal(picker.popup.hidden, true);
+    assert.match(picker.trigger.textContent, /CH65535 · 末端姿态/);
+    picker.trigger.click();
+    assert.equal(picker.popup.hidden, false);
+    assert.ok(picker.popup.contains(picker.filter));
     picker.filter.value = '末端姿态'; picker.filter.dispatchEvent({ type: 'input' });
     assert.equal(input.value, '65534');
     assert.ok(input.options.some(option => option.textContent.includes('末端姿态')));
@@ -25,11 +31,15 @@ test('65535 pose binding choices use searchable pages and retain an off-page cur
 
 test('pose binding pagination exposes later channels while keeping filtering separate from binding changes', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
+    f.app.widgets.ensureRawChannels(101);
     const widget = f.app.widgets.create({ type: 'pose' }), view = f.app.widgets.poseConfigView;
     f.app.widgets.channelMeta = () => Array.from({ length: 101 }, (_, index) => ({ index, name: '通道' + (index + 1), signal: true }));
     widget.settings.bindings.euler[0] = 99; view.render(widget);
     const picker = view.channelPickers.get('bindings.euler.0'), input = view.fields.get('bindings.euler.0').input;
+    picker.trigger.click();
+    assert.equal(picker.previous.disabled, true);
     picker.next.click();
+    assert.equal(picker.summary.textContent, '41–80 / 101');
     assert.ok(input.options.some(option => option.value === '40'));
     assert.equal(input.value, '99'); assert.equal(widget.settings.bindings.euler[0], 99);
     picker.filter.value = '不存在'; picker.filter.dispatchEvent({ type: 'input' });

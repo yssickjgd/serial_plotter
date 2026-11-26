@@ -3,8 +3,8 @@
     'use strict';
     const dependencies = typeof module !== 'undefined' && module.exports
         ? { MonitorSearch: require('./monitorSearch'), FrameNavigation: require('./frameNavigation'),
-            ...require('./channelTransform'), MonitorDisplay: require('./monitorDisplay'), PoseConfig: require('./poseConfig').PoseConfig } : root.SerialPlotter;
-    const { MonitorSearch, FrameNavigation, transformChannelValue, MonitorDisplay, PoseConfig } = dependencies;
+            ...require('./channelTransform'), ...require('./channelPages'), MonitorDisplay: require('./monitorDisplay'), PoseConfig: require('./poseConfig').PoseConfig } : root.SerialPlotter;
+    const { MonitorSearch, FrameNavigation, transformChannelValue, ChannelPages, MonitorDisplay, PoseConfig } = dependencies;
     const framesOf = widget => widget?.source?.frames ?? widget?.source;
     const timeScanBatch = 4096;
     const timeIndex = (frames, time) => {
@@ -166,11 +166,7 @@
             for (const id of ['nav-time-tools', 'nav-search-tools']) this._el(id)?.classList[enabled ? 'remove' : 'add']('tools-disabled');
             for (const { input } of this.channelInputs) input.disabled = !enabled || !source;
             if (this.protocolControls) for (const input of [this.protocolControls.kind, this.protocolControls.path]) input.disabled = !enabled || !source;
-            if (this.channelPicker) {
-                this.channelPicker.filter.disabled = !enabled || !source;
-                this.channelPicker.previous.disabled = !enabled || this.channelPage <= 0;
-                this.channelPicker.next.disabled = !enabled || (this.channelPage + 1) * 40 >= this.filteredChannels.length;
-            }
+            this.channelPicker?.update(this.filteredChannels.length, this.channelPage, !enabled);
             if (!enabled) {
                 this._closeChannels(); this._cancelTimeJump();
                 if (this.pending) this.invalidate();
@@ -211,17 +207,12 @@
             const container = this._el('monitor-search-channel-options');
             if (!container) return;
             if (!this.channelPicker) {
-                const toolbar = this.document.createElement('div'); toolbar.className = 'channel-picker-toolbar';
-                const filter = this.document.createElement('input'); filter.type = 'search'; filter.id = 'monitor-search-channel-filter';
-                filter.placeholder = '通道编号或名称'; filter.setAttribute?.('aria-label', '筛选搜索通道');
-                const previous = this.document.createElement('button'), next = this.document.createElement('button'), summary = this.document.createElement('span');
-                previous.type = next.type = 'button'; previous.textContent = '上一页'; next.textContent = '下一页';
-                toolbar.append(filter, previous, summary, next);
+                const picker = ChannelPages.toolbar(this.document, 'monitor-search-channel-filter', '筛选搜索通道');
                 const rows = this.document.createElement('div'); rows.className = 'search-channel-results';
-                this.channelPicker = { toolbar, filter, previous, next, summary, rows }; this.channelPage = 0;
-                this._listen(filter, 'input', () => { this.channelPage = 0; this._renderChannelPage(); });
-                this._listen(previous, 'click', () => { if (this.channelPage > 0) { this.channelPage--; this._renderChannelPage(); } });
-                this._listen(next, 'click', () => { if ((this.channelPage + 1) * 40 < this.filteredChannels.length) { this.channelPage++; this._renderChannelPage(); } });
+                this.channelPicker = { ...picker, rows }; this.channelPage = 0;
+                this._listen(picker.filter, 'input', () => { this.channelPage = 0; this._filterChannels(); });
+                this._listen(picker.previous, 'click', () => { this.channelPage--; this._renderChannelPage(); });
+                this._listen(picker.next, 'click', () => { this.channelPage++; this._renderChannelPage(); });
             }
             container.replaceChildren(this.channelPicker.toolbar, this.channelPicker.rows);
             const frames = framesOf(this._source()), count = frames?.channelCount ?? 0, allowed = this._poseChannels();
@@ -235,7 +226,7 @@
                 this.selectedChannels = new Set([...this.selectedChannels].filter(channel => eligible.has(channel)));
                 if (!this.selectedChannels.size) this.selectedChannels = null;
             }
-            this._renderChannelPage();
+            this._filterChannels();
         }
 
         _channelLabel(channel, names = this.getChannelNames()) {
@@ -246,15 +237,22 @@
             return name && !defaultName ? `${number} · ${name}` : number;
         }
 
+        _filterChannels() {
+            const names = this.getChannelNames(), query = this.channelPicker.filter.value.trim().toLocaleLowerCase(), exact = /^ch0*(\d+)$/i.exec(query);
+            this.filteredChannels = query ? this.eligibleChannels.filter(channel => exact
+                ? channel + 1 === Number(exact[1]) : this._channelLabel(channel, names).toLocaleLowerCase().includes(query)) : this.eligibleChannels;
+            this._renderChannelPage();
+        }
+
         _renderChannelPage() {
             for (const cleanup of this.channelCleanups) cleanup();
             this.channelCleanups = []; this.channelInputs = [];
             const picker = this.channelPicker, container = picker.rows;
             container.replaceChildren();
-            const names = this.getChannelNames(), query = picker.filter.value.trim().toLocaleLowerCase(), exact = /^ch0*(\d+)$/i.exec(query);
-            this.filteredChannels = this.eligibleChannels.filter(channel => !query || (exact ? channel + 1 === Number(exact[1]) : this._channelLabel(channel, names).toLocaleLowerCase().includes(query)));
-            this.channelPage = Math.max(0, Math.min(this.channelPage, Math.ceil(this.filteredChannels.length / 40) - 1));
-            const visible = this.filteredChannels.slice(this.channelPage * 40, (this.channelPage + 1) * 40);
+            const names = this.getChannelNames(), total = this.filteredChannels.length;
+            this.channelPage = ChannelPages.clamp(this.channelPage, Math.ceil(total / ChannelPages.size));
+            const start = this.channelPage * ChannelPages.size;
+            const visible = this.filteredChannels.slice(start, start + ChannelPages.size);
             for (const channel of [-1, ...visible]) {
                 const label = this.document.createElement('label'), input = this.document.createElement('input');
                 const text = this.document.createElement('span');
@@ -272,9 +270,8 @@
                     this._channelLabels(); this.invalidate();
                 }, this.channelCleanups);
             }
-            picker.summary.textContent = this.filteredChannels.length ? `${this.channelPage * 40 + 1}–${Math.min(this.filteredChannels.length, (this.channelPage + 1) * 40)} / ${this.filteredChannels.length}` : '无匹配通道';
-            picker.previous.disabled = this.channelPage <= 0;
-            picker.next.disabled = (this.channelPage + 1) * 40 >= this.filteredChannels.length;
+            picker.update(total, this.channelPage, !this._enabled());
+            container.scrollTop = 0;
             this._channelLabels();
         }
 

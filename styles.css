@@ -165,7 +165,6 @@ body {
 .channel-picker-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; }
 .channel-picker-toolbar input { min-width: 80px; flex: 1 1 100px; }
 .channel-picker-toolbar button { padding: 2px 5px; }
-.pose-channel-picker { min-width: 0; }
 .protocol-search-fields { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .protocol-search-fields input { min-width: 100px; flex: 1; }
 .engine-channel-toolbar { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 5px; }
@@ -1386,6 +1385,27 @@ canvas {
 .search-channel-options label:hover { background: #383838; }
 .search-channel-options input { margin: 0; flex-shrink: 0; }
 .search-channel-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.channel-binding-toggle {
+    display: flex; align-items: center; justify-content: space-between; gap: 4px;
+    width: 100%; min-width: 0; min-height: var(--ui-control-height); padding: 4px 6px;
+    border: 1px solid var(--border); border-radius: 3px; background: #fff; color: var(--text);
+    font: inherit; font-size: var(--ui-label-size); text-align: left; cursor: pointer;
+}
+.channel-binding-toggle::after { content: ''; flex: none; width: 6px; height: 6px; margin: 0 4px; border: solid currentColor; border-width: 0 1px 1px 0; transform: translateY(-2px) rotate(45deg); }
+.channel-binding-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.binding-channel-options {
+    position: fixed; inset: auto; margin: 0; min-width: 0; max-width: calc(100vw - 12px);
+    max-height: min(260px, calc(100dvh - 8px)); z-index: 100;
+    display: flex; flex-direction: column; color: #eee; font: inherit; font-size: var(--ui-label-size);
+}
+.binding-channel-options .search-channel-results { min-height: 0; overflow-y: auto; }
+.binding-channel-options .channel-menu-toolbar { flex: none; margin: 0 0 3px; }
+.channel-menu-toolbar button { white-space: nowrap; cursor: pointer; }
+.channel-menu-toolbar span { white-space: nowrap; }
+.binding-channel-options .channel-menu-toolbar button { width: auto; background: #333; color: #eee; border: 1px solid #666; border-radius: 3px; font: inherit; }
+.binding-channel-options .channel-menu-toolbar button:disabled { opacity: .45; }
+.binding-channel-options .channel-menu-toolbar input { width: 0; padding: 4px; font: inherit; }
+.binding-channel-options .search-channel-results label { color: #eee; }
 @container monitor (max-width: 600px) {
     .search-fields:has(#monitor-search-channel:not([hidden])) { flex: 0 0 100%; }
     .search-fields:has(#monitor-search-channel:not([hidden])) #monitor-search-query {

@@ -1,6 +1,7 @@
 /** One inspector binds to the active pose instance without creating another parser. */
 (function (root) {
     const S = root.SerialPlotter;
+    const ChannelPages = typeof module !== 'undefined' ? require('./channelPages').ChannelPages : S.ChannelPages;
     const choices = {
         representation: [['euler', 'Euler 角'], ['quaternion', '四元数'], ['matrix', '旋转矩阵']],
         order: ['YPR', 'YRP', 'PYR', 'PRY', 'RYP', 'RPY'].map(v => [v, v]),
@@ -45,7 +46,9 @@
             } else wrap.append(caption, input);
             parent.append(wrap);
             this.fields.set(path, { input, caption, options, binding });
-            if (path.includes('bindings.')) this._buildChannelPicker(wrap, path, input);
+            if (path.includes('bindings.')) this.channelPickers.set(path, new ChannelPages.Single(this.document, input, {
+                filterId: input.id + '-filter', filterLabel: '筛选绑定通道'
+            }));
             S.bindSettingField(input, () => {
                 const widget = this.controller.active; if (widget?.type !== 'pose' || this.binding) return;
                 try {
@@ -60,53 +63,21 @@
             }, this.controller._listen.bind(this.controller));
             return input;
         }
-        _buildChannelPicker(wrap, path, input) {
-            const toolbar = this.document.createElement('div'); toolbar.className = 'channel-picker-toolbar pose-channel-picker';
-            const filter = this.document.createElement('input'); filter.type = 'search'; filter.id = input.id + '-filter';
-            filter.placeholder = '通道编号或名称'; filter.setAttribute('aria-label', '筛选绑定通道');
-            const previous = this.document.createElement('button'), next = this.document.createElement('button'), summary = this.document.createElement('span');
-            previous.className = next.className = 'btn btn-secondary';
-            previous.type = next.type = 'button'; previous.textContent = '上一页'; next.textContent = '下一页';
-            const pager = this.document.createElement('div'); pager.className = 'sidebar-pager';
-            summary.setAttribute('role', 'status'); pager.append(previous, summary, next); toolbar.append(filter, pager); wrap.append(toolbar);
-            const picker = { filter, previous, next, summary, page: 0, total: 0 };
-            this.channelPickers.set(path, picker);
-            this.controller._listen(filter, 'input', () => { picker.page = 0; this._renderBinding(path); });
-            this.controller._listen(previous, 'click', () => { if (picker.page > 0) { picker.page--; this._renderBinding(path); } });
-            this.controller._listen(next, 'click', () => { if ((picker.page + 1) * 40 < picker.total) { picker.page++; this._renderBinding(path); } });
+        closePickers() {
+            for (const picker of this.channelPickers.values()) picker.close();
         }
-        _renderBinding(path, value) {
-            const picker = this.channelPickers.get(path), entry = this.fields.get(path);
-            const widget = this.boundWidget;
-            if (!picker || !widget || !entry) return;
-            if (value === undefined) value = entry.binding.read ? entry.binding.read(widget.settings) : get(widget.settings, path);
-            const query = picker.filter.value.trim().toLocaleLowerCase();
-            let matches = this.channelOptionsCache.get(query);
-            if (!matches) {
-                const exact = /^ch0*(\d+)$/i.exec(query);
-                matches = this.channelMetadata.filter(channel => !query || (exact ? channel.index + 1 === Number(exact[1]) :
-                    `${S.formatChannelId(channel.index)} ${channel.name ?? ''}`.toLocaleLowerCase().includes(query)));
-                this.channelOptionsCache.set(query, matches);
+        clear() {
+            if (!this.boundWidget) return;
+            for (const picker of this.channelPickers.values()) {
+                picker.close(); picker.filter.value = ''; picker.page = 0;
             }
-            picker.total = matches.length; picker.page = Math.max(0, Math.min(picker.page, Math.ceil(matches.length / 40) - 1));
-            const visible = matches.slice(picker.page * 40, (picker.page + 1) * 40);
-            if (value !== null && value !== undefined && !visible.some(channel => channel.index === Number(value))) {
-                const current = this.channelMetadata[Number(value)]?.index === Number(value) ? this.channelMetadata[Number(value)]
-                    : this.channelMetadata.find(channel => channel.index === Number(value));
-                visible.unshift(current ?? { index: Number(value), name: '当前绑定' });
-            }
-            const values = [['', '请选择通道'], ...visible.map(channel => {
-                const number = S.formatChannelId(channel.index), name = channel.name;
-                const defaultName = /^CH0*\d+$/i.test(name ?? '') && Number(name.slice(2)) === channel.index + 1;
-                return [String(channel.index), name && !defaultName ? `${number} · ${name}` : number];
-            })];
-            entry.input.replaceChildren(...values.map(([optionValue, text]) => {
-                const option = this.document.createElement('option'); option.value = optionValue; option.textContent = text; return option;
-            }));
-            entry.input.value = value === null || value === undefined ? '' : String(value);
-            picker.previous.disabled = picker.page <= 0;
-            picker.next.disabled = (picker.page + 1) * 40 >= matches.length;
-            picker.summary.textContent = matches.length ? `${picker.page * 40 + 1}–${Math.min(matches.length, (picker.page + 1) * 40)} / ${matches.length}` : '无匹配通道';
+            this.channelMetadata = null;
+            this.boundWidget = null;
+        }
+        dispose() {
+            this.clear();
+            for (const picker of this.channelPickers.values()) picker.dispose();
+            this.channelPickers.clear();
         }
         _error(parent, id) {
             const error = this.document.createElement('p'); error.id = id; error.className = 'pose-error'; error.hidden = true;
@@ -211,21 +182,26 @@
         }
         render(widget) {
             if (widget?.type !== 'pose') return;
+            if (widget !== this.boundWidget) this.clear();
             this.binding = true; const s = widget.settings; this.boundWidget = widget;
-            const channels = this.controller.channelMeta().filter(channel => channel.signal);
-            this.channelMetadata = channels; this.channelOptionsCache = new Map();
+            const channels = this.controller.channelMeta(widget).filter(channel => channel.signal);
+            if (!ChannelPages.sameChannels(this.channelMetadata, channels)) this.channelMetadata = channels;
             for (const { group, visible } of this.groups) group.hidden = !visible(s);
             for (const [path, { input, caption, options, binding }] of this.fields) {
                 const channelBinding = path.includes('bindings.');
                 const value = binding.read ? binding.read(s) : get(s, path);
-                if (channelBinding) this._renderBinding(path, value);
                 if (binding.caption) caption.textContent = binding.caption(s);
                 else if (channelBinding || path.includes('fixed.')) {
                     const source = path.startsWith('overlay.') ? s.overlay : s;
                     caption.textContent = S.PoseData.componentLabels({ ...source, representation: path.split('.').at(-2) })[Number(path.split('.').at(-1))];
                 }
                 binding.render?.(s, input);
-                if (options === 'checkbox') input.checked = value; else input.value = value === null ? '' : String(value);
+                if (channelBinding) {
+                    const picker = this.channelPickers.get(path);
+                    if (!picker.popup.hidden && (input.parentElement.hidden || input.closest('.control-group').hidden)) picker.close();
+                    if (picker.channels !== this.channelMetadata || picker.index !== value)
+                        picker.update(this.channelMetadata, value, '请选择通道');
+                } else if (options === 'checkbox') input.checked = value; else input.value = value === null ? '' : String(value);
             }
             for (const parent of [this.display, this.channels]) for (const error of parent.querySelectorAll('.pose-error')) { error.textContent = ''; error.hidden = true; }
             this.binding = false;
