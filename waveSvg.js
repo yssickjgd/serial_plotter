@@ -1,10 +1,10 @@
 /** Serialize the geometry and tick labels of a presented waveform frame. */
 function renderWaveSvg({ width, height, plotW, plotH, traces, labels, navigation }, options) {
-    const { title, xLabel, yLabel, fontFamily, lineWidth, markerSize } = options;
+    const { title, fontFamily, lineWidth, markerSize } = options;
     const escape = value => String(value).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/gu, '')
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const n = value => Number(value.toFixed(3));
-    const top = 44, fullHeight = top + height + 22, fullWidth = width + 12;
+    const top = 26, fullHeight = top + height, fullWidth = width + 12;
     const parts = [
         '<svg xmlns="http://www.w3.org/2000/svg" width="' + fullWidth + '" height="' + fullHeight +
             '" viewBox="0 0 ' + fullWidth + ' ' + fullHeight + '" font-family="' + escape(fontFamily) + '">',
@@ -12,10 +12,7 @@ function renderWaveSvg({ width, height, plotW, plotH, traces, labels, navigation
         '<rect width="100%" height="100%" fill="#111111"/>',
         '<text x="6" y="19" fill="#eeeeee" font-size="15">' + escape(title) + '</text>',
         '<g transform="translate(6 ' + top + ')">',
-        '<defs><clipPath id="wave-plot"><rect width="' + plotW + '" height="' + plotH + '"/></clipPath></defs>',
-        '<text x="' + plotW + '" y="-10" fill="#cccccc" font-size="11">' + escape(yLabel) + '</text>',
-        '<text x="' + plotW / 2 + '" y="' + (height + 13) +
-            '" text-anchor="middle" fill="#cccccc" font-size="11">' + escape(xLabel) + '</text>'
+        '<defs><clipPath id="wave-plot"><rect width="' + plotW + '" height="' + plotH + '"/></clipPath></defs>'
     ];
     for (const [step, color] of [[20, '#1e1e1e'], [100, '#2e2e2e']]) {
         const grid = [];

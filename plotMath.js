@@ -214,6 +214,23 @@ function plotWheelAxis(x, y, { left = 0, top = 0, right, width, height }) {
     return x > right ? 'y' : 'x';
 }
 
+function layoutAxisTickLabels(ticks, width) {
+    const candidates = [];
+    for (const { text, x, pixels } of ticks) {
+        if (!text || pixels > width || text === candidates.at(-1)?.text) continue;
+        const left = Math.max(0, Math.min(width - pixels, x - pixels / 2));
+        candidates.push({ text, left, pixels });
+    }
+    const visible = [], gap = 8, last = candidates.at(-1);
+    let boundary = -Infinity;
+    for (const tick of candidates) {
+        if (tick.left < boundary || (tick !== last && visible.length && tick.left + tick.pixels + gap > last.left)) continue;
+        visible.push(tick);
+        boundary = tick.left + tick.pixels + gap;
+    }
+    return visible;
+}
+
 function zoomAxisBounds(min, max, anchorRatio, delta, limits, scale = 'linear') {
     if (scale !== 'linear') {
         const domain = limits?.map(value => axisToDomain(value, scale));
@@ -311,16 +328,21 @@ function formatAxisValue(value, format = axisNumberDefaults, autoDigits = 6) {
     return format.notation === 'plain' ? expandExponential(text) : text;
 }
 
+function formatPlotAxisCoordinate(value, format) {
+    if (customAxisNumberFormat(format)) return formatAxisValue(value, format);
+    return Number(value && Math.abs(value) < .001 ? value.toPrecision(4) : value.toFixed(3));
+}
+
 if (typeof module !== 'undefined') module.exports = {
     adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
-    customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds
+    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
     adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
-    customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds
+    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds
 });

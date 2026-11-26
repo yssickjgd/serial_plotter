@@ -342,17 +342,20 @@ test('wave trace styles select the same geometry on Canvas and SVG across domain
     }
 });
 
-test('system response SVG follows time, normalized frequency, calibrated dB and phase units', () => {
+test('system response SVG uses the same visible ticks as the waveform', () => {
     const { plotter } = createResponsePlotter('[0]=1,[1]=0.001');
-    for (const [options, unit] of [
-        [{ displayMode: 'time' }, '采样点'],
-        [{ displayMode: 'frequency' }, 'cycles/sample'],
-        [{ responseSampleRate: 512, magnitudeUnit: 'db' }, 'dB'],
-        [{ displayMode: 'phase', phaseUnit: 'radians', phaseUnwrap: true }, 'rad'],
-        [{ phaseUnit: 'degrees', phaseUnwrap: false }, '°']
+    for (const [options, tick] of [
+        [{ displayMode: 'time' }, />\[\d+\]<\/text>/],
+        [{ displayMode: 'frequency' }, / cycles\/sample<\/text>/],
+        [{ responseSampleRate: 512, magnitudeUnit: 'db' }, / Hz<\/text>/],
+        [{ displayMode: 'phase', phaseUnit: 'radians', phaseUnwrap: true }, / rad<\/text>/],
+        [{ phaseUnit: 'degrees', phaseUnwrap: false }, /°<\/text>/]
     ]) {
         plotter.setDisplayOptions(options);
-        assert.ok(plotter.exportSvg('响应').includes(unit), unit);
+        const svg = plotter.exportSvg('响应');
+        assert.match(svg, tick);
+        assert.doesNotMatch(svg, />(?:采样点|数值|频率 \(|幅值 \(|相位 \()/);
+        if (options.magnitudeUnit === 'db') assert.ok(Math.abs(plotter._drawState.min) < .1);
     }
 });
 

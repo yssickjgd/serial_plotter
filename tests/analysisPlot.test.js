@@ -20,7 +20,10 @@ test('XY spectrum modes plot paired gain, phase and coherence at a shared freque
     const view = new AnalysisPlot(svg, 'xy', frames, settings, 64, () => ({ rate: 800 }));
     t.after(() => view.dispose());
     view.renderNow();
-    assert.match(svg.textContent, /相位差/);
+    const axisTitles = />\s*(?:X|Y|幅度比（Y \/ X）|增益（dB）|相位差（[^）]*）|相干度|频率（[^）]*）)\s*<\/text>/u;
+    assert.match(svg.textContent, / rad/);
+    assert.match(svg.textContent, / Hz/);
+    assert.doesNotMatch(view.exportSvg(), axisTitles);
     assert.ok(Math.abs(view.spectra[0].values[4] - Math.PI / 2) < 1e-9);
     assert.equal(view.frequencyAtBin(4), 100);
     assert.equal(view.spectra[0].blocks, 3);
@@ -29,10 +32,12 @@ test('XY spectrum modes plot paired gain, phase and coherence at a shared freque
     assert.equal(view.frequencyAtBin(4), 100);
     svg.dispatchEvent({ type: 'pointermove', clientX: view.px(view.binToAxis(4)) + .5, clientY: view.py(.5) });
     assert.ok(view.overlay.querySelectorAll('text').some(node => node.textContent.endsWith(': 0.5')));
+    assert.doesNotMatch(view.exportSvg(), axisTitles);
     view.setSettings({ ...settings, viewMode: 'gain', gainUnit: 'db', gainDbYAuto: false, gainDbYMin: -30, gainDbYMax: 0 });
     view.renderNow();
     assert.ok(Math.abs(view.spectra[0].values[4] + 6.020599913279624) < 1e-9);
     assert.deepEqual(view.range.slice(2), [-30, 0]);
+    assert.doesNotMatch(view.exportSvg(), axisTitles);
     view.setSettings({ ...view.settings, gainUnit: 'db10' }); view.renderNow();
     assert.ok(Math.abs(view.spectra[0].values[4] + 3.010299956639812) < 1e-9);
     assert.deepEqual(view.range.slice(2), [-30, 0]);
@@ -43,7 +48,7 @@ test('XY spectrum modes plot paired gain, phase and coherence at a shared freque
     view.renderNow();
     assert.ok(Math.abs(view.spectra[0].values[2] - 1) < 1e-9);
     assert.deepEqual(view.range.slice(2), [0, 1]);
-    assert.match(view.exportSvg(), /相干度/);
+    assert.doesNotMatch(view.exportSvg(), axisTitles);
     view.setSettings(settings, 128); view.renderNow();
     assert.equal(view.spectra[0].fftSize, 32);
     assert.ok(Math.abs(view.spectra[0].values[4] - Math.PI / 2) < 1e-9);
@@ -52,6 +57,7 @@ test('XY spectrum modes plot paired gain, phase and coherence at a shared freque
     view.setFrames(frames);
     view.setSettings({ viewMode: 'trajectory' }); view.renderNow();
     assert.ok(view.hitPoints.length > 0);
+    assert.doesNotMatch(view.exportSvg(), axisTitles);
 });
 
 test('switching phase units preserves the current X and Y zoom', t => {
@@ -130,7 +136,9 @@ test('gapped pairs fall back independently and plot their peaks on the same freq
     view.setSettings({ ...settings, viewMode: 'coherence', freqXScale: 'bins-log' });
     view.renderNow();
     assert.ok(view.spectra.every(spectrum => Math.abs(spectrum.values[spectrum.fftSize / 8] - 1) < 1e-9));
-    assert.match(svg.textContent, /参考 Bin/);
+    assert.doesNotMatch(view.exportSvg(), />频率（参考 Bin）<\/text>/);
+    svg.dispatchEvent({ type: 'pointermove', clientX: view.px(view.binToAxis(4)), clientY: view.py(.5) });
+    assert.match(view.overlay.textContent, /X 4 参考 Bin/);
 });
 
 test('phase difference unwraps to the nearest cycle across undefined bins without drawing across the gap', t => {
@@ -152,7 +160,8 @@ test('phase difference unwraps to the nearest cycle across undefined bins withou
         const actual = Array.from(view.spectra[0].values,
             value => Math.round(phaseUnit === 'degrees' ? value : value * 180 / Math.PI));
         assert.deepEqual(actual, phaseUnwrap ? unwrapped : wrapped);
-        const line = svg.querySelector('path').getAttribute('d');
+        const trace = svg.querySelectorAll('path').find(path => path.getAttribute('stroke') === view.settings.pairs[0].color);
+        const line = trace.getAttribute('d');
         assert.equal((line.match(/M/g) ?? []).length, phaseUnwrap ? 2 : 3);
     }
 });
@@ -371,7 +380,7 @@ test('live XY spectra keep one job in flight and skip superseded input windows',
     jobs[1].resolve(result(.5));
     await new Promise(setImmediate);
     assert.equal(view.spectra.length, 0, 'a stale result cannot overwrite a new mode');
-    assert.match(view.exportSvg(), /相位差/);
+    assert.match(view.exportSvg(), / rad<\/text>/);
     assert.ok(view.spectra[0].blocks >= 2);
 });
 function points(frames, pair, start = 0, end = frames.length, bounds = { first: -Infinity, last: Infinity }) {
@@ -488,8 +497,9 @@ test('histogram draws right-side Y and shares independent X and Y wheel zoom', t
     const centerX = (left + right) / 2, centerY = top + height / 2;
     const yTicks = svg.querySelectorAll('text').filter(node => Number(node.getAttribute('x')) > right &&
         node.getAttribute('text-anchor') === 'start');
-    assert.ok(yTicks.some(node => node.textContent === '100'));
-    assert.ok(svg.querySelectorAll('text').some(node => Number(node.getAttribute('y')) > bottom && /分组/.test(node.textContent)));
+    assert.ok(yTicks.some(node => node.textContent === '100%'));
+    const xTicks = svg.querySelectorAll('text').filter(node => Number(node.getAttribute('y')) > bottom);
+    assert.ok(xTicks.length && xTicks.every(node => /^\[/.test(node.textContent)));
 
     wheel(centerX, centerY);
     assert.deepEqual(view.range, [1, 9, ...fixed]);
@@ -504,7 +514,7 @@ test('histogram draws right-side Y and shares independent X and Y wheel zoom', t
     assert.deepEqual(view.range, [...horizontal, ...fixed]);
     for (let i = 0; i < 6; i++) wheel(centerX, centerY, 1);
     assert.deepEqual(view.range, [0, 10, ...fixed]);
-    assert.match(view.exportSvg(), /占比 \(%\)/);
+    assert.doesNotMatch(view.exportSvg(), /占比 \(%\)| · 分组/);
 
     view.setSettings({ ...settings, yRange: 'auto', scale: 'count' }); view.renderNow();
     assert.ok(view.range[3] > 3);

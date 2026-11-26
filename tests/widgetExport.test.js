@@ -56,7 +56,8 @@ test('an offscreen wave exports fresh time and frequency geometry without waking
         assert.equal(await f.app.exportWidgetData(), true, mode + ' ' + f.get('widget-export-source-status').textContent);
         const svg = await f.blobs.at(-1).text();
         assert.match(svg, /stroke="#123cab"/);
-        assert.ok(svg.includes(mode === 'time' ? '采样点' : '频点 (bin)'));
+        assert.doesNotMatch(svg, />(?:采样点|频点 \(bin\)|数值|幅值(?: \(dB\))?)<\/text>/);
+        assert.match(svg, />\d+<\/text>/);
         assert.equal(wave.view._drawState, null);
         assert.equal(wave.view.canvas.width, 1);
         assert.equal(wave.view._raf, null);

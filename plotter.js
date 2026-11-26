@@ -641,10 +641,7 @@ class Plotter {
     }
 
     _formatAxisNumber(value) {
-        const { customAxisNumberFormat, formatAxisValue } = globalThis.SerialPlotter;
-        const format = this.axisNumberFormats.x;
-        if (customAxisNumberFormat(format)) return formatAxisValue(value, format);
-        return Number(value && Math.abs(value) < 0.001 ? value.toPrecision(4) : value.toFixed(3));
+        return globalThis.SerialPlotter.formatPlotAxisCoordinate(value, this.axisNumberFormats.x);
     }
 
     _formatYValue(value, logarithmic) {
@@ -1514,14 +1511,7 @@ class Plotter {
         let state = this._drawState;
         if ((!state || this._viewDirty) && !this._disposed) state = this._prepareExportFrame();
         if (!state) throw new Error('当前视图没有可导出的波形。');
-        const time = this.displayMode === 'time';
-        let xLabel;
-        if (time) xLabel = this.frames.responseMode || this.timeXUnit !== 's' ? '采样点' : '时间 (s)';
-        else if (this.freqXUnit === 'bins') xLabel = '频点 (bin)';
-        else xLabel = this.frames.responseMode && !(this.responseSampleRate > 0) ? '频率 (cycles/sample)' : '频率 (Hz)';
-        const yLabel = this.displayMode === 'phase' ? '相位 (' + this._phaseSuffix().trim() + ')'
-            : time ? '数值' : this.magnitudeUnit === 'db' ? '幅值 (dB)' : '幅值';
-        return globalThis.SerialPlotter.renderWaveSvg(state, { title, xLabel, yLabel,
+        return globalThis.SerialPlotter.renderWaveSvg(state, { title,
             fontFamily: this.fontFamily, lineWidth: Math.max(1.2, 1 / this._traceDensity), markerSize: plotSampleMarkerSize });
     }
 
@@ -1860,20 +1850,11 @@ class Plotter {
                 : this.frames.responseMode ? `[${Math.max(0, index - start)}]`
                     : aligned ? `${this._formatAxisNumber((aligned.first - plotTimeOrigin(this) + (aligned.last - aligned.first) * fraction) / 1000)} s`
                         : index >= 0 && index < total ? this._formatTimeIndex(index) : '';
-            if (!text || labels.at(-1)?.text === text) continue;
-            const pixels = ctx.measureText(text).width;
-            if (pixels > width) continue;
-            const left = Math.max(0, Math.min(width - pixels, fraction * width - pixels / 2));
-            labels.push({ text, left, pixels });
+            if (text) labels.push({ text, x: fraction * width, pixels: ctx.measureText(text).width });
         }
         ctx.textAlign = 'left';
-        const last = labels.at(-1);
-        let boundary = -Infinity;
-        for (const label of labels) {
-            if (label.left < boundary || (label !== last && boundary !== -Infinity &&
-                label.left + label.pixels + 8 > last.left)) continue;
+        for (const label of globalThis.SerialPlotter.layoutAxisTickLabels(labels, width)) {
             this._drawAxisText(label.text, label.left, height + 3);
-            boundary = label.left + label.pixels + 8;
         }
     }
 

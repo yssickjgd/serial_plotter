@@ -24,7 +24,7 @@
         i => inclusive ? eventTime(events[i]) <= time : eventTime(events[i]) < time);
     const { formatDisplayNumber: numberLabel, maxAxisSignificantDigits, readAxisNumberFormat, axisNumberFieldNames,
         formatAxisValue, customAxisNumberFormat, plotWheelAxis, zoomAxisBounds, positiveLogBounds, adaptiveLogScale,
-        axisFraction, axisValueAtFraction } = typeof module !== 'undefined' ? require('./plotMath') : S;
+        axisFraction, axisValueAtFraction, layoutAxisTickLabels, formatPlotAxisCoordinate } = typeof module !== 'undefined' ? require('./plotMath') : S;
     const boundLabel = (value, format, digits) => value === Infinity ? '+∞' : value === -Infinity ? '−∞' : formatAxisValue(value, format, digits);
     const labelWidth = text => Array.from(text).reduce((width, c) => width + (c.charCodeAt(0) > 127 ? 12 : 7), 0);
 
@@ -566,16 +566,6 @@
         spectrumBin(bin, spectrum) { return bin * this.axisFftSize / spectrum.fftSize; }
         binToAxis(bin) { return this.logFrequency ? Math.log10(bin) : bin; }
         axisToBin(x) { return this.logFrequency ? 10 ** x : x; }
-        get spectralLabel() {
-            if (this.gainSpectrum) return this.gainInDb ? '增益（dB）' : '幅度比（Y / X）';
-            if (!this.phaseSpectrum) return '相干度';
-            return this.settings.phaseUnit === 'degrees' ? '相位差（°）' : '相位差（rad）';
-        }
-        get verticalAxisLabel() {
-            if (this.spectral) return this.spectralLabel;
-            if (this.type === 'xy') return 'Y';
-            return this.settings.scale === 'percent' ? '占比 (%)' : '频数';
-        }
         spectrumWindow(start, end) {
             const { frames } = this;
             if (!frames.segments?.length || end <= start) {
@@ -597,6 +587,7 @@
         resetSpectrum() {
             this.cancelSpectrumRequest();
             this.spectrumKey = null; this.dataKey = null; this.spectra = []; this.spectrumAxisSize = null;
+            this.referenceBins = false;
         }
         publishSpectra(results, key, rate) {
             const s = this.settings;
@@ -622,6 +613,8 @@
             });
             this.spectrumAxisSize = this.spectra.reduce((size, { fftSize, values }) =>
                 fftSize > size && values.some((value, bin) => (!this.logFrequency || bin > 0) && finite(value)) ? fftSize : size, 0) || null;
+            this.referenceBins = this.spectra.some(({ fftSize, values }) =>
+                fftSize !== this.axisFftSize && values.some((value, bin) => (!this.logFrequency || bin > 0) && finite(value)));
             if (this.zoom?.x && previousSize !== this.axisFftSize) {
                 const ratio = this.axisFftSize / previousSize;
                 const [lower, upper] = this.zoom.x;
@@ -785,9 +778,10 @@
             const digits = yFormat.mode === 'decimal' ? yFormat.decimalPlaces : yFormat.significantDigits;
             const customY = customAxisNumberFormat(yFormat);
             const axisMargin = customY ? Math.max(61, (digits + 7) * 6 + 5) : 61;
-            const yGutter = Math.min(Math.max(axisMargin, labelWidth(this.verticalAxisLabel) + 12), width * (customY ? .4 : .25));
+            const yGutter = Math.min(axisMargin + labelWidth(this.phaseSuffix), width * (customY ? .4 : .25));
             let top = Math.min(29, height * .15), left = Math.min(25, width * .12);
-            let right = Math.max(left + 1, width - yGutter), bottom = Math.max(top + 1, height - 36);
+            const footerHeight = this.historyOrdinal == null ? 22 : 36;
+            let right = Math.max(left + 1, width - yGutter), bottom = Math.max(top + 1, height - footerHeight);
             svg.setAttribute('viewBox', [0, 0, width, height].join(' '));
             svg.replaceChildren();
             node(svg, 'rect', { width, height, fill: background });
@@ -861,49 +855,50 @@
                 ? Math.max(90, (digits + 7) * (this.type === 'histogram' && s.mode !== 'fixed' ? 14 : 7)) : 90;
             const nx = clamp(Math.floor(a.width / labelSpacing), 1, 12), ny = clamp(Math.floor(a.height / 42), 1, 8);
             const grid = { stroke: '#34383b', 'stroke-width': 1 };
-            const xy = this.type === 'xy', yLabelX = a.right + 6;
+            const xy = this.type === 'xy', yLabelX = a.right + 6, xTicks = [];
+            const marks = ['M' + a.left + ' ' + a.bottom + 'H' + a.right + 'V' + a.top];
+            const ySuffix = this.phaseSuffix || (!xy && s.scale === 'percent' ? '%' : '');
             const yLabels = tickLabels(Array.from({ length: ny + 1 }, (_, i) => this.yAt(i / ny)), yFormat, this.logGain ? 3 : 6);
             for (let i = 0; i <= ny; i++) {
                 const y = a.bottom - a.height * i / ny;
                 node(svg, 'line', { x1: a.left, x2: a.right, y1: y, y2: y, ...grid });
-                if (yLabels[i] !== yLabels[i - 1])
-                    label(svg, yLabelX, y + 3, yLabels[i], { 'text-anchor': 'start' });
+                if (yLabels[i] === yLabels[i - 1]) continue;
+                marks.push('M' + a.right + ' ' + y + 'h-4');
+                label(svg, yLabelX, y, yLabels[i] + ySuffix,
+                    { 'text-anchor': 'start', 'dominant-baseline': 'central', fill: '#aaaaaa', 'font-size': 10 });
             }
             if (this.type === 'xy') {
-                const last = r[0] === r[1] ? 0 : nx;
-                const values = Array.from({ length: last + 1 }, (_, i) => {
-                    const value = mix(r[0], r[1], i / nx);
-                    return this.spectral ? this.frequencyAtBin(this.axisToBin(value)) : value;
-                });
-                const xLabels = tickLabels(values, xFormat);
-                for (let i = 0; i <= last; i++) {
-                    const x = a.left + a.width * i / nx;
+                const divisions = this.spectral ? Math.min(5, nx) : nx;
+                const last = r[0] === r[1] ? 0 : divisions;
+                const positions = Array.from({ length: last + 1 }, (_, i) => {
+                    const value = mix(r[0], r[1], i / divisions);
+                    return this.spectral ? this.binToAxis(Math.round(this.axisToBin(value))) : value;
+                }).filter((value, i, values) => value >= r[0] && value <= r[1] && value !== values[i - 1]);
+                const values = positions.map(value => this.spectral ? this.frequencyAtBin(Math.round(this.axisToBin(value))) : value);
+                const hz = this.spectral && this.frequencyUnit === 'Hz', bins = this.spectral && !hz;
+                const xLabels = hz ? values.map(value => formatPlotAxisCoordinate(value, xFormat))
+                    : bins ? values.map(String) : tickLabels(values, xFormat);
+                for (const [i, value] of positions.entries()) {
+                    const x = this.px(value), text = xLabels[i] + (hz ? ' Hz' : '');
                     node(svg, 'line', { x1: x, x2: x, y1: a.top, y2: a.bottom, ...grid });
-                    if (xLabels[i] !== xLabels[i - 1]) label(svg, x, a.bottom + 15, xLabels[i],
-                        { 'text-anchor': i === nx ? 'end' : i === 0 ? 'start' : 'middle' });
+                    xTicks.push({ x: x - a.left, pixels: labelWidth(text), text });
                 }
             } else {
                 const [first, end] = visibleHistogramBins(this.histogram.bins.length, r);
                 const step = Math.max(1, Math.ceil((end - first) / nx));
                 const maxChars = Math.max(1, Math.floor((a.width / Math.ceil((end - first) / step) - 6) / 7));
-                let previousRight = -Infinity;
                 for (let i = first; i < end; i += step) {
                     const center = (Math.max(i, r[0]) + Math.min(i + 1, r[1])) / 2;
                     const x = this.px(center), value = this.histogram.bins.label(i);
                     node(svg, 'line', { x1: x, x2: x, y1: a.top, y2: a.bottom, ...grid });
                     const text = value.length <= maxChars ? value : value.slice(0, maxChars - 1) + '…';
-                    const width = labelWidth(text), left = clamp(x - width / 2, a.left, a.right - width);
-                    if (width > a.width || left < previousRight + 6) continue;
-                    label(svg, left, a.bottom + 15, text);
-                    previousRight = left + width;
+                    xTicks.push({ x: x - a.left, pixels: labelWidth(text), text });
                 }
             }
-            label(svg, yLabelX, 16, this.verticalAxisLabel);
-            const reference = this.spectral && this.frequencyUnit === 'Bin' &&
-                this.spectra.some(item => item.values.some(finite) && item.fftSize !== this.axisFftSize);
-            const xLabel = this.spectral ? '频率（' + (reference ? '参考 Bin' : this.frequencyUnit) + '）' :
-                xy ? 'X' : channelLabel(this.frames, s.channel) + ' · 分组';
-            label(svg, a.right, a.bottom + 30, xLabel, { 'text-anchor': 'end' });
+            for (const { left, text } of layoutAxisTickLabels(xTicks, a.width))
+                label(svg, a.left + left, a.bottom + 3, text,
+                    { 'dominant-baseline': 'text-before-edge', fill: '#aaaaaa', 'font-size': 10 });
+            path(svg, marks, { fill: 'none', stroke: '#888' });
         }
         drawSpectrum(group) {
             const s = this.settings, { left, right } = this.area;
@@ -1143,7 +1138,8 @@
                 node(this.overlay, 'rect', { x: lx, y: ly, width, height, fill: background, 'fill-opacity': .85, stroke: color });
                 label(this.overlay, lx + 5, ly + height / 2, text, { fill: color, 'dominant-baseline': 'central' });
             });
-            return ['X ' + formatAxisValue(this.frequencyAtBin(reference), xFormat) + ' ' + this.frequencyUnit,
+            const xUnit = this.frequencyUnit === 'Bin' && this.referenceBins ? '参考 Bin' : this.frequencyUnit;
+            return ['X ' + formatAxisValue(this.frequencyAtBin(reference), xFormat) + ' ' + xUnit,
                 'Y ' + formatAxisValue(cursorY, yFormat, yDigits) + unit];
         }
         hover(p) {
@@ -1165,7 +1161,8 @@
             } else {
                 const h = this.histogram, index = Math.floor(this.coords(p.x, p.y)[0]);
                 if (index < 0 || index >= h.counts.length) return;
-                lines = [h.bins.label(index), '频数 ' + h.counts[index] + '  ·  ' + formatAxisValue(h.percent(index), yFormat) + '%'];
+                lines = [channelLabel(this.frames, this.settings.channel) + ' · ' + h.bins.label(index),
+                    '频数 ' + h.counts[index] + '  ·  ' + formatAxisValue(h.percent(index), yFormat) + '%'];
             }
             const width = Math.min(this.width, Math.max(...lines.map(labelWidth)) + 14);
             const height = lines.length * 16 + 7;
