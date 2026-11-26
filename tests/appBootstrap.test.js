@@ -113,22 +113,46 @@ test('P toggles global capture once per press and follows the same pause state a
     assert.equal(f.app.service.paused, false);
 });
 
-test('capture shortcut ignores editing composition browser shortcuts and detaches on disposal', () => {
+test('C clears the capture buffer once per press and preserves the paused state', t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const widget = f.app.widgets.create({ type: 'byte' });
+    const service = f.app.service;
+    const press = (key, extra = {}) => f.document.dispatchEvent({ type: 'keydown', key, target: widget.element, ...extra });
+    service.receive(Uint8Array.of(1, 2));
+    service.appendTx(Uint8Array.of(3));
+    f.click('btn-pause');
+    assert.equal(service.baseSource.frames.length, 1);
+    assert.equal(service.txFrames.length, 1);
+
+    press('c');
+    assert.equal(service.baseSource.frames.length, 0);
+    assert.equal(service.txFrames.length, 0);
+    assert.equal(service.paused, true);
+    const epoch = service.epoch;
+    press('c', { repeat: true });
+    assert.equal(service.epoch, epoch);
+    press('C');
+    assert.equal(service.epoch, epoch + 1);
+});
+
+test('capture shortcuts ignore editing composition browser shortcuts and detach on disposal', () => {
     const f = bootApplication();
-    for (const target of [f.get('send-input'), f.get('widget-title'), f.get('plot-window-points'), f.get('plot-view-mode')]) {
-        f.document.dispatchEvent({ type: 'keydown', key: 'p', target });
-        assert.equal(f.app.service.paused, false);
-    }
     const editable = f.document.createElement('div'); editable.isContentEditable = true;
-    f.document.dispatchEvent({ type: 'keydown', key: 'p', target: editable });
-    assert.equal(f.app.service.paused, false);
-    for (const extra of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true }, { defaultPrevented: true }]) {
-        f.document.dispatchEvent({ type: 'keydown', key: 'p', target: f.document.body, ...extra });
+    let epoch = f.app.service.epoch;
+    const targets = [f.get('send-input'), f.get('widget-title'), f.get('plot-window-points'), f.get('plot-view-mode'), editable];
+    const modifiers = [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true }, { defaultPrevented: true }];
+    const press = (key, target, extra) => {
+        f.document.dispatchEvent({ type: 'keydown', key, target, ...extra });
         assert.equal(f.app.service.paused, false);
+        assert.equal(f.app.service.epoch, epoch);
+    };
+    for (const key of ['p', 'c']) {
+        for (const target of targets) press(key, target);
+        for (const extra of modifiers) press(key, f.document.body, extra);
     }
     f.app.dispose();
-    f.document.dispatchEvent({ type: 'keydown', key: 'p', target: f.document.body });
-    assert.equal(f.app.service.paused, false);
+    epoch = f.app.service.epoch;
+    for (const key of ['p', 'c']) press(key, f.document.body);
 });
 const { GLOBAL_DEFAULTS } = require('../widgetConfig');
 const config = widgets => ({ version: 2, global: { ...GLOBAL_DEFAULTS, dataType: 'uint8', enableHeader: false, enableFooter: false },

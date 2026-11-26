@@ -1974,11 +1974,13 @@ async function startSerialPlotterApplication() {
     }
     listen(el('btn-pause'), 'click', () => setPaused(!service.paused));
     listen(document, 'keydown', event => {
-        if (!['p', 'P'].includes(event.key) || event.repeat || event.isComposing || event.defaultPrevented ||
+        const key = event.key?.toLowerCase();
+        if ((key !== 'p' && key !== 'c') || event.repeat || event.isComposing || event.defaultPrevented ||
             event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.target?.isContentEditable || event.target?.closest?.('input, textarea, select')) return;
         event.preventDefault();
-        setPaused(!service.paused);
+        if (key === 'p') setPaused(!service.paused);
+        else el('btn-clear').click();
     });
     listen(el('btn-clear'), 'click', () => {
         service.clear();
