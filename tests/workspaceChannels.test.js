@@ -178,6 +178,33 @@ test('late source samples fill their original curve positions without revising f
     assert.ok(Number.isNaN(frames.getValue(1, 10)));
 });
 
+test('historical grid repairs timely serial samples delivered late without changing committed formulas', () => {
+    for (const { captureTime, hard, expected } of [
+        { captureTime: 112, hard: false, expected: 10 },
+        { captureTime: 131, hard: false, expected: NaN },
+        { captureTime: 112, hard: true, expected: NaN }
+    ]) {
+        const c = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
+            methods: { 'serial-2': 'spline' }, waitMs: 20, holdMs: 40,
+            channelDefinitions: [{ number: 3, type: 'formula', expression: 'CH1+CH2' }] }, 128);
+        const a = lane('primary', []), b = lane('serial-2', []);
+        const packet = (source, value, stamp, order) => source.capture.dataEngine.arraySource.frames
+            .append([value, 0], new Uint8Array(), '', order, stamp);
+        for (let i = 0; i <= 50; i++) packet(a, i, 100 + i, i + 1);
+        packet(b, 0, 100, 1);
+        c.collect([a, b], 150);
+        const f = c.numericSource.frames, index = f.indexAtTimeBoundary(110);
+        assert.equal(f.getValue(1, index), NaN);
+        const origin = { captureTime, breakBefore: hard, sourceId: 'serial-2', order: 2 };
+        c.ingest([{ time: 112, receivedAt: captureTime, values: [[1, 12]], origin }]);
+        assert.equal(f.getValue(1, index), expected);
+        assert.equal(f.copyChannel(1, index, index + 1)[0], expected);
+        assert.equal(f.getValue(2, index), NaN);
+        assert.equal(f.provenanceInfoAt(1, index).origin, Number.isFinite(expected) ? origin : null);
+        assert.equal(f.provenanceInfoAt(2, index).origins.some(item => item === origin), false);
+    }
+});
+
 test('pending formulas leave the first raw samples visible and expire without extrapolating', () => {
     for (const method of ['nearest', 'linear', 'quadratic', 'spline']) {
         const c = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
@@ -196,6 +223,39 @@ test('pending formulas leave the first raw samples visible and expire without ex
         if (method === 'nearest') assert.equal(result, 14);
         else assert.ok(Number.isNaN(result));
     }
+});
+
+test('500 ms waits are measured on the capture clock even when a source timeline leads it', () => {
+    const c = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
+        methods: { primary: 'nearest', 'serial-2': 'spline' }, holdMs: 500, waitMs: 500 }, 1600);
+    const a = lane('primary', [], { timeOffsetMs: 750 }), b = lane('serial-2', []);
+    for (const item of [a, b]) item.capture.dataEngine.arraySource.frames.resize(1600);
+    for (let i = 0; i <= 1400; i += 5) {
+        for (const item of [a, b]) {
+            const frames = item.capture.dataEngine.arraySource.frames;
+            frames.append([i, 0], new Uint8Array(0), '', i + 1, 1000 + i);
+        }
+        c.collect([a, b], 1000 + i);
+    }
+    const frames = c.numericSource.frames;
+    const index = frames.indexAtTimeBoundary(1825);
+    assert.equal(frames.getValue(1, index), 825);
+    assert.equal(frames.getValue(0, index), 75);
+    assert.ok(frames.timestampAt(frames.length - 1) <= 1900);
+});
+
+test('workspace interpolation bridges invalid observations with valid samples but stops at explicit boundaries', () => {
+    const c = new WorkspaceChannelCapture({ mappings: [channel('primary', 1), channel('serial-2', 1)],
+        methods: { primary: 'nearest', 'serial-2': 'spline' }, holdMs: 500, waitMs: 500 }, 128);
+    const events = [0, 1, 2, 3, 4, 5, 6, 7, 8].map(time => ({ time, values: [[0, time]], origin: { sourceId: 'primary' } }));
+    for (const [time, value, origin] of [[0, 0, {}], [1, 2, {}], [2, NaN, {}], [3, 6, {}], [4, 8, {}], [6, NaN, null],
+        [7, 14, { breakBefore: true }], [8, 16, {}]]) events.push({ time, values: [[1, value]], origin });
+    c.ingest(events.sort((a, b) => a.time - b.time));
+    const frames = c.numericSource.frames;
+    assert.equal(frames.getValue(1, 2), 4);
+    assert.ok(Number.isNaN(frames.getValue(1, 5)));
+    assert.ok(Number.isNaN(frames.getValue(1, 6)));
+    assert.equal(frames.getValue(1, 7), 14);
 });
 
 test('quadratic and natural cubic interpolation have distinct nonlinear results; midpoint rounds forward', () => {

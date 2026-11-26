@@ -212,7 +212,7 @@
         }
 
         // A late observation can appear on its original curve without revising published grid values.
-        _estimate(channel, time, includeLate = false, cursor) {
+        _estimate(channel, time, includeLate = false, cursor, deadline = Infinity) {
             const list = this.events.get(channel);
             if (!list?.length) return null;
             const available = includeLate || list.at(-1).sealedThrough < time ? list.length
@@ -220,18 +220,18 @@
             const low = eventBoundary(list, time, available, true, cursor?.index);
             if (cursor) { cursor.available = available; cursor.index = low; }
             const ttl = this.expiry[channel] * 1000;
-            const preceding = list[low - 1], precedingTime = preceding ? sampleTime(preceding) : NaN;
-            const left = preceding && Number.isFinite(preceding.value) && (!ttl || time - precedingTime < ttl) ? preceding : null;
-            const method = this.sampleMethods?.[channel] ?? 'hold';
-            if (method === 'hold' || left && precedingTime === time) return left;
             const usable = i => {
                 if (i < 0 || i >= available) return null;
                 const point = list[i], delta = sampleTime(point) - time;
+                if (deadline !== Infinity && point.sealedThrough >= time && !(point.origin?.captureTime <= deadline)) return null;
                 return Number.isFinite(point.value) && (!ttl || Math.abs(delta) < ttl) ? point : null;
             };
+            const left = usable(low - 1), precedingTime = left ? sampleTime(left) : NaN;
+            const method = this.sampleMethods?.[channel] ?? 'hold';
+            if (method === 'hold' || precedingTime === time) return left;
             const right = usable(low);
             if (method === 'nearest') {
-                if (right?.origin?.breakBefore && left) return left;
+                if (right?.origin?.breakBefore) return left;
                 if (!left || !right) return left ?? right;
                 return time - sampleTime(left) < sampleTime(right) - time ? left : right;
             }
@@ -272,14 +272,30 @@
             return Number.isFinite(linear) ? estimate(linear) : null;
         }
         _eventValue(channel, time) { return this._estimate(channel, time)?.value ?? NaN; }
-        _event(channel, time) { return this._estimate(channel, time); }
+        _event(channel, time, readHistory = false) {
+            return readHistory ? this._historyEvent(channel, time) : this._estimate(channel, time);
+        }
+
+        _historyEvent(channel, time, cursor) {
+            const committed = this._estimate(channel, time, false, cursor);
+            if (committed || !(this.events.get(channel)?.at(-1)?.sealedThrough >= time)) return committed;
+            // An RX batch can be timestamped on time but reach the page late.
+            // Repair missing historical raw samples while retaining committed formula inputs.
+            return this._estimate(channel, time, true, undefined, time + this.waitMs);
+        }
+
+        getValue(channel, index) {
+            if (channel < 0 || channel >= this.rawChannelCount) return super.getValue(channel, index);
+            const time = this.timestampAt(index);
+            return Number.isFinite(time) ? this._historyEvent(channel, time)?.value ?? NaN : NaN;
+        }
 
         copyChannel(channel, start = 0, end = this.length) {
             if (channel < 0 || channel >= this.rawChannelCount) return super.copyChannel(channel, start, end);
             const first = Math.max(0, start), last = Math.min(this.length, end);
             const values = new Float64Array(Math.max(0, last - first)), cursor = {};
             for (let offset = 0; offset < values.length; offset++)
-                values[offset] = this._estimate(channel, this.timestampAt(first + offset), false, cursor)?.value ?? NaN;
+                values[offset] = this._historyEvent(channel, this.timestampAt(first + offset), cursor)?.value ?? NaN;
             return values;
         }
 
@@ -292,11 +308,14 @@
         recordValues(time, values, origin, traceTime = time) {
             this.earliestTrace = Math.min(this.earliestTrace, traceTime);
             this.latestTrace = Math.max(this.latestTrace, traceTime);
-            super.recordValues(time, values, origin);
-            for (const [channel] of values) {
+            // An invalid observation carries no value. Only stream boundaries
+            // should prevent interpolation between the surrounding valid samples.
+            const invalid = origin && !origin.breakBefore && values.some(([, value]) => !Number.isFinite(value));
+            const samples = invalid ? values.filter(([, value]) => Number.isFinite(value)) : values;
+            super.recordValues(time, samples, origin, traceTime);
+            for (const [channel] of samples) {
                 const event = this.events.get(channel).at(-1);
                 event.sealedThrough = this.lastTimestamp;
-                event.traceTime = traceTime;
             }
         }
 
@@ -420,6 +439,9 @@
             const frames = new WorkspaceSynchronizedFrames(count, this.capacity, { sampleRate, expiry, definitions: channelDefinitions,
                 names: channelNames, symbolVersion: 2, resolveFrame: this.resolveFrame, onChange: () => this.onChange() });
             frames.retainedPredecessors = 3;
+            frames.waitMs = config.waitMs;
+            frames.channelSourceIds = mappings.map(entry => entry.sourceId);
+            frames.channelPacketGroups = [];
             frames.useFormulaInputsOnly = true;
             frames.sampleMethods = mappings.map(entry => config.methods[entry.sourceId] ?? 'hold');
             if (frames.estimatedMemoryBytes > this.memoryLimit()) throw new Error('全局通道状态超过内存预算');
@@ -659,6 +681,12 @@
                 }
                 const cursor = previous ?? this.createCursor(settings.id, source, capture.epoch,
                     this.timebases[settings.id], settings.timeOffsetMs ?? 0);
+                const groups = protocol ? engine.syncSource?.frames.channelPacketGroups : null;
+                if (cursor.packetGroups !== groups) {
+                    for (const [global, local] of columns)
+                        this.numericSource.frames.channelPacketGroups[global] = groups?.[local] ?? null;
+                    cursor.packetGroups = groups;
+                }
                 this.cursors.set(settings.id, cursor);
                 const { timing } = cursor;
                 if (timing.mode !== 'receive' && frames.length) {
@@ -728,7 +756,8 @@
                         }
                         cursor.batchTail = frames.frameOrdinalAt(lo - 1);
                     }
-                    const sample = cursor.clock.sample({ receiveTime: this.plotTime(timestamp, section),
+                    const captureTime = this.plotTime(timestamp, section);
+                    const sample = cursor.clock.sample({ receiveTime: captureTime,
                         order, frameIndex, batchTail: cursor.batchTail, marker, streamKey, joinPause });
                     cursor.invalidLatest = !sample;
                     if (!sample) continue;
@@ -748,7 +777,7 @@
                     }
                     cursor.pending.push({ time, receivedAt: timestamp, values, origin: {
                         sourceId: lane.id, epoch: cursor.epoch, generation: cursor.generation, order, timestamp,
-                        alignedTime: time, missingBefore: sample.missingBefore, period: sample.period,
+                        captureTime, alignedTime: time, missingBefore: sample.missingBefore, period: sample.period,
                         breakBefore: cursor.retentionGap || sample.breakBefore || time !== sample.time, byteOffset,
                         endByte: frames.frameAt(index, { copyBytes: false })?.endByte
                     } });
@@ -773,10 +802,17 @@
             const latestTime = Math.max(this.lastEventTime, newest?.time ?? -Infinity);
             const more = scanLimited || Number.isFinite(nextTime) && due <= cutoff;
             const remaining = more ? this.waitMs : Math.min(this.waitMs, Math.max(0, (this.latestReceipt ?? cutoff) + this.waitMs - cutoff));
-            this.ingest(events, !more || nextTime > latestTime, latestTime - remaining);
+            // A projected sample may be ahead of the capture clock (offset or
+            // fixed-rate batch). Give the other sources their actual wait time.
+            const watermark = Math.min(latestTime - remaining, this.plotTime(cutoff) - this.waitMs);
+            this.ingest(events, !more || nextTime > latestTime, watermark);
             if (scanLimited || this.pendingGrid) return -Number.MAX_VALUE;
             due = Math.min(due, futureReceipt);
-            return remaining > 0 && !more ? Math.min(due, this.latestReceipt + this.waitMs) : due;
+            if (!more && watermark < latestTime) {
+                const finishAt = Math.max(this.latestReceipt + this.waitMs, this.receiveTime(latestTime + this.waitMs));
+                return Math.min(due, Math.max(cutoff + 1, finishAt));
+            }
+            return due;
         }
 
         dispose() { this.disposed = true; this.clear(); }

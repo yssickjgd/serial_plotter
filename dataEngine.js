@@ -255,11 +255,16 @@
         }
         _indexMappings() {
             this.mappingsByMessage = new Map();
+            const byChannel = new Map();
             for (const mapping of this.config.mappings) {
                 if (mapping.protocolId && mapping.protocolId !== this.config.protocolId) continue;
                 if (!this.mappingsByMessage.has(mapping.messageId)) this.mappingsByMessage.set(mapping.messageId, []);
                 this.mappingsByMessage.get(mapping.messageId).push(mapping);
+                if (!byChannel.has(mapping.channel)) byChannel.set(mapping.channel, []);
+                byChannel.get(mapping.channel).push(mapping.messageId);
             }
+            this.syncSource.frames.channelPacketGroups = Array.from({ length: this.channelCount }, (_, channel) =>
+                byChannel.has(channel) ? JSON.stringify(byChannel.get(channel).sort()) : null);
         }
         _resolveOrigin(origin) {
             const frames = this.recordsSource.frames, index = frames.indexAtOrAfterOrder(origin.order);

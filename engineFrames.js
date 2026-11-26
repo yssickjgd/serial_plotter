@@ -17,7 +17,7 @@
             this.pendingAffected = new Set();
             this.events = new Map(); this.origins = []; this.segments = []; this.columns = new Map(); this.length = 0;
             this.head = 0; this.next = 0; this.active = null; this.version = (this.version ?? 0) + 1;
-            this.timestampsMonotonic = true; this.lastTimestamp = -Infinity;
+            this.timestampsMonotonic = true; this.lastTimestamp = -Infinity; this.latestNativeTime = -Infinity;
             this.firstTimestamp = NaN; this.formulaInputEngine = null; this.formulaInputs = null;
             this.expiryRules = [{ time: -Infinity, expiry: { ...this.expiry } }];
             this.engine = new deps.ChannelOperations(this.baseChannelCount, this.definitions, { names: this.names, symbolVersion: this.symbolVersion });
@@ -56,15 +56,18 @@
             this.advance(timestamp, false);
             const lastTick = this.active.time + (this.active.count - 1) * this.active.step;
             if (this.active.count && timestamp <= lastTick + 1e-8) timestamp = lastTick + this.active.step;
-            this.recordValues(timestamp, values, origin);
-            this.advance(samplingTime);
+            // A packet may share a tick that was already published. Preserve its original
+            // time for native views while the synchronized grid keeps its causal timestamp.
+            this.recordValues(timestamp, values, origin, samplingTime);
+            if (!this.advance(samplingTime)) this.version++;
         }
-        recordValues(timestamp, values, origin) {
+        recordValues(timestamp, values, origin, traceTime = timestamp) {
+            this.latestNativeTime = Math.max(this.latestNativeTime, traceTime);
             if (origin !== null) this.origins.push({ timestamp, origin });
             for (const [channel, value] of values) {
                 if (!Number.isInteger(channel) || channel < 0 || channel >= this.rawChannelCount) throw new RangeError('字段映射超出原始通道目录');
                 const events = this.events.get(channel) ?? [];
-                events.push({ timestamp, value: Number.isFinite(value) ? value : NaN, origin });
+                events.push({ timestamp, traceTime, value: Number.isFinite(value) ? value : NaN, origin });
                 this.events.set(channel, events);
             }
         }
@@ -125,7 +128,7 @@
             return this.provenanceInfoAt(channel, index).status;
         }
         provenanceAt(channel, index, { allOrigins = false } = {}) {
-            if (channel < this.rawChannelCount) return this._event(channel, this.timestampAt(index))?.origin ?? null;
+            if (channel < this.rawChannelCount) return this._event(channel, this.timestampAt(index), true)?.origin ?? null;
             const info = this.provenanceInfoAt(channel, index, { allOrigins });
             return info.origin ? { ...info.origin, origins: info.origins, ...(info.truncated ? { truncated: true } : {}) } : null;
         }
@@ -189,6 +192,7 @@
             const key = `${this.version}:${channel}:${this.head + index}`;
             if (!allOrigins && this.provenanceResults.has(key)) return this.provenanceResults.get(key);
             const originCapacity = allOrigins ? Infinity : 64;
+            const readingRaw = channel < this.rawChannelCount;
             const period = this._samplePeriod(index), value = this.getValue(channel, index), origins = [], originKeys = new Set();
             let representative = null, representativeTime = -Infinity, newestInputTime = -Infinity, expired = false, hasInputs = false, work = 0, originLimit = false;
             const pending = [{ number: channel + 1, index }], visited = new Map();
@@ -218,9 +222,9 @@
                     continue;
                 }
                 hasInputs = true;
-                const sample = this._samplePeriod(task.index), event = sample ? this._event(task.number - 1, sample.time) : null;
+                const sample = this._samplePeriod(task.index), event = sample && this._event(task.number - 1, sample.time, readingRaw);
                 if (!event) continue;
-                if (!Number.isFinite(this._eventValue(task.number - 1, sample.time))) { expired = true; continue; }
+                if (!Number.isFinite(readingRaw ? value : this._eventValue(task.number - 1, sample.time))) { expired = true; continue; }
                 newestInputTime = Math.max(newestInputTime, event.timestamp);
                 const origin = event.origin; if (!origin) continue;
                 const originKey = `${origin.sourceId ?? ''}:${origin.epoch ?? ''}:${origin.order}:${origin.byteOffset}:${origin.endByte}`;
