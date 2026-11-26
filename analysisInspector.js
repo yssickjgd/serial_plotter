@@ -230,7 +230,7 @@
         }
         xy(display) {
             const trajectory = this.settings.viewMode === 'trajectory';
-            this.property(display, 'viewMode', '显示模式', [['trajectory', '李萨如图'],
+            this.property(display, 'viewMode', '显示模式', [['trajectory', '李萨如图'], ['gain', '幅度比频谱图'],
                 ['phase', '相位差频谱图'], ['coherence', '相干度频谱图']]);
             this.waveformProperty(display, 'traceMode', 'plot-trace-mode');
             if (trajectory) {
@@ -270,7 +270,12 @@
 
             const yAxis = this.group(this.display, '纵轴设置');
             this.axisPrecision(yAxis, 'y');
-            if (settings.viewMode === 'phase') {
+            if (settings.viewMode === 'gain') {
+                const { title, choices } = this.waveformSelect('plot-freq-y-scale');
+                const units = { 'amplitude-linear': 'ratio', 'amplitude-log': 'ratio-log', db10: 'db10', db20: 'db' };
+                this.property(yAxis, 'gainUnit', title, choices.map(([value, label]) => [units[value], label]));
+                yAxis.append(this.element('span', 'hint-text', 'X 为参考输入，Y 为响应输出。参考信号能量过低的频点留空。'));
+            } else if (settings.viewMode === 'phase') {
                 const { title, choices } = this.waveformSelect('plot-phase-unit');
                 this.field(yAxis, 'xy-phaseUnit', title, choices, settings.phaseUnit, phaseUnit => {
                         if (phaseUnit === settings.phaseUnit) return;
@@ -280,7 +285,11 @@
                 this.property(yAxis, 'phaseUnwrap', '展开相位', 'checkbox');
                 yAxis.append(this.element('span', 'hint-text', '取消勾选时折叠至 −180°～180°（−π～π rad）。'));
             }
-            this.xyAxisRange(yAxis, 'Y', settings.viewMode + 'Y');
+            this.xyAxisRange(yAxis, 'Y', settingsApi.spectrumYRangeKey(settings));
+            if (settings.viewMode === 'gain' && settings.gainUnit === 'ratio-log') {
+                const hint = this.document.getElementById('plot-log-axis-hint').textContent.replace('原幅值', '幅度比');
+                yAxis.append(this.element('span', 'hint-text', hint));
+            }
 
             const fft = this.group(this.display, 'FFT 设置');
             const setOverlap = fftOverlap => {
@@ -295,7 +304,7 @@
             const field = overlap.parentElement, row = this.element('div', 'fft-overlap-controls');
             row.append(slider, overlap); field.append(row);
             const overlapHint = this.element('p', 'hint-text',
-                '重叠率须低于 100%，分段窗口才能向前移动。为控制实时计算开销，本程序上限为 ' + settingsApi.maxFftOverlap + '%。');
+                '相邻 FFT 窗口复用的样本比例，两路使用相同的分段位置。重叠率须低于 100%，分段窗口才能向前移动。为控制实时计算开销，本程序上限为 ' + settingsApi.maxFftOverlap + '%。');
             overlapHint.id = 'xy-fftOverlap-hint';
             field.append(overlapHint);
             overlap.setAttribute('aria-describedby', overlapHint.id);

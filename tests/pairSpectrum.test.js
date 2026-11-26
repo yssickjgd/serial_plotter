@@ -22,6 +22,51 @@ test('cross-spectrum phase measures the signed phase of Y relative to X', () => 
     }
 });
 
+test('H1 magnitude recovers different gains at two frequencies and reverses with the channel order', () => {
+    const slow = tone(fftSize * 2), fast = tone(fftSize * 2, 13);
+    const shifted = tone(fftSize * 2, toneBin, -0.7);
+    const x = slow.map((value, i) => value + fast[i]);
+    const y = shifted.map((value, i) => .5 * value + 2 * fast[i]);
+    const input = [{ x, y }];
+    const ratio = pairSpectrum(input, { ...rectangular, gainUnit: 'ratio' }).gain;
+    const db = pairSpectrum(input, { ...rectangular, gainUnit: 'db' }).gain;
+    const db10 = pairSpectrum(input, { ...rectangular, gainUnit: 'db10' }).gain;
+    assert.ok(Math.abs(ratio[toneBin] - .5) < 1e-12);
+    assert.ok(Math.abs(ratio[13] - 2) < 1e-12);
+    assert.ok(Math.abs(db[toneBin] + 6.020599913279624) < 1e-12);
+    assert.ok(Math.abs(db[13] - 6.020599913279624) < 1e-12);
+    assert.ok(Math.abs(db10[toneBin] + 3.010299956639812) < 1e-12);
+    assert.ok(Math.abs(db10[13] - 3.010299956639812) < 1e-12);
+    assert.ok(Number.isNaN(ratio[9]));
+    const inverse = pairSpectrum([{ x: y, y: x }], { ...rectangular, gainUnit: 'ratio' }).gain;
+    assert.ok(Math.abs(inverse[toneBin] - 2) < 1e-12);
+    assert.ok(Math.abs(inverse[13] - .5) < 1e-12);
+});
+
+test('H1 averages the cross-spectrum first and preserves zero response in linear units', () => {
+    const x = tone(fftSize), inverted = x.map(value => -value), zero = x.map(() => 0);
+    const silent = [{ x, y: zero }, { x, y: zero }];
+    const cancel = [{ x, y: x }, { x, y: inverted }];
+    for (const input of [silent, cancel]) {
+        const ratio = pairSpectrum(input, { ...rectangular, gainUnit: 'ratio' }).gain;
+        const db = pairSpectrum(input, { ...rectangular, gainUnit: 'db' }).gain;
+        assert.equal(ratio[toneBin], 0);
+        assert.ok(Number.isNaN(db[toneBin]));
+    }
+    const noInput = [{ x: zero, y: x }, { x: zero, y: x }];
+    assert.ok(pairSpectrum(noInput, { ...rectangular, gainUnit: 'ratio' }).gain.every(Number.isNaN));
+});
+
+test('changing overlap preserves gain and phase of a stable, aligned tone', () => {
+    const x = tone(4 * fftSize), delay = Math.PI / 3;
+    const y = tone(x.length, toneBin, -delay).map(value => value * .5);
+    for (const fftOverlap of [0, 25, 50, 75]) {
+        const { phase, gain } = pairSpectrum([{ x, y }], { ...rectangular, gainUnit: 'ratio', fftOverlap });
+        assert.ok(Math.abs(phase[toneBin] + delay) < 1e-12);
+        assert.ok(Math.abs(gain[toneBin] - .5) < 1e-12);
+    }
+});
+
 test('opposite cross-spectra cancel before magnitude-squared coherence is calculated', () => {
     const x = tone(fftSize);
     const inverted = x.map(value => -value);

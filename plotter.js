@@ -1150,18 +1150,14 @@ class Plotter {
         if (!state || !(state.max > state.min)) return;
         const mode = this.displayMode;
         const scale = state.yScale;
-        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
-        const fromDomain = value => globalThis.SerialPlotter.axisFromDomain(value, scale);
         const base = this._zoomBaseY[mode] || { min: state.min, max: state.max, yScale: scale };
-        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
-        const currentMin = toDomain(state.min), currentMax = toDomain(state.max);
         const anchorRatio = 1 - Math.max(0, Math.min(1, mouseY / state.plotH));
-        const bounds = globalThis.SerialPlotter.zoomAxisBounds(currentMin, currentMax, anchorRatio, deltaY, [baseMin, baseMax]);
+        const bounds = globalThis.SerialPlotter.zoomAxisBounds(state.min, state.max, anchorRatio, deltaY, [base.min, base.max], scale);
         if (!bounds) return;
-        if (bounds[0] === baseMin && bounds[1] === baseMax) this._clearYZoom(mode);
+        if (bounds[0] === base.min && bounds[1] === base.max) this._clearYZoom(mode);
         else {
             this._zoomBaseY[mode] = base;
-            this._boxZoomY[mode] = { min: fromDomain(bounds[0]), max: fromDomain(bounds[1]) };
+            this._boxZoomY[mode] = { min: bounds[0], max: bounds[1] };
         }
         this._markViewDirty();
         this._updateYScrollbar();
@@ -1619,16 +1615,7 @@ class Plotter {
                     maxPositive = Math.max(maxPositive, value);
                 }
             }
-            if (maxPositive > 0) {
-                const visibleFloor = this.frames.responseMode ? minPositive
-                    : Math.max(minPositive, maxPositive / 1e6);
-                const logSpan = Math.log(maxPositive) - Math.log(visibleFloor);
-                const padding = logSpan > 1e-9 ? Math.min(Math.log(1.3), logSpan * 0.08) : Math.log(1.1);
-                const factor = Math.exp(padding);
-                min = Math.max(Number.MIN_VALUE, visibleFloor / factor);
-                max = Math.min(Number.MAX_VALUE, maxPositive * factor);
-                if (!(max > min)) max = Math.min(Number.MAX_VALUE, min * 2);
-            } else { min = 1e-6; max = 1; }
+            [min, max] = globalThis.SerialPlotter.positiveLogBounds(minPositive, maxPositive, this.frames.responseMode ? Infinity : 1e6);
         } else {
             min = Infinity;
             max = -Infinity;

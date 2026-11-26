@@ -113,7 +113,7 @@ test('XY inspector switches axis panels while retaining channel bindings and FFT
     assert.deepEqual(sections(), ['显示内容', '采样窗口']);
     const mode = f.get('xy-viewMode');
     assert.ok(mode);
-    assert.deepEqual(mode.options.map(option => option.textContent), ['李萨如图', '相位差频谱图', '相干度频谱图']);
+    assert.deepEqual(mode.options.map(option => option.textContent), ['李萨如图', '幅度比频谱图', '相位差频谱图', '相干度频谱图']);
     assert.equal(mode.value, 'trajectory');
     assert.ok(f.get('xy-equalAspect'));
     const choices = select => Array.from(select.options, option => [option.value, option.textContent]);
@@ -192,6 +192,33 @@ test('XY spectral modes keep independent manual bounds and convert phase bounds 
     assert.equal(f.widget.settings.phaseYMin, 45);
     assert.equal(f.widget.settings.phaseYMax, 180);
     assert.deepEqual([f.widget.settings.coherenceYMin, f.widget.settings.coherenceYMax], [0.25, 0.8]);
+});
+
+test('XY gain settings retain separate ratio and dB bounds and share FFT controls', t => {
+    const f = inspector(t, 'xy', { viewMode: 'gain', fftWindow: 'hamming' });
+    assert.equal(f.get('xy-fftWindow').value, 'hamming');
+    assert.equal(f.get('xy-gainUnit').value, 'ratio');
+    assert.deepEqual(f.get('xy-gainUnit').options.map(option => option.value), ['ratio', 'ratio-log', 'db10', 'db']);
+    assert.deepEqual(f.get('xy-gainUnit').options.map(option => option.textContent),
+        f.document.getElementById('plot-freq-y-scale').options.map(option => option.textContent));
+    f.change('xy-gainYAuto', 'manual');
+    f.change('xy-gainYMax', '1.2');
+    f.change('xy-gainUnit', 'ratio-log');
+    assert.equal(f.get('xy-gainYMax').value, '1.2');
+    f.change('xy-gainYMin', '-1');
+    assert.equal(f.widget.settings.gainYMin, 0);
+    assert.match(f.display.querySelector('[role="alert"]').textContent, /对数纵轴/);
+    f.change('xy-gainUnit', 'db');
+    f.change('xy-gainDbYAuto', 'manual');
+    f.change('xy-gainDbYMin', '-30');
+    f.change('xy-gainUnit', 'db10');
+    assert.equal(f.get('xy-gainDbYMin').value, '-30');
+    f.change('xy-gainUnit', 'ratio');
+    assert.equal(f.get('xy-gainYMax').value, '1.2');
+    f.change('xy-gainUnit', 'db');
+    assert.equal(f.get('xy-gainDbYMin').value, '-30');
+    const saved = JSON.parse(JSON.stringify(f.widget.settings));
+    assert.deepEqual(normalize('xy', saved), saved);
 });
 
 test('histogram uses the waveform Y dropdown and remembers editable bounds for each unit', t => {

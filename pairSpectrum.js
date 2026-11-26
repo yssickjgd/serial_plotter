@@ -42,8 +42,8 @@
         return blocks;
     }
 
-    /** One-sided Welch coherence and phase (Y relative to X, in radians) of aligned finite sample runs. */
-    function pairSpectrum(segments, { fftSize, fftWindow = 'hann', fftRemoveDc = false, fftOverlap = 50 }) {
+    /** One-sided Welch phase, coherence and optional H1 magnitude for Y relative to X. */
+    function pairSpectrum(segments, { fftSize, fftWindow = 'hann', fftRemoveDc = false, fftOverlap = 50, gainUnit = null }) {
         if (!Number.isInteger(fftSize) || fftSize < 2 || fftSize >= 2 ** 30 || (fftSize & (fftSize - 1)) !== 0) {
             throw new RangeError('FFT 长度必须是 2 的幂');
         }
@@ -51,12 +51,17 @@
         if (!Number.isInteger(fftOverlap) || fftOverlap < 0 || fftOverlap > 75) {
             throw new RangeError('FFT 重叠比例必须是 0 至 75 的整数');
         }
+        if (![null, 'ratio', 'db10', 'db'].includes(gainUnit)) throw new RangeError('幅度比单位无效');
+        const dbFactor = gainUnit === 'db10' ? 10 : gainUnit === 'db' ? 20 : 0;
         const hop = spectrumHop(fftSize, fftOverlap);
         const bins = fftSize / 2 + 1;
         const phase = new Float64Array(bins).fill(NaN);
         const coherence = new Float64Array(bins).fill(NaN);
         const blocks = countSpectrumBlocks(segments, fftSize, fftOverlap);
-        if (blocks < 2) return { phase, coherence, blocks };
+        const result = { phase, coherence, blocks };
+        const gain = gainUnit === null ? null : new Float64Array(bins).fill(NaN);
+        if (gain) result.gain = gain;
+        if (blocks < 2) return result;
 
         // A single scale per channel keeps block powers comparable and prevents FFT overflow.
         // With DC removal, measure differences within blocks so discarded offsets cannot set the scale.
@@ -67,7 +72,7 @@
                 yScale = Math.max(yScale, blockScale(y, start, fftSize, fftRemoveDc));
             }
         }
-        if (xScale === 0 || yScale === 0) return { phase, coherence, blocks };
+        if (xScale === 0 || yScale === 0 && !gain) return result;
 
         const window = Float64Array.from({ length: fftSize }, (_, i) => windowCoefficient(fftWindow, i, fftSize));
         const xReal = new Float64Array(fftSize), xImaginary = new Float64Array(fftSize);
@@ -77,7 +82,7 @@
         for (const { x, y } of segments) {
             for (let start = 0; start + fftSize <= x.length; start += hop) {
                 transformBlock(x, start, xScale, fftRemoveDc, window, xReal, xImaginary);
-                transformBlock(y, start, yScale, fftRemoveDc, window, yReal, yImaginary);
+                transformBlock(y, start, yScale || 1, fftRemoveDc, window, yReal, yImaginary);
                 for (let i = 0; i < bins; i++) {
                     const xr = xReal[i], xi = xImaginary[i], yr = yReal[i], yi = yImaginary[i];
                     xPower[i] += xr * xr + xi * xi;
@@ -93,14 +98,32 @@
             yPeak = Math.max(yPeak, yPower[i]);
         }
         const xFloor = xPeak * relativePowerFloor, yFloor = yPeak * relativePowerFloor;
+        const scaleRatio = gain ? yScale / xScale : 0;
+        const logScaleRatio = gain ? Math.log10(yScale) - Math.log10(xScale) : 0;
         for (let i = 0; i < bins; i++) {
-            if (xPower[i] <= xFloor || yPower[i] <= yFloor) continue;
+            const yPresent = yPower[i] > yFloor;
+            if (xPower[i] <= xFloor || !yPresent && !gain) continue;
             const crossMagnitude = Math.hypot(crossReal[i], crossImaginary[i]);
+            if (gain) {
+                // Divide the averaged cross-spectrum by input power, then undo the FFT normalization.
+                if (crossMagnitude === 0) {
+                    if (gainUnit === 'ratio') gain[i] = 0;
+                } else {
+                    const relative = crossMagnitude / xPower[i];
+                    if (dbFactor) gain[i] = dbFactor * (Math.log10(relative) + logScaleRatio);
+                    else {
+                        const direct = relative * scaleRatio;
+                        const ratio = direct > 0 && Number.isFinite(direct) ? direct : 10 ** (Math.log10(relative) + logScaleRatio);
+                        if (Number.isFinite(ratio)) gain[i] = ratio;
+                    }
+                }
+            }
+            if (!yPresent) continue;
             const normalizedMagnitude = crossMagnitude / Math.sqrt(xPower[i]) / Math.sqrt(yPower[i]);
             coherence[i] = Math.min(1, normalizedMagnitude ** 2);
             if (crossMagnitude > 0) phase[i] = Math.atan2(crossImaginary[i], crossReal[i]);
         }
-        return { phase, coherence, blocks };
+        return result;
     }
 
     function createPairSpectrumSource() {

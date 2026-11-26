@@ -23,12 +23,13 @@
     const eventBound = (events, time, inclusive = false) => boundary(events.length,
         i => inclusive ? eventTime(events[i]) <= time : eventTime(events[i]) < time);
     const { formatDisplayNumber: numberLabel, maxAxisSignificantDigits, readAxisNumberFormat, axisNumberFieldNames,
-        formatAxisValue, customAxisNumberFormat, plotWheelAxis, zoomAxisBounds } = typeof module !== 'undefined' ? require('./plotMath') : S;
+        formatAxisValue, customAxisNumberFormat, plotWheelAxis, zoomAxisBounds, positiveLogBounds, adaptiveLogScale,
+        axisFraction, axisValueAtFraction } = typeof module !== 'undefined' ? require('./plotMath') : S;
     const boundLabel = (value, format, digits) => value === Infinity ? '+∞' : value === -Infinity ? '−∞' : formatAxisValue(value, format, digits);
     const labelWidth = text => Array.from(text).reduce((width, c) => width + (c.charCodeAt(0) > 127 ? 12 : 7), 0);
 
-    function tickLabels(values, format) {
-        let count = 6, labels = values.map(value => formatAxisValue(value, format, count));
+    function tickLabels(values, format, digits = 6) {
+        let count = digits, labels = values.map(value => formatAxisValue(value, format, count));
         while (format.mode === 'significant' && !format.significantDigits && count < maxAxisSignificantDigits &&
             new Set(labels).size < values.length) {
             count++;
@@ -448,8 +449,17 @@
                 this.paintKey = null;
             }
             if (JSON.stringify(next) !== JSON.stringify(this.settings) || this.spectral && windowPoints !== this.windowPoints) {
-                this.settings = next; this.zoom = null; this.yZoomBase = null; this.histogram = null; this.dataKey = null;
+                const samePhaseView = this.phaseSpectrum && next.viewMode === 'phase' && windowPoints === this.windowPoints &&
+                    next.freqXScale === this.settings.freqXScale && next.phaseUnit !== this.settings.phaseUnit;
+                const axisSize = this.spectrumAxisSize;
+                if (samePhaseView && this.zoom) {
+                    const factor = next.phaseUnit === 'degrees' ? 180 / Math.PI : Math.PI / 180;
+                    if (this.zoom.y) this.zoom.y = this.zoom.y.map(value => value * factor);
+                    if (this.yZoomBase) this.yZoomBase = this.yZoomBase.map(value => value * factor);
+                } else { this.zoom = null; this.yZoomBase = null; }
+                this.settings = next; this.histogram = null; this.dataKey = null;
                 this.resetSpectrum();
+                if (samePhaseView && this.zoom?.x) this.spectrumAxisSize = axisSize;
                 this.cancelRender();
             }
             this.windowPoints = windowPoints; this.invalidateData();
@@ -541,7 +551,10 @@
         get axisFftSize() { return this.spectrumAxisSize ?? this.fftSize; }
         get logFrequency() { return this.settings.freqXScale?.endsWith('-log'); }
         get phaseSpectrum() { return this.settings.viewMode === 'phase'; }
-        get spectrumYAuto() { return this.phaseSpectrum ? this.settings.phaseYAuto : this.settings.coherenceYAuto; }
+        get gainSpectrum() { return this.settings.viewMode === 'gain'; }
+        get gainInDb() { return this.gainSpectrum && this.settings.gainUnit.startsWith('db'); }
+        get logGain() { return this.gainSpectrum && this.settings.gainUnit === 'ratio-log'; }
+        get phaseSuffix() { return this.phaseSpectrum ? (this.settings.phaseUnit === 'degrees' ? '°' : ' rad') : ''; }
         get maxSpectrumPhaseStep() {
             if (!this.phaseSpectrum || this.settings.phaseUnwrap) return Infinity;
             return this.settings.phaseUnit === 'degrees' ? 180 : Math.PI;
@@ -554,6 +567,7 @@
         binToAxis(bin) { return this.logFrequency ? Math.log10(bin) : bin; }
         axisToBin(x) { return this.logFrequency ? 10 ** x : x; }
         get spectralLabel() {
+            if (this.gainSpectrum) return this.gainInDb ? '增益（dB）' : '幅度比（Y / X）';
             if (!this.phaseSpectrum) return '相干度';
             return this.settings.phaseUnit === 'degrees' ? '相位差（°）' : '相位差（rad）';
         }
@@ -588,7 +602,7 @@
             const s = this.settings;
             const previousSize = this.axisFftSize;
             this.spectra = results.map(data => {
-                const values = this.phaseSpectrum ? data.phase : data.coherence;
+                const values = data[s.viewMode];
                 if (this.phaseSpectrum) {
                     let previous = NaN, offset = 0;
                     const scale = s.phaseUnit === 'degrees' ? 180 / Math.PI : 1;
@@ -629,8 +643,9 @@
             const { fftWindow, fftOverlap, fftRemoveDc, pairs } = this.settings;
             const preferredSize = this.fftSize;
             const inputs = pairs.filter(pair => pair.visible).map(pair => readSpectrumInput(this.frames, pair, start, end, bounds, preferredSize, fftOverlap));
-            const parameters = fftSize => ({ fftSize, fftWindow, fftOverlap, fftRemoveDc });
-            const empty = info => ({ ...info, phase: [], coherence: [] });
+            const gainUnit = this.gainSpectrum ? (this.gainInDb ? this.settings.gainUnit : 'ratio') : null;
+            const parameters = fftSize => ({ fftSize, fftWindow, fftOverlap, fftRemoveDc, gainUnit });
+            const empty = info => ({ ...info, [this.settings.viewMode]: [] });
             if (!this.spectrumPool || synchronous || !inputs.some(input => input.blocks >= 2)) {
                 const results = inputs.map(({ segments, ...info }) => info.blocks < 2 ? empty(info) :
                     { ...info, ...pairSpectrum(segments, parameters(info.fftSize)) });
@@ -662,11 +677,16 @@
         }
         spectrumXBounds() { return [this.binToAxis(this.logFrequency ? 1 : 0), this.binToAxis(this.axisFftSize / 2)]; }
         spectrumRange() {
-            const s = this.settings, path = this.phaseSpectrum ? 'phase' : 'coherence';
-            const fixed = [s[path + 'YMin'], s[path + 'YMax']];
+            const s = this.settings, key = config.spectrumYRangeKey(s);
+            const fixed = [s[key + 'Min'], s[key + 'Max']];
             const [xMin, xMax] = this.zoom?.x ?? this.spectrumXBounds();
-            if (this.zoom?.y) return [xMin, xMax, ...this.zoom.y];
-            if (!this.spectrumYAuto) return [xMin, xMax, ...fixed];
+            const log = this.logGain, auto = s[key + 'Auto'];
+            this.yScale = log ? 'log' : 'linear';
+            if (this.zoom?.y) {
+                this.yScale = this.yZoomScale;
+                return [xMin, xMax, ...this.zoom.y];
+            }
+            if (!auto && (!log || fixed[0] > 0)) return [xMin, xMax, ...fixed];
 
             const firstRef = this.axisToBin(xMin), lastRef = this.axisToBin(xMax);
             const wrapThreshold = this.maxSpectrumPhaseStep;
@@ -678,7 +698,7 @@
                 const last = Math.min(values.length - 1, Math.ceil(lastRef / stride));
                 for (let bin = first; bin <= last; bin++) {
                     const value = values[bin];
-                    if (!finite(value)) continue;
+                    if (!finite(value) || log && value <= 0) continue;
                     if (bin > first && bin < last) { include(value); continue; }
                     const x = this.binToAxis(bin * stride);
                     if (x >= xMin && x <= xMax) include(value);
@@ -687,14 +707,26 @@
                 for (const [edge, bin] of [[xMin, first], [xMax, last - 1]]) {
                     if (bin < first || bin >= last) continue;
                     const left = values[bin], right = values[bin + 1];
-                    if (!finite(left) || !finite(right) || Math.abs(right - left) > wrapThreshold) continue;
+                    if (!finite(left) || !finite(right) || Math.abs(right - left) > wrapThreshold || log && (left <= 0 || right <= 0)) continue;
                     const lo = this.binToAxis(bin * stride), hi = this.binToAxis((bin + 1) * stride);
                     // Include the clipped part of a line, even when zoomed between two bins.
-                    if (lo < edge && edge < hi) include(mix(left, right, fraction(edge, lo, hi)));
+                    if (lo < edge && edge < hi) {
+                        const weight = fraction(edge, lo, hi);
+                        include(log ? Math.exp(mix(Math.log(left), Math.log(right), weight)) : mix(left, right, weight));
+                    }
                 }
+            }
+            if (log) {
+                if (auto) return [xMin, xMax, ...positiveLogBounds(min, max)];
+                this.yScale = adaptiveLogScale(Math.max(0, max), fixed[1]);
+                return [xMin, xMax, ...fixed];
             }
             if (!finite(min)) return [xMin, xMax, ...fixed];
             if (this.phaseSpectrum) return [xMin, xMax, ...extent(min, max)];
+            if (this.gainSpectrum) {
+                const [lo, hi] = extent(min, max);
+                return [xMin, xMax, this.gainInDb ? lo : Math.max(0, lo), hi];
+            }
             const [lo, hi] = min === max ? [min - .05, max + .05] : extent(min, max);
             return [xMin, xMax, Math.max(0, lo), Math.min(1, hi)];
         }
@@ -760,6 +792,7 @@
             svg.replaceChildren();
             node(svg, 'rect', { width, height, fill: background });
             let range;
+            this.yScale = 'linear';
             if (spectral) range = this.spectrumRange();
             else if (xy) {
                 range = this.extentForXY();
@@ -807,10 +840,18 @@
             if (this.range[0] === this.range[1]) return this.area.left;
             return this.area.left + fraction(x, this.range[0], this.range[1]) * this.area.width;
         }
-        py(y) { return this.area.bottom - fraction(y, this.range[2], this.range[3]) * this.area.height; }
+        yAt(ratio) {
+            const [, , min, max] = this.range;
+            return this.yScale === 'linear' ? mix(min, max, ratio) : axisValueAtFraction(ratio, min, max, this.yScale);
+        }
+        py(y) {
+            const [, , min, max] = this.range;
+            const ratio = this.yScale === 'linear' ? fraction(y, min, max) : axisFraction(Math.max(min, y), min, max, this.yScale);
+            return this.area.bottom - ratio * this.area.height;
+        }
         coords(x, y) {
             const a = this.area, r = this.range;
-            return [mix(r[0], r[1], (x - a.left) / a.width), mix(r[3], r[2], (y - a.top) / a.height)];
+            return [mix(r[0], r[1], (x - a.left) / a.width), this.yAt((a.bottom - y) / a.height)];
         }
         axes() {
             const { range: r, area: a, svg, settings: s } = this;
@@ -821,7 +862,7 @@
             const nx = clamp(Math.floor(a.width / labelSpacing), 1, 12), ny = clamp(Math.floor(a.height / 42), 1, 8);
             const grid = { stroke: '#34383b', 'stroke-width': 1 };
             const xy = this.type === 'xy', yLabelX = a.right + 6;
-            const yLabels = tickLabels(Array.from({ length: ny + 1 }, (_, i) => mix(r[2], r[3], i / ny)), yFormat);
+            const yLabels = tickLabels(Array.from({ length: ny + 1 }, (_, i) => this.yAt(i / ny)), yFormat, this.logGain ? 3 : 6);
             for (let i = 0; i <= ny; i++) {
                 const y = a.bottom - a.height * i / ny;
                 node(svg, 'line', { x1: a.left, x2: a.right, y1: y, y2: y, ...grid });
@@ -993,7 +1034,7 @@
                     if (bounds) this.setZoom(bounds, this.zoom?.y);
                 } else {
                     const base = this.yZoomBase ?? [yMin, yMax];
-                    const bounds = zoomAxisBounds(yMin, yMax, (bottom - p.y) / height, e.deltaY, base);
+                    const bounds = zoomAxisBounds(yMin, yMax, (bottom - p.y) / height, e.deltaY, base, this.yScale);
                     if (bounds) this.setZoom(this.zoom?.x, bounds[0] === base[0] && bounds[1] === base[1] ? null : bounds);
                 }
             }
@@ -1011,6 +1052,7 @@
             if (limits) x = [Math.max(x[0], limits[0]), Math.min(x[1], limits[1])];
             if ([x, y].some(range => range && (!range.every(finite) || !(range[0] < range[1])))) return;
             this.yZoomBase = y ? this.yZoomBase ?? this.range.slice(2) : null;
+            this.yZoomScale = y ? this.yScale : null;
             this.zoom = x || y ? { x, y } : null;
             this.invalidateData();
         }
@@ -1050,7 +1092,8 @@
             const [axis, cursorY] = this.coords(p.x, p.y);
             const xFormat = readAxisNumberFormat(this.settings, 'x'), yFormat = readAxisNumberFormat(this.settings, 'y');
             const reference = this.axisToBin(axis), minBin = this.logFrequency ? 1 : 0;
-            const unit = this.phaseSpectrum ? (this.settings.phaseUnit === 'degrees' ? '°' : ' rad') : '';
+            const unit = this.phaseSuffix || (this.gainInDb ? ' dB' : '');
+            const yDigits = this.logGain ? 4 : 6;
             const onRight = p.x <= (left + right) / 2;
             const guide = { stroke: 'rgba(255,255,255,0.45)', 'stroke-dasharray': '4 4' };
             node(this.overlay, 'line', { x1: p.x, x2: p.x, y1: top, y2: bottom, ...guide });
@@ -1065,16 +1108,28 @@
                     const lowX = this.binToAxis(lo * stride), highX = this.binToAxis(hi * stride);
                     lo = hi = lo < minBin || axis - lowX > highX - axis ? hi : lo;
                 }
+                if (lo < minBin || !finite(values[lo]) || !finite(values[hi]) || Math.abs(values[hi] - values[lo]) > maxStep) {
+                    // A valid point next to a gap still needs a small hit area.
+                    // Read the point itself without interpolating across the gap.
+                    let index = -1, distance = 3;
+                    for (const candidate of [lo, hi]) {
+                        if (candidate < minBin || !finite(values[candidate])) continue;
+                        const offset = Math.abs(this.px(this.binToAxis(candidate * stride)) - p.x);
+                        if (offset < distance) { index = candidate; distance = offset; }
+                    }
+                    if (index === -1) continue;
+                    lo = hi = index;
+                }
                 const a = values[lo], b = values[hi];
-                if (lo < minBin || !finite(a) || !finite(b) || Math.abs(b - a) > maxStep) continue;
                 const first = this.binToAxis(lo * stride), last = this.binToAxis(hi * stride);
                 const sampleAxis = lo === hi ? first : axis;
                 if (sampleAxis < this.range[0] || sampleAxis > this.range[1]) continue;
-                const value = lo === hi ? a : mix(a, b, fraction(axis, first, last));
-                const x = this.px(sampleAxis), y = this.py(value);
+                const weight = lo === hi ? 0 : fraction(axis, first, last);
+                const x = this.px(sampleAxis), y = lo === hi ? this.py(a) : mix(this.py(a), this.py(b), weight);
+                const value = lo === hi || a === b ? a : this.logGain ? this.yAt((bottom - y) / this.area.height) : mix(a, b, weight);
                 if (!finite(y) || y < top || y > bottom) continue;
                 const name = channelLabel(this.frames, pair.x) + ' / ' + channelLabel(this.frames, pair.y);
-                points.push({ x, y, color: pair.color, text: name + ': ' + formatAxisValue(value, yFormat) + unit });
+                points.push({ x, y, color: pair.color, text: name + ': ' + formatAxisValue(value, yFormat, yDigits) + unit });
             }
             points.sort((a, b) => a.y - b.y);
             const height = 16, spacing = Math.min(height, (bottom - top) / Math.max(1, points.length));
@@ -1089,7 +1144,7 @@
                 label(this.overlay, lx + 5, ly + height / 2, text, { fill: color, 'dominant-baseline': 'central' });
             });
             return ['X ' + formatAxisValue(this.frequencyAtBin(reference), xFormat) + ' ' + this.frequencyUnit,
-                'Y ' + formatAxisValue(cursorY, yFormat) + unit];
+                'Y ' + formatAxisValue(cursorY, yFormat, yDigits) + unit];
         }
         hover(p) {
             const xFormat = readAxisNumberFormat(this.settings, 'x'), yFormat = readAxisNumberFormat(this.settings, 'y');

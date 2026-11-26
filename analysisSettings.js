@@ -16,6 +16,9 @@
         }
         return size;
     }
+    function spectrumYRangeKey(settings) {
+        return settings.viewMode === 'gain' && settings.gainUnit.startsWith('db') ? 'gainDbY' : settings.viewMode + 'Y';
+    }
 
     function requireValue(ok, message) {
         if (!ok) throw new Error(message);
@@ -68,6 +71,8 @@
     }
     function normalizeXY({ pairs = [{}], viewMode = 'trajectory', traceMode = 'both', equalAspect = true,
         xAuto = true, yAuto = true, xMin = -1, xMax = 1, yMin = -1, yMax = 1,
+        gainUnit = 'ratio', gainYAuto = true, gainYMin = 0, gainYMax = 2,
+        gainDbYAuto = true, gainDbYMin = -40, gainDbYMax = 20,
         freqXScale = 'hz-linear', phaseUnit = 'radians', phaseUnwrap = true, phaseYAuto = true,
         phaseYMin = phaseUnit === 'radians' ? -Math.PI : -180, phaseYMax = phaseUnit === 'radians' ? Math.PI : 180,
         coherenceYAuto = false, coherenceYMin = 0, coherenceYMax = 1,
@@ -80,14 +85,20 @@
             return { x: channel(x), y: channel(y), color, visible: flag(visible) };
         });
         range(xMin, xMax, 'X 轴范围'); range(yMin, yMax, 'Y 轴范围');
+        range(gainYMin, gainYMax, '幅度比纵轴范围');
+        requireValue(gainUnit !== 'ratio-log' || gainYAuto || gainYMin >= 0, '对数纵轴的自定义最小值不能小于 0');
+        range(gainDbYMin, gainDbYMax, '分贝增益纵轴范围');
         range(phaseYMin, phaseYMax, '相位差纵轴范围');
         range(coherenceYMin, coherenceYMax, '相干度纵轴范围');
         requireValue(Number.isInteger(fftOverlap) && fftOverlap >= 0 && fftOverlap <= maxFftOverlap,
             '分段重叠率必须是 0 至 ' + maxFftOverlap + ' 的整数');
-        return { pairs: groups, viewMode: choice(viewMode, ['trajectory', 'phase', 'coherence'], '视图模式'),
+        return { pairs: groups, viewMode: choice(viewMode, ['trajectory', 'gain', 'phase', 'coherence'], '视图模式'),
             traceMode: choice(traceMode, ['line', 'points', 'both'], '轨迹样式'),
             equalAspect: flag(equalAspect), xAuto: flag(xAuto), yAuto: flag(yAuto), xMin, xMax, yMin, yMax,
             ...normalizeAxisNumberSettings(settings),
+            gainUnit: choice(gainUnit, ['ratio', 'ratio-log', 'db10', 'db'], '幅度比纵轴刻度'),
+            gainYAuto: flag(gainYAuto), gainYMin, gainYMax,
+            gainDbYAuto: flag(gainDbYAuto), gainDbYMin, gainDbYMax,
             freqXScale: choice(freqXScale, ['hz-linear', 'hz-log', 'bins-linear', 'bins-log'], '频率坐标'),
             phaseUnit: choice(phaseUnit, ['degrees', 'radians'], '相位单位'), phaseUnwrap: flag(phaseUnwrap),
             phaseYAuto: flag(phaseYAuto), phaseYMin, phaseYMax,
@@ -136,6 +147,6 @@
         if (type === 'histogram') return normalizeHistogram(settings);
         throw new Error('未知的分析控件类型');
     }
-    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, maxFftOverlap, histogramYBounds };
+    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds };
     if (typeof module !== 'undefined') module.exports = { AnalysisSettings: S.AnalysisSettings };
 })(globalThis);

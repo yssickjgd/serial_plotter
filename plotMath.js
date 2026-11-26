@@ -132,6 +132,16 @@ function adaptiveLogScale(peak, max) {
         linearThreshold: peak > 0 ? Math.max(Number.MIN_VALUE, extent * 0.01) : max };
 }
 
+function positiveLogBounds(minPositive, maxPositive, maxDynamicRatio = 1e6) {
+    if (!(maxPositive > 0)) return [1e-6, 1];
+    const floor = Math.max(minPositive, maxPositive / maxDynamicRatio);
+    const span = Math.log(maxPositive) - Math.log(floor);
+    const factor = Math.exp(span > 1e-9 ? Math.min(Math.log(1.3), span * 0.08) : Math.log(1.1));
+    const min = Math.max(Number.MIN_VALUE, floor / factor);
+    const max = Math.min(Number.MAX_VALUE, maxPositive * factor);
+    return [min, max > min ? max : Math.min(Number.MAX_VALUE, min * 2)];
+}
+
 function axisToDomain(value, scale = 'linear') {
     if (scale === 'log') return value > 0 ? Math.log(value) : NaN;
     if (scale?.type === 'log-linear') {
@@ -204,7 +214,15 @@ function plotWheelAxis(x, y, { left = 0, top = 0, right, width, height }) {
     return x > right ? 'y' : 'x';
 }
 
-function zoomAxisBounds(min, max, anchorRatio, delta, limits) {
+function zoomAxisBounds(min, max, anchorRatio, delta, limits, scale = 'linear') {
+    if (scale !== 'linear') {
+        const domain = limits?.map(value => axisToDomain(value, scale));
+        const bounds = zoomAxisBounds(axisToDomain(min, scale), axisToDomain(max, scale), anchorRatio, delta, domain);
+        if (!bounds) return null;
+        if (domain && bounds[0] === domain[0] && bounds[1] === domain[1]) return [...limits];
+        const next = bounds.map(value => axisFromDomain(value, scale));
+        return next.every(Number.isFinite) && next[1] > next[0] ? next : null;
+    }
     const factor = delta < 0 ? .8 : 1.25;
     const span = max - min;
     if (!(span > 0)) return null;
@@ -294,14 +312,14 @@ function formatAxisValue(value, format = axisNumberDefaults, autoDigits = 6) {
 }
 
 if (typeof module !== 'undefined') module.exports = {
-    adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
+    adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
     customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
-    adaptiveLogScale, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
+    adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
     customAxisNumberFormat, formatAxisValue, plotWheelAxis, zoomAxisBounds

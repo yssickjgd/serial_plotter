@@ -9,12 +9,12 @@ const { bootArrayApplication } = require('./helpers/widgetAppHarness');
 
 const histogram = input => new HistogramWindow(AnalysisSettings.normalize('histogram', input));
 
-test('XY spectrum modes plot paired phase and coherence at a shared physical frequency and export the active mode', t => {
+test('XY spectrum modes plot paired gain, phase and coherence at a shared frequency and export the active mode', t => {
     const env = bootArrayApplication(); t.after(() => env.app.dispose());
     const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const frames = framesWith(Array.from({ length: 64 }, (_, i) => {
         const angle = 2 * Math.PI * i / 8;
-        return [Math.cos(angle), Math.cos(angle + Math.PI / 2)];
+        return [Math.cos(angle), .5 * Math.cos(angle + Math.PI / 2)];
     }));
     const settings = { viewMode: 'phase', fftWindow: 'rectangular' };
     const view = new AnalysisPlot(svg, 'xy', frames, settings, 64, () => ({ rate: 800 }));
@@ -24,6 +24,18 @@ test('XY spectrum modes plot paired phase and coherence at a shared physical fre
     assert.ok(Math.abs(view.spectra[0].values[4] - Math.PI / 2) < 1e-9);
     assert.equal(view.frequencyAtBin(4), 100);
     assert.equal(view.spectra[0].blocks, 3);
+    view.setSettings({ ...settings, viewMode: 'gain' }); view.renderNow();
+    assert.ok(Math.abs(view.spectra[0].values[4] - .5) < 1e-9);
+    assert.equal(view.frequencyAtBin(4), 100);
+    svg.dispatchEvent({ type: 'pointermove', clientX: view.px(view.binToAxis(4)) + .5, clientY: view.py(.5) });
+    assert.ok(view.overlay.querySelectorAll('text').some(node => node.textContent.endsWith(': 0.5')));
+    view.setSettings({ ...settings, viewMode: 'gain', gainUnit: 'db', gainDbYAuto: false, gainDbYMin: -30, gainDbYMax: 0 });
+    view.renderNow();
+    assert.ok(Math.abs(view.spectra[0].values[4] + 6.020599913279624) < 1e-9);
+    assert.deepEqual(view.range.slice(2), [-30, 0]);
+    view.setSettings({ ...view.settings, gainUnit: 'db10' }); view.renderNow();
+    assert.ok(Math.abs(view.spectra[0].values[4] + 3.010299956639812) < 1e-9);
+    assert.deepEqual(view.range.slice(2), [-30, 0]);
     view.setSettings(settings, 32); view.renderNow();
     assert.equal(view.fftSize, 16);
     assert.equal(view.frequencyAtBin(2), 100);
@@ -40,6 +52,63 @@ test('XY spectrum modes plot paired phase and coherence at a shared physical fre
     view.setFrames(frames);
     view.setSettings({ viewMode: 'trajectory' }); view.renderNow();
     assert.ok(view.hitPoints.length > 0);
+});
+
+test('switching phase units preserves the current X and Y zoom', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const frames = framesWith(Array.from({ length: 32 }, (_, i) => [Math.cos(i), Math.sin(i)]));
+    const settings = { viewMode: 'phase', phaseYAuto: false };
+    const view = new AnalysisPlot(svg, 'xy', frames, settings, 64);
+    t.after(() => view.dispose());
+    view.renderNow();
+    view.applyZoom([1, 6, -1, 1]); view.renderNow();
+    assert.deepEqual(view.range, [1, 6, -1, 1]);
+    view.setSettings({ ...settings, phaseUnit: 'degrees' }); view.renderNow();
+    assert.deepEqual(view.range, [1, 6, -180 / Math.PI, 180 / Math.PI]);
+    svg.dispatchEvent({ type: 'contextmenu' }); view.renderNow();
+    assert.deepEqual(view.range.slice(2), [-180, 180]);
+});
+
+test('gain log Y uses original ratio ticks, geometric hover and the same zoom as waveform', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const settings = { viewMode: 'gain', gainUnit: 'ratio-log', gainYAuto: false, gainYMin: .01, gainYMax: 100,
+        freqXScale: 'bins-linear' };
+    const view = new AnalysisPlot(svg, 'xy', framesWith([[0, 0], [1, 1]]), settings, 32);
+    t.after(() => view.dispose());
+    view.updateSpectra = () => {};
+    function publish(values) {
+        view.publishSpectra([{ pair: view.settings.pairs[0], fftSize: 16, blocks: 2, gain: Float64Array.from(values) }], 'fixture', 800);
+        view.renderNow();
+    }
+    publish([NaN, .01, 100, NaN, NaN, NaN, NaN, NaN, .01]);
+    const { left, right, top, height, bottom } = view.area;
+    const center = top + height / 2, x = view.px(1.5);
+    assert.equal(view.yScale, 'log');
+    assert.ok(Math.abs(view.py(1) - center) < 1e-9);
+    svg.dispatchEvent({ type: 'pointermove', clientX: x, clientY: center });
+    assert.ok(view.overlay.querySelectorAll('text').some(node => node.textContent.endsWith(': 1')));
+    svg.dispatchEvent({ type: 'wheel', deltaY: -1, clientX: right + 10, clientY: center });
+    view.renderNow();
+    assert.ok(Math.abs(view.coords(left, center)[1] - 1) < 1e-9);
+    assert.ok(Math.abs(view.range[2] * view.range[3] - 1) < 1e-9);
+    assert.deepEqual(view.range.slice(0, 2), [0, 8]);
+    svg.dispatchEvent({ type: 'contextmenu' }); view.renderNow();
+    assert.deepEqual(view.range.slice(2), [.01, 100]);
+
+    view.setSettings({ ...settings, gainYMin: 0 });
+    publish([NaN, 0, .1, NaN, 100, NaN, NaN, NaN, .01]);
+    assert.deepEqual(view.yScale, { type: 'log-linear', linearThreshold: 1 });
+    assert.equal(view.py(0), bottom);
+    view.applyZoom([0, 3, 0, 50]); view.renderNow();
+    assert.deepEqual(view.yScale, { type: 'log-linear', linearThreshold: 1 });
+    assert.equal(view.py(0), bottom);
+    view.setSettings({ ...settings, gainYAuto: true });
+    publish([NaN, 0, .01, NaN, 100, NaN, NaN, NaN, .01]);
+    assert.equal(view.yScale, 'log');
+    assert.ok(view.range[2] > 0 && view.range[2] < .01 && view.range[3] > 100);
+    assert.equal(view.py(0), bottom);
 });
 
 test('gapped pairs fall back independently and plot their peaks on the same frequency axis', t => {

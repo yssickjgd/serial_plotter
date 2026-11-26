@@ -332,7 +332,10 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 const transfer = ArrayBuffer.isView(result) ? [result.buffer] : [];
                 if (data.task.kind === 'fft') transfer.push(result.mags.buffer, result.phases.buffer,
                     result.logMags.buffer, result.unwrappedPhases.buffer);
-                if (data.task.kind === 'pairSpectrum') transfer.push(result.phase.buffer, result.coherence.buffer);
+                if (data.task.kind === 'pairSpectrum') {
+                    transfer.push(result.phase.buffer, result.coherence.buffer);
+                    if (result.gain) transfer.push(result.gain.buffer);
+                }
                 if (data.task.kind === 'protocol-decode') {
                     const buffers = new Set(), seen = new Set();
                     const visit = value => {
