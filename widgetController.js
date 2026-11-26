@@ -194,7 +194,8 @@ class WidgetController {
                 const estimate = widget.source.sampleRate?.rate ?? 0;
                 if (section) return { rate: section.rate || estimate, from: section.from - frames.frameOrdinalAt(0) };
                 return { rate: timing?.mode === 'fixed' ? timing.sampleRate : estimate };
-            }, type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null);
+            }, type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null,
+            index => this.channelColor(index, this.globalsFor(widget.capture).channelColors));
         } else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: capture.txFrames, getSourceErrors: () => widget.source.errors,
             getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.(),
@@ -494,7 +495,7 @@ class WidgetController {
             } else if (widget.type === 'byte') {
                 widget.view.channelColors = Array.from({ length: capture.numericSource.frames.channelCount }, (_, i) => this.channelColor(i, channelColors));
                 widget.view.invalidateData();
-            }
+            } else if (widget.type === 'xy') widget.view.invalidateLabels();
         }
         if (this.active?.capture === capture) this.channelView.setChannelColor(index, color);
         this.onChannelMetadataChange(index, { color }, capture);

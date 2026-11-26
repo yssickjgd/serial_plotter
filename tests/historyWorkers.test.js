@@ -326,6 +326,7 @@ test('pair spectrum jobs preserve shared sample views and compute signed phase a
         assert.equal(pool.peakWorkers, hardwareConcurrency - 2);
         assert.equal(pool.workerCount, crash ? 0 : hardwareConcurrency - 2);
         assert.equal(result.blocks, 4);
+        assert.deepEqual([result.xDominantBin, result.yDominantBin], [2, 2]);
         assert.ok(result.phase instanceof Float64Array && result.coherence instanceof Float64Array);
         assert.ok(Math.abs(result.phase[2] - Math.PI / 2) < 1e-12);
         assert.ok(result.coherence[2] > 1 - 1e-12 && result.coherence[2] <= 1);

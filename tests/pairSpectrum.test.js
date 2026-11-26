@@ -41,6 +41,8 @@ test('H1 magnitude recovers different gains at two frequencies and reverses with
     const inverse = pairSpectrum([{ x: y, y: x }], { ...rectangular, gainUnit: 'ratio' }).gain;
     assert.ok(Math.abs(inverse[toneBin] - 2) < 1e-12);
     assert.ok(Math.abs(inverse[13] - .5) < 1e-12);
+    const { xDominantBin, yDominantBin } = pairSpectrum([{ x: slow.map((v, i) => v + .25 * fast[i]), y }], rectangular);
+    assert.deepEqual([xDominantBin, yDominantBin], [toneBin, 13]);
 });
 
 test('H1 averages the cross-spectrum first and preserves zero response in linear units', () => {
@@ -55,6 +57,8 @@ test('H1 averages the cross-spectrum first and preserves zero response in linear
     }
     const noInput = [{ x: zero, y: x }, { x: zero, y: x }];
     assert.ok(pairSpectrum(noInput, { ...rectangular, gainUnit: 'ratio' }).gain.every(Number.isNaN));
+    const silentInput = pairSpectrum(noInput, rectangular);
+    assert.deepEqual([silentInput.xDominantBin, silentInput.yDominantBin], [null, toneBin]);
 });
 
 test('changing overlap preserves gain and phase of a stable, aligned tone', () => {

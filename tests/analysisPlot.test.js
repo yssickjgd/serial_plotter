@@ -60,6 +60,38 @@ test('XY spectrum modes plot paired gain, phase and coherence at a shared freque
     assert.doesNotMatch(view.exportSvg(), axisTitles);
 });
 
+test('gain and phase mark the X and Y channel peaks at measured curve points', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const frames = framesWith(Array.from({ length: 64 }, (_, i) => {
+        const a = Math.PI * i / 4, b = Math.PI * i / 8;
+        return [Math.cos(a) + .25 * Math.cos(b), .5 * Math.cos(a) + Math.cos(b + .3)];
+    }));
+    const settings = { viewMode: 'gain', fftWindow: 'rectangular', freqXScale: 'bins-log', traceMode: 'line' };
+    const view = new AnalysisPlot(svg, 'xy', frames, settings, 64, () => ({ rate: 800 }), null,
+        i => ['#ff0099', '#0088ee'][i]);
+    t.after(() => view.dispose());
+    const markers = () => svg.querySelectorAll('circle').filter(node => node.getAttribute('data-spectrum-peak'));
+    for (const viewMode of ['gain', 'phase']) {
+        view.setSettings({ ...settings, viewMode }); view.renderNow();
+        const found = markers();
+        assert.deepEqual(found.map(node => node.getAttribute('stroke')), ['#ff0099', '#0088ee']);
+        for (const [i, bin] of [4, 2].entries()) {
+            assert.equal(found[i].getAttribute('fill'), 'none');
+            assert.ok(Math.abs(Number(found[i].getAttribute('cx')) - view.px(view.binToAxis(bin))) < 1e-9);
+            assert.ok(Math.abs(Number(found[i].getAttribute('cy')) - view.py(view.spectra[0].values[bin])) < 1e-9);
+        }
+        assert.match(view.exportSvg(), /data-spectrum-peak="x"/);
+    }
+    view.applyZoom([view.binToAxis(3), view.binToAxis(6)]); view.renderNow();
+    assert.deepEqual(markers().map(node => node.getAttribute('data-spectrum-peak')), ['x']);
+    view.resetZoom();
+    view.setFrames(framesWith(Array.from({ length: 64 }, (_, i) => [Math.cos(Math.PI * i / 4), Math.cos(Math.PI * i / 8)])));
+    view.renderNow();
+    assert.equal(markers().length, 2);
+    assert.ok(markers().every(node => node.getAttribute('stroke-dasharray') && /暂无有效谱值/.test(node.textContent)));
+});
+
 test('switching phase units preserves the current X and Y zoom', t => {
     const env = bootArrayApplication(); t.after(() => env.app.dispose());
     const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');

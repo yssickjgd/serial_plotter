@@ -58,7 +58,7 @@
         const phase = new Float64Array(bins).fill(NaN);
         const coherence = new Float64Array(bins).fill(NaN);
         const blocks = countSpectrumBlocks(segments, fftSize, fftOverlap);
-        const result = { phase, coherence, blocks };
+        const result = { phase, coherence, blocks, xDominantBin: null, yDominantBin: null };
         const gain = gainUnit === null ? null : new Float64Array(bins).fill(NaN);
         if (gain) result.gain = gain;
         if (blocks < 2) return result;
@@ -72,7 +72,7 @@
                 yScale = Math.max(yScale, blockScale(y, start, fftSize, fftRemoveDc));
             }
         }
-        if (xScale === 0 || yScale === 0 && !gain) return result;
+        if (xScale === 0 && yScale === 0) return result;
 
         const window = Float64Array.from({ length: fftSize }, (_, i) => windowCoefficient(fftWindow, i, fftSize));
         const xReal = new Float64Array(fftSize), xImaginary = new Float64Array(fftSize);
@@ -81,7 +81,7 @@
         const crossReal = new Float64Array(bins), crossImaginary = new Float64Array(bins);
         for (const { x, y } of segments) {
             for (let start = 0; start + fftSize <= x.length; start += hop) {
-                transformBlock(x, start, xScale, fftRemoveDc, window, xReal, xImaginary);
+                transformBlock(x, start, xScale || 1, fftRemoveDc, window, xReal, xImaginary);
                 transformBlock(y, start, yScale || 1, fftRemoveDc, window, yReal, yImaginary);
                 for (let i = 0; i < bins; i++) {
                     const xr = xReal[i], xi = xImaginary[i], yr = yReal[i], yi = yImaginary[i];
@@ -94,8 +94,8 @@
         }
         let xPeak = 0, yPeak = 0;
         for (let i = 0; i < bins; i++) {
-            xPeak = Math.max(xPeak, xPower[i]);
-            yPeak = Math.max(yPeak, yPower[i]);
+            if (xPower[i] > xPeak) { xPeak = xPower[i]; result.xDominantBin = i; }
+            if (yPower[i] > yPeak) { yPeak = yPower[i]; result.yDominantBin = i; }
         }
         const xFloor = xPeak * relativePowerFloor, yFloor = yPeak * relativePowerFloor;
         const scaleRatio = gain ? yScale / xScale : 0;

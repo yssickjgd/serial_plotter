@@ -65,12 +65,15 @@ function prepareSystemResponse(entry, count = 1000, gridSize = count) {
         phases.push(valid && numerator > 0 ?
             (Math.atan2(bi[i], br[i]) - Math.atan2(ai[i], ar[i])) * 180 / Math.PI : NaN);
     }
-    const peak = Math.max(...mags.filter(Number.isFinite));
+    let peak = 0, dominantBin = null;
+    for (let i = 0; i < mags.length; i++) {
+        if (Number.isFinite(mags[i]) && mags[i] > peak) { peak = mags[i]; dominantBin = i; }
+    }
     for (let i = 0; i < phases.length; i++) {
         if (!(mags[i] > peak * 1e-12)) phases[i] = NaN;
         else phases[i] = ((phases[i] + 180) % 360 + 360) % 360 - 180;
     }
-    return { samples, mags, phases, fftSize, error: '' };
+    return { samples, mags, phases, fftSize, dominantBin, error: '' };
 }
 
 function decibelMagnitude(value, factor = 20) {

@@ -391,12 +391,14 @@
     }
 
     class AnalysisPlot {
-        constructor(svg, type, frames, settings = {}, windowPoints = 5000, getSpectrumClock = () => ({ rate: 0 }), spectrumPool = null) {
+        constructor(svg, type, frames, settings = {}, windowPoints = 5000, getSpectrumClock = () => ({ rate: 0 }), spectrumPool = null,
+            getChannelColor = () => null) {
             this.svg = svg; this.type = type; this.frames = frames; this.win = svg.ownerDocument.defaultView ?? root;
             this.visible = true; this.completedDraws = 0; this.cleanups = []; this.historyOrdinal = null;
             this.clipId = 'analysis-clip-' + ++nextClip;
             this.settings = config.normalize(type, settings); this.windowPoints = windowPoints;
             this.getSpectrumClock = getSpectrumClock;
+            this.getChannelColor = getChannelColor;
             this.spectrumPool = spectrumPool; this.spectra = [];
             svg.setAttribute('role', 'img'); svg.setAttribute('tabindex', '0');
             svg.setAttribute('aria-label', type === 'xy' ? 'XY 轨迹图' : '直方图');
@@ -905,8 +907,9 @@
             const firstRef = this.axisToBin(this.range[0]), lastRef = this.axisToBin(this.range[1]);
             const preferredSize = this.fftSize;
             const wrapThreshold = this.maxSpectrumPhaseStep;
+            const peaks = [], showPeaks = this.gainSpectrum || this.phaseSpectrum;
             let legendX = left, found = false, complete = false;
-            for (const { pair, values, blocks, recovered, samples, fftSize } of this.spectra) {
+            for (const { pair, values, blocks, recovered, samples, fftSize, xDominantBin, yDominantBin } of this.spectra) {
                 const name = channelLabel(this.frames, pair.x) + ' / ' + channelLabel(this.frames, pair.y);
                 const segment = fftSize + ' 点/段';
                 if (legendX < right - 36) {
@@ -935,6 +938,31 @@
                 }
                 path(group, line, { fill: 'none', stroke: pair.color, 'stroke-width': 1.4 });
                 path(group, dots, { fill: pair.color });
+                if (showPeaks) {
+                    for (const [axis, bin] of [['x', xDominantBin], ['y', yDominantBin]]) {
+                        if (bin == null || this.logFrequency && bin === 0) continue;
+                        const refBin = bin * stride, position = this.binToAxis(refBin);
+                        if (position < this.range[0] || position > this.range[1]) continue;
+                        const radius = axis === 'y' && xDominantBin === yDominantBin ? 6.5 : 4;
+                        const valid = finite(values[bin]);
+                        const y = valid ? this.py(values[bin]) : this.area.bottom - 8;
+                        if (y < this.area.top || y > this.area.bottom) continue;
+                        peaks.push({ axis, radius, channel: pair[axis], color: this.getChannelColor(pair[axis]) ?? pair.color,
+                            x: this.px(position), y, frequency: this.frequencyAtBin(refBin), value: values[bin], valid });
+                    }
+                }
+            }
+            if (peaks.length) {
+                const { frequencyUnit } = this, yFormat = readAxisNumberFormat(s, 'y'), xFormat = readAxisNumberFormat(s, 'x');
+                const unit = this.phaseSuffix || (this.gainInDb ? ' dB' : '');
+                for (const { axis, radius, channel, color, x, y, frequency, value, valid } of peaks) {
+                    const marker = node(group, 'circle', { cx: x, cy: y, r: radius, fill: 'none',
+                        stroke: color, 'stroke-width': 1.7, 'data-spectrum-peak': axis });
+                    if (!valid) marker.setAttribute('stroke-dasharray', '2 2');
+                    node(marker, 'title', {}, axis.toUpperCase() + ' 主频 · ' + channelLabel(this.frames, channel) + ' · ' +
+                        formatAxisValue(frequency, xFormat) + ' ' + frequencyUnit + ' · ' +
+                        (valid ? formatAxisValue(value, yFormat) + unit : '该频点暂无有效谱值'));
+                }
             }
             if (!found) {
                 const message = !this.spectrumKey && this.spectrumRequest ? '正在计算频谱…' :

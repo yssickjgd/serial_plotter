@@ -9,6 +9,7 @@ function createPlotter(responseFrames = null, options = {}) {
     const labels = [];
     const canvasOps = [];
     const markers = [], dots = [];
+    let pathHasArc = false;
     const canvasEvents = new Map();
     const ctx = new Proxy({}, { get: (target, key) => key === 'measureText'
         ? text => ({ width: String(text).length * 6 })
@@ -18,8 +19,9 @@ function createPlotter(responseFrames = null, options = {}) {
                 if (key === 'fillRect' && args[2] === 3 && args[3] === 3) dots.push(args);
                 assert.ok(args.every(Number.isFinite));
             }
-            : key === 'stroke' ? () => { canvasOps.push('stroke:' + target.strokeStyle); }
-            : key === 'arc' ? (x, y) => { markers.push({ x, y }); }
+            : key === 'beginPath' ? () => { pathHasArc = false; }
+            : key === 'stroke' ? () => { canvasOps.push((pathHasArc ? 'ring:' : 'stroke:') + target.strokeStyle); }
+            : key === 'arc' ? (x, y) => { pathHasArc = true; markers.push({ x, y }); }
             : key === 'moveTo' || key === 'lineTo' ? (x, y) => {
                 assert.ok(Number.isFinite(x) && Number.isFinite(y));
             }
@@ -729,6 +731,28 @@ test('frequency hover retains hertz alongside the bin when the axis displays bin
     plotter.draw();
     assert.ok(labels.includes('Freq: 300 Hz (Bin 150)'));
     assert.ok(labels.some(label => label.startsWith('Mag: ')));
+});
+
+test('wave frequency and phase draw larger hollow rings at the dominant bin on GPU, Canvas and SVG', () => {
+    const gpu = { available: true, resize() {}, dispose() {}, render() { return true; } };
+    const { plotter, markers } = createPlotter(null, { gpuRenderer: gpu });
+    for (const displayMode of ['frequency', 'phase']) {
+        plotter.setDisplayOptions({ displayMode, traceMode: 'line', freqXScale: 'log' });
+        for (const available of [true, false]) {
+            gpu.available = available;
+            markers.length = 0;
+            plotter.draw();
+            const { peak } = plotter._drawState.traces[0];
+            assert.ok(peak.radius > 2);
+            assert.deepEqual(markers.at(-1), { x: peak.x, y: peak.y });
+        }
+        assert.match(plotter.exportSvg('主频'), /<circle[^>]*data-spectrum-peak[^>]*fill="none"/);
+    }
+    plotter.vp.phase.autoFollow = false;
+    plotter.vp.phase.scrollOffset = 1;
+    plotter.vp.phase.displayCount = 20;
+    plotter.draw();
+    assert.equal(plotter._drawState.traces[0].peak, undefined);
 });
 
 test('sparse spectra show true bin markers and hover between bins in GPU and Canvas rendering', () => {

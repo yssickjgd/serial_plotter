@@ -992,7 +992,7 @@ class Plotter {
                 series.push({
                     channelIndex: idx, ch,
                     mags,
-                    dominantBin: freq.dominantBin,
+                    dominantBin: freq.mags[freq.dominantBin] > 0 ? freq.dominantBin : null,
                     fftSize: freq.fftSize
                 });
             } else {
@@ -1061,6 +1061,7 @@ class Plotter {
                 item.points = globalThis.SerialPlotter.bucketAxisExtrema(
                     item.mags, positions, maxStep, this._traceDensity);
                 for (const point of item.points) point.x = positions[point.index];
+                item.peakX = item.dominantBin == null ? undefined : positions[item.dominantBin - start];
             }
         }
     }
@@ -1673,7 +1674,7 @@ class Plotter {
         this._drawXAxisLabels(plotW, plotH, startIdx, visibleCnt, total, xScale, series[0], aligned);
 
         // 连线和标记使用同一组可见采样点，密集窗口保留像素极值。
-        const traces = this._drawState.traces, recoveredTraces = [];
+        const traces = this._drawState.traces, recoveredTraces = [], peaks = [];
         const { axisFraction } = globalThis.SerialPlotter;
         for (const item of series) {
             for (const point of item.points) {
@@ -1683,6 +1684,14 @@ class Plotter {
             }
             const trace = { points: item.points, color: item.ch.color, name: item.ch.name,
                 lines: this.traceMode !== 'points', dots: this.traceMode !== 'line' };
+            if (Number.isFinite(item.peakX) && item.peakX >= 0 && item.peakX <= plotW) {
+                const value = item.mags[item.dominantBin - startIdx];
+                const y = plotH - axisFraction(logY ? Math.max(value, min) : value, min, max, yScale) * plotH;
+                if (Number.isFinite(value) && y >= 0 && y <= plotH) {
+                    trace.peak = { x: item.peakX, y, radius: 4 };
+                    peaks.push(trace);
+                }
+            }
             traces.push(trace);
             if (trace.dots && item.direct?.recoveredIndices?.size) recoveredTraces.push(trace);
         }
@@ -1700,6 +1709,7 @@ class Plotter {
             this.ctx.restore();
         }
         if (recoveredTraces.length) this._drawRecoveredMarkers(recoveredTraces, plotW, plotH);
+        if (peaks.length) this._drawSpectrumPeaks(peaks, plotW, plotH);
 
         // —— 十字光标 ——
         this._drawNavigationMarkers(plotW, plotH, startIdx, visibleCnt);
@@ -1743,6 +1753,18 @@ class Plotter {
                     this.ctx.fillRect(x - halfSize, y - halfSize, plotSampleMarkerSize, plotSampleMarkerSize);
             }
         }
+    }
+
+    _drawSpectrumPeaks(traces, plotW, plotH) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.beginPath(); ctx.rect(0, 0, plotW, plotH); ctx.clip();
+        ctx.lineWidth = 1.7;
+        for (const { color, peak: { x, y, radius } } of traces) {
+            ctx.strokeStyle = color;
+            ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.stroke();
+        }
+        ctx.restore();
     }
 
     _drawRecoveredMarkers(traces, plotW, plotH) {

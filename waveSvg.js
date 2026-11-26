@@ -39,6 +39,9 @@ function renderWaveSvg({ width, height, plotW, plotH, traces, labels, navigation
             n(lineWidth) + '" d="' + path.join(' ') + '"/>');
         parts.push(markers.join(''), '</g>');
     }
+    for (const { peak, color } of traces) if (peak)
+        parts.push('<circle data-spectrum-peak="channel" cx="' + n(peak.x) + '" cy="' + n(peak.y) + '" r="' +
+            peak.radius + '" fill="none" stroke="' + escape(color) + '" stroke-width="1.7"/>');
     for (const { x, color, width: strokeWidth } of navigation)
         parts.push('<path d="M' + n(x) + ' 0V' + plotH + '" stroke="' + escape(color) + '" stroke-width="' + strokeWidth + '"/>');
     parts.push('</g>');
