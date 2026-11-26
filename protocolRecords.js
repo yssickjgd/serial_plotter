@@ -64,6 +64,19 @@ function protocolValueText(value, options = {}) {
     return String(value);
 }
 
+const protocolDisplayNumber = typeof module !== 'undefined' ? require('./plotMath').formatDisplayNumber : globalThis.SerialPlotter?.formatDisplayNumber;
+
+function protocolDisplayValueText(value, field = {}) {
+    const type = field.baseType ?? field.type;
+    const digits = type === 'float32' ? 7 : type === 'float64' ? 15 : 0;
+    if (digits) {
+        if (typeof value === 'number') return protocolDisplayNumber(value, digits);
+        if (Array.isArray(value) || ArrayBuffer.isView(value))
+            return '[' + Array.from(value, item => protocolDisplayValueText(item, field)).join(', ') + ']';
+    }
+    return protocolValueText(value, field);
+}
+
 function protocolRecordStatus(value) {
     const record = unwrapProtocolRecord(value);
     if (record.status) return String(record.status);
@@ -218,7 +231,7 @@ async function* structuredCsvChunksAsync(frames, decodeRecord, options = {}) {
     }
 }
 
-const ProtocolRecordsApi = { protocolNumberBase, parseProtocolInteger, protocolBytesText, parseProtocolBytes, unwrapProtocolRecord, protocolJsonValue, protocolValueText, protocolRecordStatus, protocolRecordIsSuccessful,
+const ProtocolRecordsApi = { protocolNumberBase, parseProtocolInteger, protocolBytesText, parseProtocolBytes, unwrapProtocolRecord, protocolJsonValue, protocolValueText, protocolDisplayValueText, protocolRecordStatus, protocolRecordIsSuccessful,
     protocolRecordSummary, protocolPathContains, protocolVisibleFields, protocolCsvFields, structuredCsvChunks, structuredCsvChunksAsync };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, ProtocolRecordsApi);

@@ -2219,7 +2219,7 @@
                 this.sampleHex = this._hexText(bytes); this.hexInput.value = this.sampleHex; this.decode();
             } catch (error) { this._error(error); }
         }
-        _valueText(value, field) { return records().protocolValueText(value, field); }
+        _valueText(value, field) { return records().protocolDisplayValueText(value, field); }
         _renderPreviewResults() {
             this.byteHost.replaceChildren(); this.previewHost.replaceChildren();
             const fields = this.previewRecord?.flatFields ?? [];
@@ -2228,7 +2228,9 @@
                 for (const warning of this.previewRecord.warnings ?? []) this.previewHost.append(this._node('p', 'protocol-preview-warning', messageZh(warning.message)));
                 for (const result of this.previewRecord.ruleResults ?? []) {
                     const state = { passed: '通过', failed: '失败', 'not-run': '未执行' }[result.status];
-                    const detail = result.actual !== undefined ? ` · 实际 ${String(result.actual)} / 预期 ${String(result.expected)}` : '';
+                    const ruleValue = value => typeof value === 'number' && !Number.isInteger(value)
+                        ? this._valueText(value, { type: 'float64' }) : String(value);
+                    const detail = result.actual !== undefined ? ` · 实际 ${ruleValue(result.actual)} / 预期 ${ruleValue(result.expected)}` : '';
                     const row = this._node('p', 'protocol-rule-result ' + result.status,
                         `${result.name} · ${result.stage === 'parsing' ? '解析阶段' : '完整帧验证'} · ${result.strength === 'strong' ? '强' : '弱'} · ${state}${detail} · ${messageZh(result.message)}`);
                     row.setAttribute('data-rule-result', result.ruleId); this.previewHost.append(row);

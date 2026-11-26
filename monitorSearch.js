@@ -217,9 +217,10 @@ class ProtocolFieldSearchSession {
                     if (typeof value === 'bigint' || typeof value === 'number' && Number.isSafeInteger(value) ||
                         typeof value === 'string' && /^[+-]?\d+$/.test(value)) match = BigInt(value) === options.value;
                 } else {
-                    let text = searchProtocolUtils.protocolValueText(field.value), query = options.query;
-                    if (!options.caseSensitive) { text = text.toLocaleLowerCase(); query = query.toLocaleLowerCase(); }
-                    match = text.includes(query);
+                    const query = options.caseSensitive ? options.query : options.query.toLocaleLowerCase();
+                    const includes = value => (options.caseSensitive ? value : value.toLocaleLowerCase()).includes(query);
+                    match = includes(searchProtocolUtils.protocolValueText(field.value)) ||
+                        includes(searchProtocolUtils.protocolDisplayValueText(field.value, field));
                 }
                 if (!match) continue;
                 const byteLength = this.frames.rawBytesAt(frame).length;

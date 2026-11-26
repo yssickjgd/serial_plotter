@@ -281,10 +281,11 @@ function historyWorkerDependencies() {
     const csv = typeof module !== 'undefined' ? require('./csvExport') : globalThis.SerialPlotter;
     const hex = typeof module !== 'undefined' ? require('./captureExport') : globalThis.SerialPlotter;
     const bytes = typeof module !== 'undefined' ? require('./byteUtils') : globalThis.SerialPlotter;
+    const { formatDisplayNumber } = typeof module !== 'undefined' ? require('./plotMath') : globalThis.SerialPlotter;
     return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
         pairSpectrum: pairs.pairSpectrum, createPairSpectrumSource: pairs.createPairSpectrumSource,
         formatCsvExportRow: csv.formatCsvExportRow, formatHexExportRecord: hex.formatHexExportRecord, ByteUtils: bytes.ByteUtils,
-        TYPE_LENGTH: parser.TYPE_LENGTH, Protocol, search, records, searchTransform: channels.transformChannelValue,
+        TYPE_LENGTH: parser.TYPE_LENGTH, Protocol, search, records, formatDisplayNumber, searchTransform: channels.transformChannelValue,
         createMonitorSearchProcessor: search.createMonitorSearchProcessor, scanTimestampRange: search.scanTimestampRange };
 }
 
@@ -309,9 +310,10 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
         'const transformForExport = searchTransform;\n' +
         'const captureExportBytes = {' + dependencies.ByteUtils.bytesToHex.toString() + '};\n' +
         dependencies.formatCsvExportRow.toString() + '\n' + dependencies.formatHexExportRecord.toString() + '\n' +
-        ['unwrapProtocolRecord', 'protocolJsonValue', 'protocolValueText', 'protocolPathContains', 'protocolVisibleFields']
+        'const protocolDisplayNumber = ' + dependencies.formatDisplayNumber.toString() + ';\n' +
+        ['unwrapProtocolRecord', 'protocolJsonValue', 'protocolValueText', 'protocolDisplayValueText', 'protocolPathContains', 'protocolVisibleFields']
             .map(name => dependencies.records[name].toString()).join('\n') + '\n' +
-        'const searchProtocolUtils = { unwrapProtocolRecord, protocolValueText, protocolVisibleFields };\n' +
+        'const searchProtocolUtils = { unwrapProtocolRecord, protocolValueText, protocolDisplayValueText, protocolVisibleFields };\n' +
         ['parseMonitorSearch', 'parseProtocolFieldSearch', 'MonitorSearchSession', 'ProtocolFieldSearchSession', 'createMonitorSearchProcessor', 'scanTimestampRange']
             .map(name => dependencies.search[name].toString()).join('\n') + '\n' +
         validateProtocolHistoryTask.toString() + '\n' +

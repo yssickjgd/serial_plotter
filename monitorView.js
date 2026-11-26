@@ -1001,7 +1001,7 @@ class MonitorView {
         append(monitorProtocolUtils.protocolRecordSummary(cached.record), null, 'summary');
         for (const field of monitorProtocolUtils.protocolVisibleFields(cached.record, this.protocolOptions)) {
             const label = field.label === undefined ? '' : ` (${field.label})`;
-            append(`${field.path} = ${monitorProtocolUtils.protocolValueText(field.value, field)}${label}`, field);
+            append(`${field.path} = ${monitorProtocolUtils.protocolDisplayValueText(field.value, field)}${label}`, field);
         }
         for (const warning of cached.record.warnings ?? []) append(`警告: ${warning.message ?? warning.code ?? warning}`, null, 'warning');
         const layout = { prefix, byteMode: 'protocol', protocolLines, lineCount: protocolLines.length,

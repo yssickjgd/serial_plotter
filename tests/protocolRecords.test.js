@@ -22,6 +22,16 @@ function protocolFixture() {
     return { frames, compiled, decodeRecord };
 }
 
+test('protocol display rounds decoded floats but leaves their lossless textual representation available', () => {
+    const { protocolDisplayValueText } = require('../protocolRecords');
+    const value = Math.fround(.1), meta = { type: 'float32' };
+    assert.equal(protocolDisplayValueText(value, meta), '0.1');
+    assert.equal(protocolDisplayValueText(51.00000000000001, { type: 'float64' }), '51');
+    assert.equal(protocolDisplayValueText([value, 1.25], meta), '[0.1, 1.25]');
+    assert.equal(protocolDisplayValueText(18446744073709551615n, { type: 'uint64' }), '18446744073709551615');
+    assert.equal(protocolValueText(value, meta), String(value));
+});
+
 test('structured value formatting preserves Unicode, JSON arrays, and exact signed and unsigned64 values', () => {
     assert.equal(protocolValueText(18446744073709551615n), '18446744073709551615');
     assert.equal(protocolValueText(-9223372036854775808n), '-9223372036854775808');
