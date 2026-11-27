@@ -95,7 +95,7 @@ function normalizeBufferExportSettings(input, defaultFormat = 'hex-text') {
 }
 
 function normalizeWidgetExportPreferences(input, legacyFormat, legacyProfiles = {}) {
-    const formats = ['binary', 'hex-text', 'text', 'engine-text', 'csv', 'svg'];
+    const formats = ['binary', 'hex-text', 'text', 'engine-text', 'csv', 'svg', 'wavelet-csv'];
     if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input) ||
         !formats.includes(input.format) || !input.formats || typeof input.formats !== 'object' ||
         Array.isArray(input.formats) || Object.keys(input.formats).some(key => !formats.includes(key))))
@@ -119,12 +119,12 @@ function legacyWindowPoints(settings = {}) {
 function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
     const connectionSource = settings.connectionSource ?? 'primary';
-    if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && ['wave', 'xy', 'histogram'].includes(type)) &&
+    if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && ['wave', 'xy', 'histogram', 'wavelet'].includes(type)) &&
         !/^(?:primary|serial-[1-9]\d*)$/.test(connectionSource))
         throw new Error('控件接收来源无效');
     if (settings.engineSource !== undefined && settings.engineSource !== null &&
         (typeof settings.engineSource !== 'string' || settings.engineSource.length > 512)) throw new Error('控件数据源无效');
-    if (type === 'xy' || type === 'histogram') {
+    if (['xy', 'histogram', 'wavelet'].includes(type)) {
         const analysis = typeof module !== 'undefined' ? require('./analysisSettings').AnalysisSettings : globalThis.SerialPlotter.AnalysisSettings;
         return { ...analysis.normalize(type, settings), engineSource: settings.engineSource ?? null, connectionSource };
     }
@@ -320,7 +320,7 @@ function validateWorkspaceConfig(config) {
     const ids = new Set();
     const widgets = config.widgets.map(widget => {
         if (!widget || !isValidWidgetId(widget.id) || ids.has(widget.id)) throw new Error('控件编号无效或重复');
-        if (!['wave', 'byte', 'pose', 'xy', 'histogram'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
+        if (!['wave', 'byte', 'pose', 'xy', 'histogram', 'wavelet'].includes(widget.type) || typeof widget.title !== 'string' || !widget.title.trim())
             throw new Error('控件类型或标题无效');
         ids.add(widget.id);
         if (widget.settings?.engineSource !== undefined && widget.settings.engineSource !== null &&

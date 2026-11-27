@@ -134,6 +134,7 @@ function createHistoryTaskProcessor(task, dependencies) {
             result() { return result; }
         };
     }
+    if (task?.kind === 'wavelet') return dependencies.createWaveletProcessor(task);
     if (task?.kind === 'pairSpectrum') {
         let result;
         return {
@@ -273,6 +274,7 @@ function historyWorkerDependencies() {
         : globalThis.SerialPlotter.MonitorTextLayout;
     const spectrum = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
     const pairs = typeof module !== 'undefined' ? require('./pairSpectrum') : globalThis.SerialPlotter;
+    const wavelet = typeof module !== 'undefined' ? require('./wavelet') : globalThis.SerialPlotter;
     const phase = typeof module !== 'undefined' ? require('./systemResponse') : globalThis.SerialPlotter;
     const Protocol = typeof module !== 'undefined' ? require('./protocolEngine').Protocol : globalThis.SerialPlotter.Protocol;
     const search = typeof module !== 'undefined' ? require('./monitorSearch') : globalThis.SerialPlotter.MonitorSearch;
@@ -284,6 +286,7 @@ function historyWorkerDependencies() {
     const { formatDisplayNumber } = typeof module !== 'undefined' ? require('./plotMath') : globalThis.SerialPlotter;
     return { ...codec, ...numeric, ...layout, ...spectrum, unwrapPhaseDegrees: phase.unwrapPhaseDegrees,
         pairSpectrum: pairs.pairSpectrum, createPairSpectrumSource: pairs.createPairSpectrumSource,
+        createWaveletProcessor: wavelet.createWaveletProcessor, createWaveletSource: wavelet.createWaveletSource,
         formatCsvExportRow: csv.formatCsvExportRow, formatHexExportRecord: hex.formatHexExportRecord, ByteUtils: bytes.ByteUtils,
         TYPE_LENGTH: parser.TYPE_LENGTH, Protocol, search, records, formatDisplayNumber, searchTransform: channels.transformChannelValue,
         createMonitorSearchProcessor: search.createMonitorSearchProcessor, scanTimestampRange: search.scanTimestampRange };
@@ -301,6 +304,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
         ['nextPow2', 'fftInPlace', 'windowCoefficient', 'prepareFrequencySeries', 'unwrapPhaseDegrees']
             .map(name => dependencies[name].toString()).join('\n') + '\n' +
         `const pairSpectrum = ${dependencies.createPairSpectrumSource()};\n` +
+        `const createWaveletProcessor = ${dependencies.createWaveletSource()};\n` +
         dependencies.decodeNumericPayload.toString() + '\n' +
         functions.map(name => dependencies[name].toString()).join('\n') + '\n' +
         `const Protocol = (${dependencies.Protocol.createFactorySource()})(globalThis,
@@ -322,7 +326,7 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 const processor = createHistoryTaskProcessor(data.task,
                     { TextCharacterCounter, MappedTextDecoder, textCells, appendCompactTokens,
                         TYPE_LENGTH: HISTORY_TYPE_LENGTH, decodeNumericPayload, prepareFrequencySeries, unwrapPhaseDegrees,
-                        pairSpectrum,
+                        pairSpectrum, createWaveletProcessor,
                         Protocol, createMonitorSearchProcessor, scanTimestampRange, formatCsvExportRow, formatHexExportRecord });
                 if (data.reportProgress) {
                     while (!processor.step(${protocolStreamProgressBytes}))
@@ -335,6 +339,10 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                 if (data.task.kind === 'pairSpectrum') {
                     transfer.push(result.phase.buffer, result.coherence.buffer);
                     if (result.gain) transfer.push(result.gain.buffer);
+                }
+                if (data.task.kind === 'wavelet') {
+                    transfer.push(result.frequencies.buffer, result.magnitude.buffer);
+                    if (result.phase) transfer.push(result.phase.buffer);
                 }
                 if (data.task.kind === 'protocol-decode') {
                     const buffers = new Set(), seen = new Set();
@@ -367,7 +375,7 @@ function historyAbortError() {
 }
 
 function isLiveSpectrumTask(task) {
-    return task.kind === 'fft' || task.kind === 'pairSpectrum';
+    return task.kind === 'fft' || task.kind === 'pairSpectrum' || task.kind === 'wavelet';
 }
 
 class HistoryWorkerPool {
@@ -487,7 +495,7 @@ class HistoryWorkerPool {
     /** Stream checks can report intermediate byte offsets. The result means the full input was checked. */
     runTask(task, { onProgress, signal } = {}) {
         if (this.disposed || signal?.aborted) return Promise.reject(historyAbortError());
-        if (['fft', 'time-scan', 'csv-export'].includes(task?.kind) && !(task.values instanceof Float64Array))
+        if (['fft', 'time-scan', 'csv-export', 'wavelet'].includes(task?.kind) && !(task.values instanceof Float64Array))
             return Promise.reject(new TypeError(task.kind === 'fft' ? 'FFT values must be a Float64Array' : '历史采样必须是双精度浮点数数组'));
         if (task?.kind === 'pairSpectrum' && (!Array.isArray(task.segments) || task.segments.some(segment =>
             !(segment?.x instanceof Float64Array) || !(segment.y instanceof Float64Array) || segment.x.length !== segment.y.length)))
@@ -496,7 +504,7 @@ class HistoryWorkerPool {
             try { validateProtocolHistoryTask(task); }
             catch (error) { return Promise.reject(error); }
         }
-        if (!['fft', 'pairSpectrum', 'time-scan', 'csv-export', 'hex-export', 'protocol-decode', 'monitor-search'].includes(task?.kind) &&
+        if (!['fft', 'pairSpectrum', 'time-scan', 'csv-export', 'hex-export', 'protocol-decode', 'monitor-search', 'wavelet'].includes(task?.kind) &&
             !(task?.bytes instanceof Uint8Array))
             return Promise.reject(new TypeError('History task bytes must be a Uint8Array'));
         if (task.kind === 'hex-assemble' && (!Array.isArray(task.parts) ||
@@ -571,7 +579,7 @@ class HistoryWorkerPool {
                 const job = this.queue.shift();
                 slot.job = job;
                 try {
-                    const kind = job.task.kind, samples = ['fft', 'time-scan', 'csv-export'].includes(kind);
+                    const kind = job.task.kind, samples = ['fft', 'time-scan', 'csv-export', 'wavelet'].includes(kind);
                     const protocol = kind === 'protocol-decode', search = kind === 'monitor-search', hex = kind === 'hex-export';
                     const pair = kind === 'pairSpectrum';
                     const data = samples ? new Float64Array(job.task.values)

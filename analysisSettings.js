@@ -4,6 +4,7 @@
     const limits = typeof module !== 'undefined' ? require('./projectLimits').PROJECT_LIMITS : S.Limits;
     const fftWindows = typeof module !== 'undefined' ? require('./spectrum').FFT_WINDOWS : S.FFT_WINDOWS;
     const { normalizeAxisNumberSettings } = typeof module !== 'undefined' ? require('./plotMath') : S;
+    const { waveletSupportsPhase } = typeof module !== 'undefined' ? require('./wavelet') : S;
     const maxBins = limits.maxPlotWindowPoints;
     const colors = limits.defaultChannelColors;
     const maxFftOverlap = 75;
@@ -141,12 +142,26 @@
         return settings.scale === 'percent' ? [settings.yPercentMin, settings.yPercentMax] :
             [settings.yCountMin ?? 0, settings.yCountMax ?? windowPoints];
     }
+    const waveletBases = [['morlet', '复 Morlet'], ['morse', '解析 Morse'], ['mexicanHat', '墨西哥帽']];
+
+    function normalizeWavelet({ channel: index = 0, basis = 'morlet', viewMode = 'magnitude', phaseUnit = 'radians',
+        frequencyScale = 'log', yAuto = true, yMin = 1, yMax = 500, ...settings }) {
+        choice(basis, waveletBases.map(([value]) => value), '小波基');
+        choice(viewMode, ['magnitude', 'phase'], '小波显示模式');
+        range(yMin, yMax, '频率范围');
+        requireValue(yMin >= 0 && (frequencyScale !== 'log' || yMin > 0 || yAuto), '频率范围不能为负，对数最小值须大于 0');
+        return { channel: channel(index), basis, viewMode: waveletSupportsPhase(basis) ? viewMode : 'magnitude',
+            phaseUnit: choice(phaseUnit, ['degrees', 'radians'], '相位单位'),
+            frequencyScale: choice(frequencyScale, ['linear', 'log'], '频率刻度'), yAuto: flag(yAuto), yMin, yMax,
+            ...normalizeAxisNumberSettings(settings) };
+    }
     function normalize(type, settings = {}) {
         object(settings);
         if (type === 'xy') return normalizeXY(settings);
         if (type === 'histogram') return normalizeHistogram(settings);
+        if (type === 'wavelet') return normalizeWavelet(settings);
         throw new Error('未知的分析控件类型');
     }
-    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds };
+    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds, waveletBases };
     if (typeof module !== 'undefined') module.exports = { AnalysisSettings: S.AnalysisSettings };
 })(globalThis);

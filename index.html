@@ -140,6 +140,7 @@
                         <div class="widget-library-item" data-widget-type="wave" draggable="false"><span>波形</span><small>时域、频域与多通道分析</small><button type="button" data-add-widget="wave">添加</button></div>
                         <div class="widget-library-item" data-widget-type="xy" draggable="false"><span>李萨如图</span><small>多组通道的 XY 轨迹</small><button type="button" data-add-widget="xy">添加</button></div>
                         <div class="widget-library-item" data-widget-type="histogram" draggable="false"><span>频度直方图</span><small>数值与区间的出现次数、占比</small><button type="button" data-add-widget="histogram">添加</button></div>
+                        <div class="widget-library-item" data-widget-type="wavelet" draggable="false"><span>小波变换</span><small>单通道的时频幅度与相位</small><button type="button" data-add-widget="wavelet">添加</button></div>
                         <div class="widget-library-item" data-widget-type="byte" draggable="false"><span>字节流</span><small>Hex、文本与数值记录</small><button type="button" data-add-widget="byte">添加</button></div>
                         <div class="widget-library-item" data-widget-type="pose" draggable="false"><span>位姿</span><small>Euler 角、四元数与旋转矩阵</small><button type="button" data-add-widget="pose">添加</button></div>
                         <span class="hint-text">拖动条目到工作区。标题可移动控件，边缘可调整大小。</span>
@@ -399,6 +400,7 @@
                                     <option value="engine-text">数据引擎文本（.txt）</option>
                                     <option value="csv" selected>数据引擎 CSV（.csv）</option>
                                     <option value="svg">当前视图 SVG（.svg）</option>
+                                    <option value="wavelet-csv">小波系数 CSV（.csv）</option>
                                 </select>
                             </div>
                             <p class="hint-text" id="widget-export-scope-hint"></p>
@@ -1107,6 +1109,7 @@
     <script src="channelAutocomplete.js"></script>
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
+    <script src="wavelet.js"></script>
     <script src="pairSpectrum.js"></script>
     <script src="textCodec.js"></script>
     <script src="protocolSymbols.js"></script>
@@ -1194,6 +1197,7 @@
     </div></template>
     <script src="analysisSettings.js"></script>
     <script src="analysisInspector.js"></script>
+    <script src="waveletPlot.js"></script>
     <script src="analysisPlot.js"></script>
     <template id="pose-widget-template"><div class="pose-panel box-border workspace-panel" data-role="pose-panel">
         <div class="monitor-title-row pose-header" data-role="pose-header" title="拖动标题移动；双击聚焦或返回">

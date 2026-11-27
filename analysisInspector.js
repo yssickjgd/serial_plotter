@@ -106,7 +106,7 @@
                 const error = this.element('div', 'pose-error'); error.setAttribute('role', 'alert'); error.hidden = true;
                 parent.replaceChildren(error);
             }
-            const xyDisplay = this.widget.type === 'xy' ? this.group(this.display, '显示内容') : null;
+            const content = this.widget.type !== 'histogram' ? this.group(this.display, '显示内容') : null;
             if (this.options.setWindowPoints) {
                 const group = this.group(this.display, '采样窗口');
                 const input = this.field(group, this.widget.type + '-window', '采样点数', 'number',
@@ -116,7 +116,9 @@
                 label.append(this.element('span', 'scope-badge', '全局共用'));
                 input.step = '1';
             }
-            if (xyDisplay) this.xy(xyDisplay); else this.histogram();
+            if (this.widget.type === 'xy') this.xy(content);
+            else if (this.widget.type === 'wavelet') this.wavelet(content);
+            else this.histogram();
             for (const [id, { wrap, picker }] of this.pickers) {
                 if (this.bindings.contains(wrap)) continue;
                 this.channelState.set(id, { query: picker.filter.value, page: picker.page });
@@ -322,6 +324,26 @@
             const segment = this.options.windowPoints ? '每段最多 ' + size + ' 点。' : '';
             fft.append(this.element('p', 'hint-text',
                 '每段长度按窗口采样点数和重叠率自动计算。' + segment + '样本不足时自动缩短，至少需凑齐 2 个完整分段。'));
+        }
+        wavelet(content) {
+            const settings = this.settings;
+            const mode = this.property(content, 'viewMode', '图模式', [['magnitude', '小波幅度图'], ['phase', '小波相位图']]);
+            mode.options[1].disabled = !S.waveletSupportsPhase(settings.basis);
+            if (mode.options[1].disabled)
+                content.append(this.element('p', 'hint-text', '墨西哥帽使用实值小波系数，提供幅度图。'));
+            if (settings.viewMode === 'phase') this.waveformProperty(content, 'phaseUnit', 'plot-phase-unit');
+            const group = this.group(this.display, '小波设置');
+            this.property(group, 'basis', '小波基', settingsApi.waveletBases);
+            group.append(this.element('p', 'hint-text', '频率范围和分析密度根据采样窗口、来源采样率及小波基自动计算。边缘和缺样附近可能留空。'));
+            group.append(this.element('p', 'hint-text', '幅度最高计算到采样率的一半。浅色区域提示高频侧响应受限，奈奎斯特频点的相位留空。'));
+            const x = this.group(this.display, '横轴设置'), y = this.group(this.display, '纵轴设置');
+            x.append(this.element('p', 'hint-text', '横轴以秒显示。滚轮缩放，缩放后按住 Shift 拖动可平移时间范围。'));
+            this.axisPrecision(x, 'x');
+            this.property(y, 'frequencyScale', '频率刻度', [['log', '对数（Hz）'], ['linear', '线性（Hz）']]);
+            this.xyAxisRange(y, 'Y', 'y');
+            this.axisPrecision(y, 'y');
+            const binding = this.group(this.bindings, '小波分析通道');
+            this.channel(binding, 'wavelet-channel', '输入通道', settings.channel, channel => this.update({ channel }));
         }
         histogram() {
             const settings = this.settings;

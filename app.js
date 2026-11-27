@@ -1530,6 +1530,7 @@ async function startSerialPlotterApplication() {
         if (format === 'svg') {
             return typeof widget?.view?.exportSvg === 'function' ? { widget } : null;
         }
+        if (format === 'wavelet-csv') return widget?.type === 'wavelet' ? { widget } : null;
         if (format !== 'text') {
             if (!refresh) return widgetExportSelection;
             const engine = widget?.capture.dataEngine;
@@ -1539,9 +1540,10 @@ async function startSerialPlotterApplication() {
             ? { widget, source: widget.source, encoding: widget.settings.textEncoding } : null;
     }
     function widgetExportIssue(format, selected) {
-        if (format === 'svg') return selected ? '' : '请选择波形、XY 或直方图控件。';
+        if (format === 'svg') return selected ? '' : '请选择可导出 SVG 的绘图控件。';
+        if (format === 'wavelet-csv') return selected ? '' : '请选择小波变换控件。';
         if (!selected) return format === 'text' ? '请选择显示「文本」的字节流控件。'
-            : '请选择有解析数据的波形、XY、直方图、位姿或显示「数据引擎」的字节流控件。';
+            : '请选择有解析数据的绘图、位姿或显示「数据引擎」的字节流控件。';
         if (selected.widget.capture === workspaceChannels && (format === 'binary' || format === 'hex-text'))
             return '请在左侧「导出数据」中按通讯来源导出原始字节。此处可导出全局通道的 TXT 或 CSV。';
         if (pauseDrain && selected.widget.capture === workspaceChannels) return '正在整理暂停前的数据。';
@@ -1588,7 +1590,9 @@ async function startSerialPlotterApplication() {
         const hint = format === 'binary' || format === 'hex-text' ? '导出成功解析的原始帧。'
             : format === 'text' ? '按控件的字符集和记录边界导出。' : '导出该控件采用的通道或字段。';
         el('widget-export-range-summary').textContent = !selected ? '' : format === 'svg'
-            ? '保存点击导出时的图形、刻度和坐标范围。' : hint + '\n' + exportTimeRange([selected.source.frames]);
+            ? '保存点击导出时的图形、刻度和坐标范围。'
+            : format === 'wavelet-csv' ? '导出当前分析结果的时间、频率、幅度及相位，缺失系数留空。'
+            : hint + '\n' + exportTimeRange([selected.source.frames]);
         status('widget-export-source-status', issue);
     }
     listen(el('export-source'), 'change', () => {
@@ -1604,7 +1608,7 @@ async function startSerialPlotterApplication() {
         anchor.href = URL.createObjectURL(blob); anchor.download = filename; anchor.click(); URL.revokeObjectURL(anchor.href);
     }
     async function writeExport(view, options, buffers, check, makeChunks, metadataSize = 0) {
-        const csv = options.format === 'csv', binary = options.format === 'binary';
+        const csv = ['csv', 'wavelet-csv'].includes(options.format), binary = options.format === 'binary';
         const text = options.format === 'text' || options.format === 'engine-text';
         const svg = options.format === 'svg';
         const extension = svg ? 'svg' : csv ? 'csv' : binary ? 'bin' : text ? 'txt' : 'hex';
@@ -1712,6 +1716,16 @@ async function startSerialPlotterApplication() {
             return writeExport(widgetExportView, options, [], () => {
                 if (disposed) throw new Error('当前工作区已关闭');
             }, () => [svg], svg.length * 2);
+        }
+        if (format === 'wavelet-csv') {
+            const snapshot = active.view.wavelet.snapshot;
+            if (!snapshot?.result.magnitude.some(Number.isFinite)) {
+                status('widget-export-source-status', '当前没有可导出的小波系数。');
+                return false;
+            }
+            return writeExport(widgetExportView, options, [], () => {
+                if (disposed) throw new Error('当前工作区已关闭');
+            }, onProgress => S.WaveletPlot.waveletCsv(snapshot, onProgress), snapshot.result.magnitude.length * 64);
         }
         const { widget, source, channels, channelIndices, fieldPaths } = selected, { frames } = source;
         const wire = format === 'binary' || format === 'hex-text';

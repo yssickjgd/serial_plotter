@@ -32,6 +32,7 @@ class WidgetController {
         this.register('pose', { template: 'pose-widget-template', title: '位姿' });
         this.register('xy', { template: 'analysis-widget-template', title: '李萨如图' });
         this.register('histogram', { template: 'analysis-widget-template', title: '频度直方图' });
+        this.register('wavelet', { template: 'analysis-widget-template', title: '小波变换' });
         this.fieldIds = {
             plotViewMode: 'plot-view-mode', plotTraceMode: 'plot-trace-mode', plotTimeXUnit: 'plot-time-x-unit',
             plotFreqXScale: 'plot-freq-x-scale', plotFreqYScale: 'plot-freq-y-scale',
@@ -72,7 +73,7 @@ class WidgetController {
     }
     register(type, definition) { this.registry.set(type, definition); }
 
-    _isAnalysis(type) { return type === 'xy' || type === 'histogram'; }
+    _isAnalysis(type) { return type === 'xy' || type === 'histogram' || type === 'wavelet'; }
     _refreshWidgetVisibility(widget) {
         const deferred = this._isAnalysis(widget.type) && widget.settings.connectionSource === 'workspace' &&
             this.workspacePresentationDeferred;
@@ -192,9 +193,16 @@ class WidgetController {
                 const ordinal = index >= 0 ? frames.frameOrdinalAt?.(index) : null;
                 const section = timeline?.valid && ordinal != null ? timeline.sections.findLast(entry => entry.from <= ordinal) : null;
                 const estimate = widget.source.sampleRate?.rate ?? 0;
-                if (section) return { rate: section.rate || estimate, from: section.from - frames.frameOrdinalAt(0) };
-                return { rate: timing?.mode === 'fixed' ? timing.sampleRate : estimate };
-            }, type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null,
+                if (section) return { rate: section.rate || estimate, from: section.from - frames.frameOrdinalAt(0),
+                    time: timeline.timestampAt(index) / 1000 };
+                const origin = frames.originTimestamp ?? frames.timestampAt?.(0);
+                const project = this.projectReceiveTime;
+                const timestamp = frames.timestampAt?.(index);
+                const elapsed = (project ? project(timestamp) - project(origin) : timestamp - origin) / 1000;
+                const fixed = timing?.mode === 'fixed';
+                return { rate: fixed ? timing.sampleRate : estimate, time: fixed && ordinal != null
+                    ? ordinal / timing.sampleRate : elapsed };
+            }, type === 'wavelet' || type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null,
             index => this.channelColor(index, this.globalsFor(widget.capture).channelColors));
         } else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: capture.txFrames, getSourceErrors: () => widget.source.errors,
@@ -495,7 +503,7 @@ class WidgetController {
             } else if (widget.type === 'byte') {
                 widget.view.channelColors = Array.from({ length: capture.numericSource.frames.channelCount }, (_, i) => this.channelColor(i, channelColors));
                 widget.view.invalidateData();
-            } else if (widget.type === 'xy') widget.view.invalidateLabels();
+            } else if (widget.type === 'xy' || widget.type === 'wavelet') widget.view.invalidateLabels();
         }
         if (this.active?.capture === capture) this.channelView.setChannelColor(index, color);
         this.onChannelMetadataChange(index, { color }, capture);
@@ -614,7 +622,7 @@ class WidgetController {
             else if (widget.type === 'pose') widget.settings = { ...SerialPlotter.PoseConfig.remapBindings(widget.settings, numberMap), engineSource: widget.settings.engineSource ?? null, connectionSource: widget.settings.connectionSource };
             else if (this._isAnalysis(widget.type)) {
                 const remap = index => index !== null && numberMap.has(index + 1) ? numberMap.get(index + 1) - 1 : null;
-                if (widget.type === 'histogram') widget.settings.channel = remap(widget.settings.channel);
+                if (widget.type !== 'xy') widget.settings.channel = remap(widget.settings.channel);
                 else widget.settings.pairs = widget.settings.pairs.map(pair => ({ ...pair, x: remap(pair.x), y: remap(pair.y) }));
             } else widget.settings.monitorDisplay.numericHiddenChannels = indices(widget.settings.monitorDisplay.numericHiddenChannels);
             for (const profile of Object.values(widget.settings.exportSettings?.formats ?? {}))

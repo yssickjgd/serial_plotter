@@ -34,8 +34,8 @@ test('widget controls show output encoding only for text and optional provenance
         view.sync({ available: true, syncAvailable: true });
         assert.equal(get('wrap-widget-export-output-encoding').hidden, !['text', 'engine-text'].includes(format));
         assert.equal(get('widget-export-sync-states-wrap').hidden, format !== 'csv');
-        assert.equal(get('widget-export-text-metadata').hidden, ['binary', 'svg'].includes(format));
-        assert.equal(get('wrap-widget-export-markers').hidden, format === 'csv');
+        assert.equal(get('widget-export-text-metadata').hidden, ['binary', 'svg', 'wavelet-csv'].includes(format));
+        assert.equal(get('wrap-widget-export-markers').hidden, ['csv', 'wavelet-csv'].includes(format));
         assert.equal(view.read().direction, 'rx');
     }
     view.sync({ available: false });

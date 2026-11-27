@@ -51,6 +51,22 @@ function loadPool() {
     return exports;
 }
 
+test('wavelet jobs compute phase in a real worker and preserve the source samples', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory() });
+    t.after(() => pool.dispose());
+    const values = Float64Array.from({ length: 1024 }, (_, i) => Math.cos(Math.PI * i / 8 + .3));
+    const result = await pool.runTask({ kind: 'wavelet', values, basis: 'morlet', rate: 1024 });
+    assert.equal(pool.workerCount, 1);
+    assert.equal(values.length, 1024);
+    const row = result.frequencies.findIndex(frequency => Math.abs(frequency - 64) < 2);
+    const center = row * result.columns + 512 / result.hop;
+    assert.ok(row >= 0 && Math.abs(result.phase[center] - .3) < .01);
+    assert.equal(result.frequencies.at(-1), 512);
+    assert.ok(result.highBandStart > 0 && result.highBandStart < 512);
+    assert.ok(Number.isNaN(result.phase[(result.frequencies.length - 1) * result.columns + 512 / result.hop]));
+});
+
 test('real workers migrate legacy protocol words lexically and execute strict uppercase schemas', async t => {
     const { HistoryWorkerPool } = loadPool();
     const old = { id: 'worker.symbols', framing: { fixedLength: 3 }, messages: [{ id: 'm', fields: [

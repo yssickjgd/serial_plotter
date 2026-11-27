@@ -17,7 +17,7 @@
         return time >= a && time <= b ? frames.nearestTimestampIndex(time) : -1;
     };
     const isWave = widget => widget?.type === 'wave' || widget?.type === 'waveform';
-    const hasMarkers = widget => isWave(widget) || ['pose', 'xy', 'histogram'].includes(widget?.type);
+    const hasMarkers = widget => isWave(widget) || ['pose', 'xy', 'histogram', 'wavelet'].includes(widget?.type);
     const endAt = (frames, index) => frames.rawEndByteAt?.(index) ?? frames.rawByteOffsetAt(index) + frames.rawBytesAt(index).length;
     const indexAt = (frames, offset) => {
         if (!frames?.length || !Number.isFinite(offset)) return -1;
@@ -187,7 +187,7 @@
             let indices;
             if (widget?.type === 'pose') indices = PoseConfig.boundChannels(widget.settings);
             else if (widget?.type === 'xy') indices = widget.settings.pairs.filter(pair => pair.visible).flatMap(pair => [pair.x, pair.y]);
-            else if (widget?.type === 'histogram') indices = [widget.settings.channel];
+            else if (widget?.type === 'histogram' || widget?.type === 'wavelet') indices = [widget.settings.channel];
             else return null;
             return [...new Set(indices)].filter(index => Number.isInteger(index) && index < frames.channelCount && (!frames.isSignal || frames.isSignal(index)));
         }

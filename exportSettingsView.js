@@ -7,7 +7,7 @@ class ExportSettingsView {
         this.document = document;
         this.widget = widget;
         this.prefix = widget ? 'widget-export' : 'export';
-        this.allowedFormats = widget ? ['binary', 'hex-text', 'text', 'engine-text', 'csv', 'svg'] : ['binary', 'hex-text'];
+        this.allowedFormats = widget ? ['binary', 'hex-text', 'text', 'engine-text', 'csv', 'svg', 'wavelet-csv'] : ['binary', 'hex-text'];
         this.listeners = [];
         this.elements = Object.fromEntries(Object.entries({
             format: this.prefix + '-format', button: 'btn-' + this.prefix,
@@ -52,8 +52,8 @@ class ExportSettingsView {
     sync({ busy = false, available = false, syncAvailable = false } = {}) {
         const { format, button } = this.elements;
         const get = suffix => this.document.getElementById(this.prefix + suffix);
-        this.document.getElementById('wrap-' + this.prefix + '-markers').hidden = format.value === 'csv';
-        get('-text-metadata').hidden = format.value === 'binary' || format.value === 'svg';
+        this.document.getElementById('wrap-' + this.prefix + '-markers').hidden = ['csv', 'wavelet-csv'].includes(format.value);
+        get('-text-metadata').hidden = ['binary', 'svg', 'wavelet-csv'].includes(format.value);
         if (this.widget) {
             this.document.getElementById('wrap-widget-export-output-encoding').hidden =
                 !['text', 'engine-text'].includes(format.value);
