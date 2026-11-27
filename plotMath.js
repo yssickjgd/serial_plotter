@@ -170,7 +170,8 @@ function axisFraction(value, min, max, scale = 'linear') {
         const start = axisToDomain(min, scale);
         return (axisToDomain(value, scale) - start) / (axisToDomain(max, scale) - start);
     }
-    return (value - min) / (max - min);
+    const span = max - min;
+    return Number.isFinite(span) ? (value - min) / span : (value / 2 - min / 2) / (max / 2 - min / 2);
 }
 
 function axisValueAtFraction(fraction, min, max, scale = 'linear') {
@@ -183,28 +184,38 @@ function axisValueAtFraction(fraction, min, max, scale = 'linear') {
         if (fraction === 1) return max;
         return axisFromDomain(start + (end - start) * fraction, scale);
     }
-    return min + (max - min) * fraction;
+    if (fraction === 0) return min;
+    if (fraction === 1) return max;
+    const span = max - min;
+    return Number.isFinite(span) ? min + span * fraction : min * (1 - fraction) + max * fraction;
+}
+
+/** Fractions increase rightward in X and upward in Y, independently of axis scale. */
+function plotSelectionFractions(x0, y0, x1, y1, { left = 0, right, top = 0, bottom }) {
+    const width = right - left, height = bottom - top;
+    const xMin = Math.max(left, Math.min(x0, x1)), xMax = Math.min(right, Math.max(x0, x1));
+    const yMin = Math.max(top, Math.min(y0, y1)), yMax = Math.min(bottom, Math.max(y0, y1));
+    if (!(xMax - xMin >= 6 && yMax - yMin >= 6)) return null;
+    return [(xMin - left) / width, (xMax - left) / width, 1 - (yMax - top) / height, 1 - (yMin - top) / height];
 }
 
 /** Convert a dragged plot rectangle into an inclusive sample window and Y range. */
 function zoomRectToBounds({ x0, y0, x1, y1, plotWidth, plotHeight,
     startIndex, visibleCount, min, max, xScale = 'linear', yScale = 'linear', indexAtFraction }) {
     if (plotWidth <= 0 || plotHeight <= 0 || visibleCount < 2 || max <= min) return null;
-    const left = Math.max(0, Math.min(plotWidth, Math.min(x0, x1)));
-    const right = Math.max(0, Math.min(plotWidth, Math.max(x0, x1)));
-    const top = Math.max(0, Math.min(plotHeight, Math.min(y0, y1)));
-    const bottom = Math.max(0, Math.min(plotHeight, Math.max(y0, y1)));
-    if (right - left < 6 || bottom - top < 6) return null;
+    const fractions = plotSelectionFractions(x0, y0, x1, y1, { right: plotWidth, bottom: plotHeight });
+    if (!fractions) return null;
+    const [left, right, low, high] = fractions;
     const endIndex = startIndex + visibleCount - 1;
     const indexAt = indexAtFraction ?? (ratio => axisValueAtFraction(ratio, startIndex, endIndex, xScale));
-    const first = Math.ceil(indexAt(left / plotWidth, false));
-    const last = Math.floor(indexAt(right / plotWidth, true));
+    const first = Math.ceil(indexAt(left, false));
+    const last = Math.floor(indexAt(right, true));
     if (last <= first) return null;
     return {
         scrollOffset: first,
         displayCount: last - first + 1,
-        yMin: axisValueAtFraction(1 - bottom / plotHeight, min, max, yScale),
-        yMax: axisValueAtFraction(1 - top / plotHeight, min, max, yScale)
+        yMin: axisValueAtFraction(low, min, max, yScale),
+        yMax: axisValueAtFraction(high, min, max, yScale)
     };
 }
 
@@ -337,12 +348,12 @@ if (typeof module !== 'undefined') module.exports = {
     adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
-    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds
+    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds, plotSelectionFractions
 };
 globalThis.SerialPlotter ??= {};
 Object.assign(globalThis.SerialPlotter, {
     adaptiveLogScale, positiveLogBounds, axisFromDomain, axisToDomain, axisFraction, axisValueAtFraction,
     bucketAxisExtrema, bucketExtrema, bucketTraceExtrema, csvField, formatChannelId, zoomRectToBounds,
     formatDisplayNumber, maxAxisSignificantDigits, axisNumberFieldNames, readAxisNumberFormat, normalizeAxisNumberSettings,
-    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds
+    customAxisNumberFormat, formatAxisValue, formatPlotAxisCoordinate, plotWheelAxis, layoutAxisTickLabels, zoomAxisBounds, plotSelectionFractions
 });

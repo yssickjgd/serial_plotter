@@ -4,7 +4,7 @@
     const limits = typeof module !== 'undefined' ? require('./projectLimits').PROJECT_LIMITS : S.Limits;
     const fftWindows = typeof module !== 'undefined' ? require('./spectrum').FFT_WINDOWS : S.FFT_WINDOWS;
     const { normalizeAxisNumberSettings } = typeof module !== 'undefined' ? require('./plotMath') : S;
-    const { waveletSupportsPhase } = typeof module !== 'undefined' ? require('./wavelet') : S;
+    const { waveletSupportsPhase, waveletMaxFrequencyRows } = typeof module !== 'undefined' ? require('./wavelet') : S;
     const maxBins = limits.maxPlotWindowPoints;
     const colors = limits.defaultChannelColors;
     const maxFftOverlap = 75;
@@ -142,17 +142,33 @@
         return settings.scale === 'percent' ? [settings.yPercentMin, settings.yPercentMax] :
             [settings.yCountMin ?? 0, settings.yCountMax ?? windowPoints];
     }
-    const waveletBases = [['morlet', '复 Morlet'], ['morse', '解析 Morse'], ['mexicanHat', '墨西哥帽']];
+    const waveletBases = [
+        ['morlet', '复 Morlet'], ['morse', '解析 Morse'], ['shannon', '复 Shannon'],
+        ['mexicanHat', '墨西哥帽（Mexican Hat）'], ['gaus1', '高斯一阶导数（gaus1）'], ['haar', 'Haar'],
+        ['db4', 'Daubechies（db4）'], ['sym4', 'Symlet（sym4）'], ['coif2', 'Coiflet（coif2）'], ['meyer', 'Meyer']
+    ];
+    const waveletViews = [['magnitude', '小波幅度图'], ['phase', '小波相位图'], ['signed', '有符号系数图']];
+    const waveletCoefficientMode = basis => waveletSupportsPhase(basis) ? 'phase' : 'signed';
 
     function normalizeWavelet({ channel: index = 0, basis = 'morlet', viewMode = 'magnitude', phaseUnit = 'radians',
-        frequencyScale = 'log', yAuto = true, yMin = 1, yMax = 500, ...settings }) {
+        freezeXOnZoom = false, showEdgeHatching = true, removeDc = false, frequencyRows = 0, timeColumns = 0, timeStride = 0,
+        yAuto = true, yMin = 1, yMax = 500, frequencyScale = !yAuto && yMin === 0 ? 'linear' : 'log', ...settings }) {
         choice(basis, waveletBases.map(([value]) => value), '小波基');
-        choice(viewMode, ['magnitude', 'phase'], '小波显示模式');
+        choice(viewMode, waveletViews.map(([value]) => value), '小波显示模式');
+        if (viewMode !== waveletCoefficientMode(basis)) viewMode = 'magnitude';
+        requireValue(frequencyRows === 0 || (Number.isInteger(frequencyRows) && frequencyRows >= 2 &&
+            frequencyRows <= waveletMaxFrequencyRows(limits.maxPlotWindowPoints)), '小波频率行数超出范围');
+        requireValue(Number.isInteger(timeColumns) && timeColumns >= 0 && timeColumns <= limits.maxPlotWindowPoints,
+            '小波时间列数须为 0 至 ' + limits.maxPlotWindowPoints + ' 的整数');
+        requireValue(Number.isInteger(timeStride) && timeStride >= 0 && timeStride <= limits.maxPlotWindowPoints / 2,
+            '小波时间步长须为 0 至 ' + limits.maxPlotWindowPoints / 2 + ' 的整数');
         range(yMin, yMax, '频率范围');
         requireValue(yMin >= 0 && (frequencyScale !== 'log' || yMin > 0 || yAuto), '频率范围不能为负，对数最小值须大于 0');
-        return { channel: channel(index), basis, viewMode: waveletSupportsPhase(basis) ? viewMode : 'magnitude',
-            phaseUnit: choice(phaseUnit, ['degrees', 'radians'], '相位单位'),
-            frequencyScale: choice(frequencyScale, ['linear', 'log'], '频率刻度'), yAuto: flag(yAuto), yMin, yMax,
+        return { channel: channel(index), basis, viewMode,
+            phaseUnit: choice(phaseUnit, ['degrees', 'radians'], '数值单位'),
+            freezeXOnZoom: flag(freezeXOnZoom), showEdgeHatching: flag(showEdgeHatching), removeDc: flag(removeDc),
+            frequencyRows, timeColumns, timeStride: timeColumns ? 0 : timeStride,
+            frequencyScale: choice(frequencyScale, ['linear', 'log'], '纵轴刻度'), yAuto: flag(yAuto), yMin, yMax,
             ...normalizeAxisNumberSettings(settings) };
     }
     function normalize(type, settings = {}) {
@@ -162,6 +178,7 @@
         if (type === 'wavelet') return normalizeWavelet(settings);
         throw new Error('未知的分析控件类型');
     }
-    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds, waveletBases };
+    S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds,
+        waveletBases, waveletViews, waveletCoefficientMode };
     if (typeof module !== 'undefined') module.exports = { AnalysisSettings: S.AnalysisSettings };
 })(globalThis);

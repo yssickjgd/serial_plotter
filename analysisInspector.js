@@ -5,6 +5,7 @@
     const bindField = typeof module !== 'undefined' ? require('./autoApply').bindSettingField : S.bindSettingField;
     const ChannelPages = typeof module !== 'undefined' ? require('./channelPages').ChannelPages : S.ChannelPages;
     const { maxAxisSignificantDigits } = typeof module !== 'undefined' ? require('./plotMath') : S;
+    const { waveletTimeStrides, waveletMaxFrequencyRows } = typeof module !== 'undefined' ? require('./wavelet') : S;
     const panels = new WeakMap();
 
     function parseList(text) {
@@ -96,6 +97,7 @@
         }
         draw(restoreFocus = true) {
             this.version++;
+            this.refreshResolution = null;
             const active = this.document.activeElement;
             const focused = restoreFocus && active?.id && (this.display.contains(active) || this.bindings.contains(active));
             const cursor = focused && ['text', 'search'].includes(active.type) ? [active.selectionStart, active.selectionEnd] : null;
@@ -303,7 +305,7 @@
             slider.type = 'range'; slider.id = 'xy-fftOverlap-slider';
             slider.min = overlap.min; slider.max = overlap.max; slider.step = overlap.step; slider.value = overlap.value;
             slider.setAttribute('aria-label', '分段重叠率滑块（%）');
-            const field = overlap.parentElement, row = this.element('div', 'fft-overlap-controls');
+            const field = overlap.parentElement, row = this.element('div', 'range-number-controls');
             row.append(slider, overlap); field.append(row);
             const overlapHint = this.element('p', 'hint-text',
                 '相邻 FFT 窗口复用的样本比例，两路使用相同的分段位置。重叠率须低于 100%，分段窗口才能向前移动。为控制实时计算开销，本程序上限为 ' + settingsApi.maxFftOverlap + '%。');
@@ -327,23 +329,137 @@
         }
         wavelet(content) {
             const settings = this.settings;
-            const mode = this.property(content, 'viewMode', '图模式', [['magnitude', '小波幅度图'], ['phase', '小波相位图']]);
-            mode.options[1].disabled = !S.waveletSupportsPhase(settings.basis);
-            if (mode.options[1].disabled)
-                content.append(this.element('p', 'hint-text', '墨西哥帽使用实值小波系数，提供幅度图。'));
-            if (settings.viewMode === 'phase') this.waveformProperty(content, 'phaseUnit', 'plot-phase-unit');
+            const mode = this.property(content, 'viewMode', '图模式', settingsApi.waveletViews);
+            const coefficientMode = settingsApi.waveletCoefficientMode(settings.basis);
+            for (const option of mode.options)
+                option.disabled = option.value !== 'magnitude' && option.value !== coefficientMode;
+            if (coefficientMode === 'signed') {
+                const hint = this.element('p', 'hint-text', '有符号系数图中，正值用通道色，负值用互补色，越亮表示绝对值越大。黑白灰通道用白色表示正值、天蓝色表示负值。');
+                hint.id = mode.id + '-hint';
+                mode.setAttribute('aria-describedby', hint.id);
+                content.append(hint);
+            }
+            this.property(content, 'showEdgeHatching', '显示边缘参考斜纹和高频受限提示带', 'checkbox');
+            if (settings.viewMode === 'phase')
+                this.property(content, 'phaseUnit', '数值单位', this.waveformSelect('plot-phase-unit').choices);
+            const x = this.group(this.display, '横轴设置'), y = this.group(this.display, '纵轴设置');
+            this.axisPrecision(x, 'x');
+            this.property(x, 'freezeXOnZoom', '缩放冻结横轴', 'checkbox');
+            x.append(this.element('p', 'hint-text', '缩放时间范围后，默认随新样点前移。勾选后会停在选中的时间范围。拖动底部滚动条可查看已保留的历史，右键返回实时窗口。'));
+            this.axisPrecision(y, 'y');
+            const hzScales = this.waveformSelect('plot-freq-x-scale').choices
+                .filter(([key]) => key.startsWith('hz-')).map(([key, label]) => [key.slice(3), label]);
+            this.property(y, 'frequencyScale', '纵轴刻度', hzScales);
+            this.xyAxisRange(y, 'Y', 'y');
             const group = this.group(this.display, '小波设置');
             this.property(group, 'basis', '小波基', settingsApi.waveletBases);
-            group.append(this.element('p', 'hint-text', '频率范围和分析密度根据采样窗口、来源采样率及小波基自动计算。边缘和缺样附近可能留空。'));
-            group.append(this.element('p', 'hint-text', '幅度最高计算到采样率的一半。浅色区域提示高频侧响应受限，奈奎斯特频点的相位留空。'));
-            const x = this.group(this.display, '横轴设置'), y = this.group(this.display, '纵轴设置');
-            x.append(this.element('p', 'hint-text', '横轴以秒显示。滚轮缩放，缩放后按住 Shift 拖动可平移时间范围。'));
-            this.axisPrecision(x, 'x');
-            this.property(y, 'frequencyScale', '频率刻度', [['log', '对数（Hz）'], ['linear', '线性（Hz）']]);
-            this.xyAxisRange(y, 'Y', 'y');
-            this.axisPrecision(y, 'y');
+            group.append(this.element('p', 'hint-text', '分析会优先借用窗口外已采集的连续样点。边缘不足时用镜像延拓计算，浅色斜纹表示参考系数。缺失样点仍留空。'));
+            group.append(this.element('p', 'hint-text', '分析的最高频率低于采样率的一半。浅色区域提示高频侧响应受限。'));
+            const removeDc = this.property(group, 'removeDc', '频域去直流', 'checkbox');
+            const dcHint = this.element('p', 'hint-text', '勾选后，先计算当前分析窗口内有效样点的均值，再从参与变换的样值中减去该均值。');
+            dcHint.id = removeDc.id + '-hint';
+            removeDc.setAttribute('aria-describedby', dcHint.id);
+            group.append(dcHint);
+            this.waveletResolution(group);
             const binding = this.group(this.bindings, '小波分析通道');
             this.channel(binding, 'wavelet-channel', '输入通道', settings.channel, channel => this.update({ channel }));
+        }
+        waveletResolution(group) {
+            let previewInput = null;
+            const makeSlider = (key, label, numberLabel, validFrom, describe) => {
+                const minimum = validFrom - 1;
+                const input = this.field(group, 'wavelet-' + key, label, 'range', minimum);
+                const field = input.parentElement, row = this.element('div', 'range-number-controls wavelet-resolution-controls');
+                const number = this.element('input');
+                number.type = 'number'; number.id = input.id + '-number';
+                number.min = '0'; number.step = '1';
+                number.setAttribute('aria-label', numberLabel); number.title = numberLabel;
+                row.append(input, number); field.append(row);
+                const output = this.element('output', 'hint-text');
+                output.id = input.id + '-value';
+                output.setAttribute('for', input.id + ' ' + number.id);
+                number.setAttribute('aria-describedby', output.id);
+                field.append(output);
+                input.min = String(minimum); input.step = '1';
+                const show = value => {
+                    const text = describe(value);
+                    if (output.textContent !== text) {
+                        output.textContent = text;
+                        input.setAttribute('aria-valuetext', text);
+                    }
+                };
+                const positionSlider = value => {
+                    input.value = String(value || minimum);
+                    show(value);
+                };
+                const readSlider = () => Number(input.value) === minimum ? 0 : Number(input.value);
+                const valid = value => value === 0 || (Number.isInteger(value) && value >= validFrom &&
+                    value <= Number(number.max));
+                const commit = value => {
+                    previewInput = null;
+                    if (!valid(value)) throw new Error(numberLabel + '须为 0（自动）或 ' + validFrom + ' 至 ' + number.max + ' 的整数。');
+                    if (key === 'timeColumns' && this.settings.timeStride) this.update({ timeColumns: value, timeStride: 0 });
+                    else if (value !== this.settings[key]) this.update({ [key]: value });
+                    else this.refreshResolution();
+                };
+                input.addEventListener('input', () => {
+                    previewInput = input;
+                    const value = readSlider();
+                    number.value = String(value); show(value);
+                });
+                input.addEventListener('change', this.checkedAction(field, () => commit(readSlider())));
+                number.addEventListener('input', () => {
+                    previewInput = number;
+                    const value = readNumericInput(number);
+                    if (valid(value)) positionSlider(value);
+                });
+                const applyNumber = this.checkedAction(field, () => commit(readNumericInput(number)));
+                bindField(number, applyNumber);
+                number.addEventListener('blur', () => { if (previewInput === number) applyNumber(); });
+                const cancelPreview = () => {
+                    if (previewInput !== input) return;
+                    previewInput = null;
+                    this.refreshResolution?.();
+                };
+                input.addEventListener('pointercancel', cancelPreview);
+                input.addEventListener('blur', cancelPreview);
+                return (max, value) => {
+                    input.max = String(Math.max(minimum, max));
+                    number.max = String(max);
+                    number.value = String(value);
+                    input.disabled = number.disabled = !max;
+                    positionSlider(value);
+                };
+            };
+            let maxRows, maxColumns, snapshot;
+            const frequency = makeSlider('frequencyRows', '频率分辨率（尺度 a）', '频率行数', 2,
+                rows => {
+                    if (!maxRows) return '等待更多样点';
+                    const actual = !this.settings.frequencyRows && snapshot?.result.frequencies.length;
+                    const mode = rows ? rows + ' 行' : actual ? '自动 · 当前 ' + actual + ' 行' : '自动';
+                    return mode + '（最多 ' + maxRows + ' 行）';
+                });
+            const time = makeSlider('timeColumns', '时间分辨率（平移 b）', '整窗时间列数', 1, columns => {
+                const actual = !this.settings.timeColumns && !this.settings.timeStride && snapshot?.result.fullColumns;
+                const mode = columns ? '整窗 ' + columns + ' 列' : actual ? '自动 · 当前整窗 ' + actual + ' 列' : '自动';
+                const saved = !previewInput && this.settings.timeColumns > maxColumns ? '，已设 ' + this.settings.timeColumns + ' 列' : '';
+                return mode + '（最多 ' + maxColumns + ' 列' + saved + '）';
+            });
+            group.append(this.element('p', 'hint-text', '0 表示自动。时间列数用于整个采样窗口，例如 5000 个样点设为 1200 列，整窗就计算 1200 列。列数等于样点数时逐点计算。'));
+            group.append(this.element('p', 'hint-text', '频率行数或时间列数越多，需要处理的系数就越多。分辨率过高时，画面刷新可能变慢或卡顿。实时观察时可先减少频率行数。'));
+            this.refreshResolution = () => {
+                // Keep thumb positions mapped to the same settings throughout a drag as new samples arrive.
+                if (previewInput) return;
+                const view = this.widget.view, cwt = view?.wavelet, info = cwt?.resolutionInfo;
+                snapshot = cwt?.snapshot?.resolutionKey === cwt?.resolutionKey ? cwt?.snapshot : null;
+                maxColumns = info?.count ?? this.options.windowPoints ?? 5000;
+                maxRows = waveletMaxFrequencyRows(maxColumns);
+                frequency(maxRows, Math.min(maxRows, this.settings.frequencyRows));
+                const legacyStep = this.settings.timeStride;
+                const legacyColumns = legacyStep ? Math.ceil(maxColumns / Math.min(legacyStep, waveletTimeStrides(maxColumns)[0])) : 0;
+                time(maxColumns, Math.min(maxColumns, this.settings.timeColumns || legacyColumns));
+            };
+            this.refreshResolution();
         }
         histogram() {
             const settings = this.settings;
@@ -415,6 +531,10 @@
         panel.display.replaceChildren(); panel.bindings.replaceChildren();
         panel.widget = null; panel.channels = []; panel.onUpdate = null; panel.options = {};
     }
-    S.AnalysisInspector = { render, clear, closePickers: displayPane => panels.get(displayPane)?.closePickers() };
+    S.AnalysisInspector = { render, clear, closePickers: displayPane => panels.get(displayPane)?.closePickers(),
+        refreshWaveletResolution: (displayPane, widget) => {
+            const panel = panels.get(displayPane);
+            if (panel?.widget === widget) panel.refreshResolution?.();
+        } };
     if (typeof module !== 'undefined') module.exports = { AnalysisInspector: S.AnalysisInspector };
 })(globalThis);

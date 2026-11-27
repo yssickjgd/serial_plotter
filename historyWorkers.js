@@ -6,6 +6,39 @@
  * protocol-record-limit identifies one frame exceeding the caller's field budget.
  */
 const protocolStreamProgressBytes = 16384;
+const waveletCopySliceBytes = 4 * 1048576;
+const waveletParallelBatchBytes = 32 * 1048576;
+const waveletExpandedFftScratchBytes = 32 * 1048576;
+const waveletRowArrays = ['frequencies', 'magnitude', 'phase', 'sign', 'reference', 'blockMin', 'blockMax'];
+
+function* waveletRowBatches(grid, lanes, maxRows, inverseStride) {
+    const { rows, frequencyScale, minHz, maxHz, octaves } = grid;
+    if (inverseStride < 8 || rows > lanes * maxRows) {
+        const batchRows = Math.min(Math.ceil(rows / lanes), maxRows);
+        for (let rowStart = 0; rowStart < rows; rowStart += batchRows)
+            yield { rowStart, rowEnd: Math.min(rows, rowStart + batchRows) };
+        return;
+    }
+    // With the inverse FFT folded, the wider filters at high frequencies take a larger share of each row's work.
+    const lowest = minHz / maxHz, filterCost = Math.log2(inverseStride);
+    const costs = Float64Array.from({ length: rows }, (_, i) => {
+        const fraction = i / (rows - 1);
+        const frequency = frequencyScale === 'linear' ? lowest + fraction * (1 - lowest) : lowest * 2 ** (fraction * octaves);
+        return 1 + filterCost * frequency;
+    });
+    let rowStart = 0, remainingCost = costs.reduce((total, cost) => total + cost, 0);
+    for (let remaining = lanes; remaining > 1; remaining--) {
+        const minimum = Math.max(rowStart + 1, rows - (remaining - 1) * maxRows);
+        const maximum = Math.min(rowStart + maxRows, rows - remaining + 1);
+        const target = remainingCost / remaining;
+        let rowEnd = rowStart, cost = 0;
+        while (rowEnd < maximum && (rowEnd < minimum || cost < target)) cost += costs[rowEnd++];
+        yield { rowStart, rowEnd };
+        remainingCost -= cost;
+        rowStart = rowEnd;
+    }
+    yield { rowStart, rowEnd: rows };
+}
 
 function validateProtocolHistoryTask(task) {
     if (!task.schema || typeof task.schema !== 'object' || Array.isArray(task.schema))
@@ -134,7 +167,7 @@ function createHistoryTaskProcessor(task, dependencies) {
             result() { return result; }
         };
     }
-    if (task?.kind === 'wavelet') return dependencies.createWaveletProcessor(task);
+    if (task?.kind === 'wavelet') return dependencies.createWaveletProcessor(task, task.waveletRows);
     if (task?.kind === 'pairSpectrum') {
         let result;
         return {
@@ -341,8 +374,11 @@ function buildHistoryWorkerSource(dependencies = historyWorkerDependencies()) {
                     if (result.gain) transfer.push(result.gain.buffer);
                 }
                 if (data.task.kind === 'wavelet') {
-                    transfer.push(result.frequencies.buffer, result.magnitude.buffer);
+                    transfer.push(result.frequencies.buffer, result.magnitude.buffer, result.reference.buffer);
+                    if (result.positions) transfer.push(result.positions.buffer);
                     if (result.phase) transfer.push(result.phase.buffer);
+                    if (result.sign) transfer.push(result.sign.buffer);
+                    if (result.blockMin) transfer.push(result.blockMin.buffer, result.blockMax.buffer);
                 }
                 if (data.task.kind === 'protocol-decode') {
                     const buffers = new Set(), seen = new Set();
@@ -513,6 +549,113 @@ class HistoryWorkerPool {
         if (task.kind === 'text-prepare' && [task.before, task.following].some(parts => parts != null &&
             (!Array.isArray(parts) || parts.some(part => !(part?.bytes instanceof Uint8Array)))))
             return Promise.reject(new TypeError('History text context bytes must be Uint8Arrays'));
+        const options = { onProgress, signal };
+        const parallel = task.kind === 'wavelet' && this._tryParallelWavelet(task, signal);
+        return parallel || this._queueTask(task, options);
+    }
+
+    _tryParallelWavelet(task, signal) {
+        if (!this.available || this.parallelWavelet) return;
+        const active = this.workers.reduce((total, slot) => total + Number(Boolean(slot.job)), 0);
+        const free = (this.workerLimit ?? this.maxWorkers) - active - this.queue.length;
+        if (free < 2) return;
+        const { waveletResolutionGrid, waveletContextSamples, maxWaveletGridBytes, maxWaveletWindowPoints } = typeof module !== 'undefined'
+            ? require('./wavelet') : globalThis.SerialPlotter;
+        if (task.values.length > 2 * maxWaveletWindowPoints) return;
+        const { visibleLength = task.values.length } = task;
+        let grid;
+        try { grid = waveletResolutionGrid({ ...task, visibleLength }); }
+        catch { return; } // The existing processor reports input errors through the task promise.
+        const { rows, columns, bytes } = grid;
+        // Irregular column spacing requires a full inverse FFT per row, even for a modest output grid.
+        const inverseStride = Number.isInteger(grid.hop) && grid.fullColumns > 1 ? grid.hop & -grid.hop : 1;
+        const inverseSamples = rows * task.values.length / inverseStride;
+        if (rows < 64 || !columns || bytes > maxWaveletGridBytes ||
+            (rows * columns < 262144 && inverseSamples < 262144 && rows * task.values.length < 2097152)) return;
+        const denseGrid = bytes > 128 * 1048576;
+        const largeInverse = rows >= 256 && inverseSamples >= 1500000;
+        let lanes = Math.min(free, 4);
+        if (denseGrid || largeInverse) {
+            const { nextPow2 } = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
+            // Bound one worker's FFT workspace using the largest possible reflected run and fold alignment.
+            const reflection = Math.min(task.values.length - 1, waveletContextSamples(visibleLength) + 1);
+            const fftSize = nextPow2(2 * (task.values.length + 2 * reflection + inverseStride - 1));
+            const scratch = 2 * Float64Array.BYTES_PER_ELEMENT * (fftSize + fftSize / inverseStride);
+            // Keep capacity for incoming work when expanding the parallel transform.
+            const expanded = Math.min(denseGrid ? 8 : 6, Math.max(2, free - 1),
+                Math.floor(waveletExpandedFftScratchBytes / scratch));
+            lanes = denseGrid ? expanded : Math.max(lanes, expanded);
+            if (lanes < 2) return;
+        }
+        // Only the current batches duplicate coefficient storage.
+        const rowBytes = (bytes - (grid.positions?.byteLength ?? 0)) / rows + Float64Array.BYTES_PER_ELEMENT;
+        const maxRows = Math.max(1, Math.floor(waveletParallelBatchBytes / lanes / rowBytes));
+        return this._runParallelWavelet(task, rows, lanes, waveletRowBatches(grid, lanes, maxRows, inverseStride), signal);
+    }
+
+    async _runParallelWavelet(task, rows, lanes, batches, signal) {
+        this.parallelWavelet = true;
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        const check = () => {
+            if (this.disposed || controller.signal.aborted) throw historyAbortError();
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+        let output;
+        const append = async (part, rowStart) => {
+            const partRows = part.frequencies.length;
+            if (!output) {
+                output = { ...part, rowStart: 0 };
+                for (const key of waveletRowArrays) {
+                    const source = part[key];
+                    if (source) output[key] = new source.constructor(rows * (source.length / partRows));
+                }
+            }
+            output.peak = Math.max(output.peak, part.peak);
+            output.minMagnitude = Math.min(output.minMagnitude, part.minMagnitude);
+            let copiedBytes = 0;
+            for (const key of waveletRowArrays) {
+                const source = part[key];
+                if (!source) continue;
+                const destination = rowStart * (source.length / partRows);
+                const slice = waveletCopySliceBytes / source.BYTES_PER_ELEMENT;
+                for (let i = 0; i < source.length; i += slice) {
+                    const piece = source.subarray(i, Math.min(source.length, i + slice));
+                    if (copiedBytes + piece.byteLength > waveletCopySliceBytes) {
+                        await new Promise(resolve => this.schedule(resolve));
+                        check();
+                        copiedBytes = 0;
+                    }
+                    output[key].set(piece, destination + i);
+                    copiedBytes += piece.byteLength;
+                }
+            }
+        };
+        const work = async () => {
+            for (const waveletRows of batches) {
+                check();
+                const part = await this._queueTask({ ...task, waveletRows }, { signal: controller.signal });
+                check();
+                await append(part, waveletRows.rowStart);
+            }
+        };
+        const tasks = Array.from({ length: lanes }, work);
+        try {
+            await Promise.all(tasks);
+            check();
+            return output;
+        } catch (error) {
+            abort();
+            await Promise.allSettled(tasks);
+            throw error;
+        } finally {
+            signal?.removeEventListener('abort', abort);
+            this.parallelWavelet = false;
+        }
+    }
+
+    _queueTask(task, { onProgress, signal }) {
+        if (this.disposed || signal?.aborted) return Promise.reject(historyAbortError());
         return new Promise((resolve, reject) => {
             const reportProgress = task.kind === 'protocol-stream-check' && typeof onProgress === 'function';
             const job = { id: this.nextId++, task, resolve, reject, settled: false,
@@ -520,6 +663,14 @@ class HistoryWorkerPool {
             if (signal) {
                 const cancel = () => {
                     this.queue = this.queue.filter(queued => queued !== job);
+                    // A dense transform runs synchronously inside its worker. Release its grid before starting another.
+                    if (task.kind === 'wavelet' && (task.waveletRows || task.frequencyRows || task.timeColumns || task.timeStride)) {
+                        const index = this.workers.findIndex(worker => worker.job === job);
+                        if (index >= 0) {
+                            this._closeWorker(this.workers[index]);
+                            this.workers.splice(index, 1);
+                        }
+                    }
                     if (this.fallbackJob === job) {
                         this.cancelSchedule(this.fallbackTimer);
                         this.fallbackJob = this.fallbackTimer = null;
@@ -727,8 +878,12 @@ class HistoryWorkerPool {
             this.fallbackTimer = null;
             if (this.disposed || job.settled) return;
             try {
+                const wavelet = job.task.kind === 'wavelet';
+                const deadline = wavelet ? performance.now() + 6 : 0;
                 processor ??= createHistoryTaskProcessor(job.task, historyWorkerDependencies());
-                if (!processor.step(this.sliceBytes)) {
+                let complete = processor.step(wavelet ? 1 : this.sliceBytes);
+                while (!complete && wavelet && performance.now() < deadline) complete = processor.step(1);
+                if (!complete) {
                     this._reportProgress(job, processor.processedBytes);
                     if (!this.disposed) this.fallbackTimer = this.schedule(advance);
                     return;

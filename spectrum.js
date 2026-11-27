@@ -4,8 +4,51 @@ function nextPow2(n) {
     return value;
 }
 
-function fftInPlace(re, im) {
+function fftInPlace(re, im, plan, outputStages, repeat = 1) {
     const n = re.length;
+    // Wavelet scales can reuse the same permutation and stage twiddles for thousands of transforms.
+    if (plan) {
+        const { reverse, twiddles } = plan;
+        if (!plan.reordered) {
+            for (let a = 1; a < n; a++) {
+                const b = reverse[a];
+                if (a < b) {
+                    const real = re[a], imag = im[a];
+                    re[a] = re[b]; im[a] = im[b]; re[b] = real; im[b] = imag;
+                }
+            }
+        }
+        if (repeat > 1) {
+            for (let i = 0; i < n; i += repeat) {
+                const real = re[i], imag = im[i];
+                for (let j = i + 1; j < i + repeat; j++) { re[j] = real; im[j] = imag; }
+            }
+        }
+        for (let half = repeat, stage = Math.log2(repeat); half < n; half *= 2, stage++) {
+            const len = half * 2;
+            const needed = outputStages?.[stage];
+            if (needed) {
+                for (let start = 0; start < n; start += len) {
+                    for (let i = 0; i < needed.length; i++) {
+                        const j = needed[i], a = start + j, b = a + half, w = len + 2 * j;
+                        const wr = twiddles[w], wi = twiddles[w + 1], ur = re[a], ui = im[a];
+                        const vr = re[b] * wr - im[b] * wi, vi = re[b] * wi + im[b] * wr;
+                        re[a] = ur + vr; im[a] = ui + vi; re[b] = ur - vr; im[b] = ui - vi;
+                    }
+                }
+                continue;
+            }
+            for (let start = 0; start < n; start += len) {
+                for (let a = start, w = len; a < start + half; a++, w += 2) {
+                    const b = a + half, wr = twiddles[w], wi = twiddles[w + 1];
+                    const ur = re[a], ui = im[a];
+                    const vr = re[b] * wr - im[b] * wi, vi = re[b] * wi + im[b] * wr;
+                    re[a] = ur + vr; im[a] = ui + vi; re[b] = ur - vr; im[b] = ui - vi;
+                }
+            }
+        }
+        return;
+    }
     for (let i = 1, j = 0; i < n; i++) {
         let bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;

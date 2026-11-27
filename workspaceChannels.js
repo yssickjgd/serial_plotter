@@ -778,6 +778,9 @@
                     cursor.pending.push({ time, receivedAt: timestamp, values, origin: {
                         sourceId: lane.id, epoch: cursor.epoch, generation: cursor.generation, order, timestamp,
                         captureTime, alignedTime: time, missingBefore: sample.missingBefore, period: sample.period,
+                        sampleRate: lane.protocol ? undefined : cursor.timing.mode === 'fixed'
+                            ? cursor.timing.sampleRate : cursor.source.sampleRate?.rate,
+                        fixedSampleRate: !lane.protocol && cursor.timing.mode === 'fixed' ? cursor.timing.sampleRate : undefined,
                         breakBefore: cursor.retentionGap || sample.breakBefore || time !== sample.time, byteOffset,
                         endByte: frames.frameAt(index, { copyBytes: false })?.endByte
                     } });

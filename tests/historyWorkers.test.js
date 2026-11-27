@@ -62,9 +62,231 @@ test('wavelet jobs compute phase in a real worker and preserve the source sample
     const row = result.frequencies.findIndex(frequency => Math.abs(frequency - 64) < 2);
     const center = row * result.columns + 512 / result.hop;
     assert.ok(row >= 0 && Math.abs(result.phase[center] - .3) < .01);
-    assert.equal(result.frequencies.at(-1), 512);
+    assert.equal(result.frequencies.at(-1), 511);
     assert.ok(result.highBandStart > 0 && result.highBandStart < 512);
-    assert.ok(Number.isNaN(result.phase[(result.frequencies.length - 1) * result.columns + 512 / result.hop]));
+    const highTone = Float64Array.from({ length: 1024 }, (_, i) => Math.cos(2 * Math.PI * 480 * i / 1024 + .3));
+    const high = await pool.runTask({ kind: 'wavelet', values: highTone, basis: 'morlet', rate: 1024, timeStride: 5 });
+    const top = (high.frequencies.length - 1) * high.columns + 100;
+    assert.equal(high.hop, 5);
+    assert.ok(high.magnitude[top] > .5);
+    const angleError = high.phase[top] - (2 * Math.PI * 480 * 500 / 1024 + .3);
+    assert.ok(Math.abs(Math.atan2(Math.sin(angleError), Math.cos(angleError))) < .01);
+    const sparse = await pool.runTask({ kind: 'wavelet', values: highTone, basis: 'morlet', rate: 1024,
+        frequencyRows: 4, timeColumns: 10, first: 310, last: 370 });
+    assert.deepEqual([...sparse.positions], [227, 341, 455]);
+    assert.equal(sparse.fullColumns, 10);
+    assert.ok(sparse.magnitude[3 * sparse.columns + 1] > .5);
+    assert.equal(result.reference[(result.frequencies.length - 1) * result.columns], 1);
+    assert.equal(result.reference[center], 0);
+    const constant = new Float64Array(256).fill(12);
+    constant[127] = NaN;
+    const centered = await pool.runTask({ kind: 'wavelet', values: constant, basis: 'morlet', rate: 1024, removeDc: true });
+    assert.equal(centered.peak, 0);
+    assert.ok(centered.magnitude.some(value => value === 0));
+    assert.ok(centered.phase.every(Number.isNaN));
+    assert.equal(constant[0], 12);
+});
+
+test('dense wavelet jobs preserve the entire global grid across real worker shards', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { createWaveletProcessor } = require('../wavelet');
+    const workers = new Set();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4,
+        workerFactory: nodeWorkerFactory({ onStart: ({ threadId }) => workers.add(threadId) }) });
+    t.after(() => pool.dispose());
+    const values = Float64Array.from({ length: 1450 }, (_, i) => 20 + Math.cos(i / 9) + 0.5 * Math.sin(i / 27));
+    values[699] = NaN;
+    const task = { kind: 'wavelet', values, rate: 1500, basis: 'morse', cuts: [1100], removeDc: true,
+        visibleStart: 27, visibleLength: 1400, first: 9, last: 1390, timeColumns: 1313, frequencyRows: 820 };
+    const serial = createWaveletProcessor(task);
+    serial.step(Infinity);
+    const result = await pool.runTask(task);
+    assert.equal(workers.size, 2);
+    assert.equal(result.blockWidth, 128);
+    assert.deepEqual(result, serial.result());
+    assert.equal(values.length, 1450);
+    assert.ok(Number.isNaN(values[699]));
+});
+
+test('real wavelet workers transfer and assemble signed coefficients from every frequency shard', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { createWaveletProcessor } = require('../wavelet');
+    const workers = new Set();
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4,
+        workerFactory: nodeWorkerFactory({ onStart: ({ threadId }) => workers.add(threadId) }) });
+    t.after(() => pool.dispose());
+    const values = Float64Array.from({ length: 3072 }, (_, i) => Math.sin(i / 5));
+    const task = { kind: 'wavelet', values, rate: 1000, basis: 'gaus1', frequencyRows: 96, timeStride: 1 };
+    const serial = createWaveletProcessor(task);
+    serial.step(Infinity);
+    const result = await pool.runTask(task);
+    assert.equal(workers.size, 2);
+    assert.ok(result.sign.includes(-1) && result.sign.includes(1));
+    assert.deepEqual(result.sign, serial.result().sign);
+    assert.deepEqual(result.magnitude, serial.result().magnitude);
+});
+
+for (const { name, resolution, columns, workerCount } of [
+    { name: 'irregular wavelet columns parallelize the full inverse FFT workload',
+        resolution: { timeColumns: 1200 }, columns: 1200, workerCount: 2 },
+    { name: 'a comparable wavelet grid with a foldable stride uses one worker',
+        resolution: { timeStride: 4 }, columns: 1024, workerCount: 1 }
+]) {
+    test(name, async t => {
+        const { HistoryWorkerPool } = loadPool();
+        const dispatched = [];
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: 4,
+            workerFactory: nodeWorkerFactory({ onStart: ({ threadId }) => dispatched.push(threadId) }) });
+        t.after(() => pool.dispose());
+        const values = Float64Array.from({ length: 4096 }, (_, i) => Math.cos(i / 9));
+        const result = await pool.runTask({ kind: 'wavelet', values, rate: 1024, basis: 'morlet',
+            frequencyRows: 96, ...resolution });
+        assert.equal(result.frequencies.length, 96);
+        assert.equal(result.columns, columns);
+        assert.equal(dispatched.length, workerCount);
+        assert.equal(new Set(dispatched).size, workerCount);
+        assert.equal(pool.workerCount, workerCount);
+    });
+}
+
+for (const frequencyScale of ['log', 'linear']) {
+    test('folded ' + frequencyScale + ' wavelets give fewer rows to the wider high-frequency filters', async t => {
+        const { HistoryWorkerPool } = loadPool();
+        const ranges = [];
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: 6, workerFactory: () => ({
+            postMessage({ task }) { ranges.push(task.waveletRows); },
+            terminate() {}
+        }) });
+        t.after(() => pool.dispose());
+        const controller = new AbortController();
+        const pending = pool.runTask({ kind: 'wavelet', values: new Float64Array(32768), rate: 1024,
+            basis: 'morlet', frequencyRows: 192, timeStride: 64, frequencyScale }, { signal: controller.signal });
+        controller.abort();
+        await assert.rejects(pending, { name: 'AbortError' });
+        assert.equal(ranges.length, 4);
+        assert.deepEqual(ranges.map(range => range.rowStart), [0, ...ranges.slice(0, -1).map(range => range.rowEnd)]);
+        assert.equal(ranges.at(-1).rowEnd, 192);
+        assert.ok(ranges[0].rowEnd > ranges.at(-1).rowEnd - ranges.at(-1).rowStart);
+    });
+}
+
+for (const [frequencyRows, withContext, workerCount] of [[384, false, 6], [384, true, 6], [96, true, 4]]) {
+    const contextLabel = withContext ? 'with context' : 'without context';
+    test('Morse wavelets schedule ' + workerCount + ' workers for ' + frequencyRows + ' rows ' + contextLabel, async t => {
+        const { HistoryWorkerPool } = loadPool();
+        const { waveletContextSamples } = require('../wavelet');
+        const ranges = [];
+        const pool = new HistoryWorkerPool({ hardwareConcurrency: 11, workerFactory: () => ({
+            postMessage({ task }) { ranges.push(task.waveletRows); },
+            terminate() {}
+        }) });
+        t.after(() => pool.dispose());
+        const controller = new AbortController(), visibleLength = 5000;
+        const context = withContext ? waveletContextSamples(visibleLength) : 0;
+        const task = { kind: 'wavelet', values: new Float64Array(visibleLength + 2 * context),
+            visibleStart: context, visibleLength, rate: 1000, basis: 'morse', frequencyRows, timeColumns: 1200 };
+        const pending = pool.runTask(task, { signal: controller.signal });
+        controller.abort();
+        await assert.rejects(pending, { name: 'AbortError' });
+        assert.equal(ranges.length, workerCount);
+        assert.deepEqual(ranges.map(range => range.rowStart), [0, ...ranges.slice(0, -1).map(range => range.rowEnd)]);
+        assert.equal(ranges.at(-1).rowEnd, frequencyRows);
+    });
+}
+
+for (const { name, visibleLength, frequencyRows, timeColumns, withContext, lanes } of [
+    { name: 'a wide dense wavelet spreads work across available workers while reserving one for FFT',
+        visibleLength: 8192, frequencyRows: 4096, timeColumns: 5000, withContext: false, lanes: 8 },
+    { name: 'a long dense wavelet limits workers when each transform needs more FFT scratch memory',
+        visibleLength: 65536, frequencyRows: 256, timeColumns: 65536, withContext: true, lanes: 2 }
+]) test(name, async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { waveletResolutionGrid, waveletContextSamples } = require('../wavelet');
+    const workers = [];
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 11, workerFactory: () => {
+        const worker = { postMessage(message) { this.message = message; }, terminate() { this.terminated = true; } };
+        workers.push(worker);
+        return worker;
+    } });
+    t.after(() => pool.dispose());
+    const controller = new AbortController();
+    const context = withContext ? waveletContextSamples(visibleLength) : 0;
+    const task = { kind: 'wavelet', values: new Float64Array(visibleLength + 2 * context), basis: 'morlet', rate: 1024,
+        visibleStart: context, visibleLength, frequencyRows, timeColumns };
+    const grid = waveletResolutionGrid(task);
+    const pending = pool.runTask(task, { signal: controller.signal });
+    const cwtWorkers = workers.slice();
+    const fft = pool.runTask({ kind: 'fft', values: Float64Array.of(1, 0, -1, 0) });
+    const fftWorker = workers.at(-1);
+    fftWorker.onmessage({ data: { id: fftWorker.message.id, result: 'fft' } });
+    assert.equal(await fft, 'fft');
+    controller.abort();
+    await assert.rejects(pending, { name: 'AbortError' });
+    assert.equal(cwtWorkers.length, lanes);
+    const dispatched = cwtWorkers.map(({ message }) => message.task.waveletRows);
+    assert.deepEqual(dispatched.map(range => range.rowStart), [0, ...dispatched.slice(0, -1).map(range => range.rowEnd)]);
+    const bytesPerRow = (grid.bytes - grid.positions.byteLength) / grid.rows + Float64Array.BYTES_PER_ELEMENT;
+    assert.ok(dispatched.at(-1).rowEnd * bytesPerRow <= 32 * 1048576);
+    assert.ok(cwtWorkers.every(worker => worker.terminated));
+    assert.equal(pool.workerCount, 1);
+});
+
+test('dense wavelets use one worker when the other slot is busy', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const workers = [];
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: () => {
+        const worker = { postMessage(message) { this.message = message; }, terminate() {} };
+        workers.push(worker);
+        return worker;
+    } });
+    t.after(() => pool.dispose());
+    const fft = pool.runTask({ kind: 'fft', values: Float64Array.of(1, 0, -1, 0) });
+    const wavelet = pool.runTask({ kind: 'wavelet', values: new Float64Array(2048), basis: 'morlet', rate: 1024,
+        frequencyRows: 1024, timeColumns: 1024 });
+    const [activeFft, activeWavelet] = workers;
+    const range = activeWavelet.message.task.waveletRows;
+    activeFft.onmessage({ data: { id: activeFft.message.id, result: 'fft' } });
+    activeWavelet.onmessage({ data: { id: activeWavelet.message.id, result: 'wavelet' } });
+    assert.deepEqual(await Promise.all([fft, wavelet]), ['fft', 'wavelet']);
+    assert.equal(range, undefined);
+});
+
+test('a worker crash falls back to sliced computation for all wavelet rows', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { createWaveletProcessor } = require('../wavelet');
+    let slices = 0;
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 4, workerFactory: nodeWorkerFactory({ crash: true }),
+        schedule: callback => { slices++; return setImmediate(callback); }, cancelSchedule: clearImmediate });
+    t.after(() => pool.dispose());
+    const values = Float64Array.from({ length: 4096 }, (_, i) => Math.sin(i / 10));
+    const task = { kind: 'wavelet', values, rate: 1024, basis: 'mexicanHat', timeStride: 1, frequencyRows: 64 };
+    const serial = createWaveletProcessor(task);
+    serial.step(Infinity);
+    const result = await pool.runTask(task);
+    assert.equal(pool.workerCount, 0);
+    assert.ok(slices > 1);
+    assert.deepEqual(result, serial.result());
+    assert.equal(values.length, 4096);
+});
+
+test('wavelet fallback can compute several rows in one scheduled slice', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const { createWaveletProcessor } = require('../wavelet');
+    let slices = 0;
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 2,
+        schedule: callback => { slices++; return setImmediate(callback); }, cancelSchedule: clearImmediate });
+    t.after(() => pool.dispose());
+    const values = Float64Array.from({ length: 2048 }, (_, i) => Math.cos(i / 20));
+    const task = { kind: 'wavelet', values, rate: 1024, basis: 'morlet', frequencyRows: 128, timeColumns: 512 };
+    const serial = createWaveletProcessor(task);
+    serial.step(Infinity);
+    let tick = 0;
+    t.mock.method(performance, 'now', () => tick++);
+    const pending = pool.runTask(task);
+    assert.equal(slices, 1);
+    const result = await pending;
+    assert.ok(slices > 1 && slices < task.frequencyRows);
+    assert.deepEqual(result, serial.result());
 });
 
 test('real workers migrate legacy protocol words lexically and execute strict uppercase schemas', async t => {
@@ -244,6 +466,29 @@ test('parallel export preserves CSV calibration and the chronological RX/TX Hex 
     assert.equal(await collect(captureHexChunksInWorkers(rx, tx, pool, options, 3)),
         [...captureExportChunks(rx, tx, options)].join(''));
     assert.equal(pool.peakWorkers, 2);
+});
+
+test('cancelling a manual-resolution wavelet releases its worker for the next viewport', async t => {
+    const { HistoryWorkerPool } = loadPool();
+    const workers = [];
+    const pool = new HistoryWorkerPool({ hardwareConcurrency: 3, workerFactory: () => {
+        const worker = { postMessage(message) { this.message = message; }, terminate() { this.terminated = true; } };
+        workers.push(worker);
+        return worker;
+    } });
+    t.after(() => pool.dispose());
+    const task = { kind: 'wavelet', values: new Float64Array(128), rate: 1000, basis: 'morse',
+        timeColumns: 80 };
+    const abort = new AbortController();
+    const old = pool.runTask(task, { signal: abort.signal });
+    const next = pool.runTask({ ...task, timeColumns: 37 });
+    assert.equal(workers.length, 1);
+    abort.abort();
+    await assert.rejects(old, { name: 'AbortError' });
+    assert.equal(workers[0].terminated, true);
+    assert.equal(workers[1].message.task.timeColumns, 37);
+    workers[1].onmessage({ data: { id: workers[1].message.id, result: 'completed' } });
+    assert.equal(await next, 'completed');
 });
 
 test('idle history workers retire individually and clearing FFT cache permits a fresh snapshot', async t => {

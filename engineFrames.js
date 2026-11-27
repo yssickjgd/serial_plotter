@@ -67,7 +67,18 @@
             for (const [channel, value] of values) {
                 if (!Number.isInteger(channel) || channel < 0 || channel >= this.rawChannelCount) throw new RangeError('字段映射超出原始通道目录');
                 const events = this.events.get(channel) ?? [];
-                events.push({ timestamp, traceTime, value: Number.isFinite(value) ? value : NaN, origin });
+                const previous = events.at(-1);
+                const sampleOrdinal = (previous?.sampleOrdinal ?? 0) + Number(Boolean(origin));
+                let sampleSection = previous?.sampleSection;
+                if (origin && (!sampleSection || sampleSection.fixedRate !== origin.fixedSampleRate)) {
+                    // Share an ordinal-to-seconds anchor across all samples at this configured rate.
+                    const first = sampleOrdinal - 1;
+                    const previousRate = sampleSection?.fixedRate || previous?.origin?.sampleRate || origin.sampleRate;
+                    const time = sampleSection && previousRate > 0
+                        ? sampleSection.time + (first - sampleSection.first) / previousRate : 0;
+                    sampleSection = { first, time, fixedRate: origin.fixedSampleRate };
+                }
+                events.push({ timestamp, traceTime, value: Number.isFinite(value) ? value : NaN, origin, sampleOrdinal, sampleSection });
                 this.events.set(channel, events);
             }
         }

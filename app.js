@@ -1591,7 +1591,7 @@ async function startSerialPlotterApplication() {
             : format === 'text' ? '按控件的字符集和记录边界导出。' : '导出该控件采用的通道或字段。';
         el('widget-export-range-summary').textContent = !selected ? '' : format === 'svg'
             ? '保存点击导出时的图形、刻度和坐标范围。'
-            : format === 'wavelet-csv' ? '导出当前分析结果的时间、频率、幅度及相位，缺失系数留空。'
+            : format === 'wavelet-csv' ? '导出时间、频率、幅度及系数状态。实值小波附带有符号系数，复小波附带相位。缺失系数留空。'
             : hint + '\n' + exportTimeRange([selected.source.frames]);
         status('widget-export-source-status', issue);
     }
@@ -1718,8 +1718,9 @@ async function startSerialPlotterApplication() {
             }, () => [svg], svg.length * 2);
         }
         if (format === 'wavelet-csv') {
-            const snapshot = active.view.wavelet.snapshot;
-            if (!snapshot?.result.magnitude.some(Number.isFinite)) {
+            const view = active.view;
+            const snapshot = view.wavelet.displaySnapshot(view.zoom?.x ? view.range.slice(0, 2) : null);
+            if (!S.WaveletPlot.hasWaveletCoefficients(snapshot?.result)) {
                 status('widget-export-source-status', '当前没有可导出的小波系数。');
                 return false;
             }

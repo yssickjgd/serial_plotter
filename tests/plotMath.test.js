@@ -9,6 +9,13 @@ test('spectral pixel buckets retain gaps even when both segments occupy one pixe
 const { axisFraction, axisValueAtFraction, bucketAxisExtrema,
     bucketExtrema, csvField } = require('../plotMath');
 
+test('finite axis endpoints spanning more than the largest float retain their midpoint', () => {
+    const limit = Number.MAX_VALUE;
+    assert.equal(axisFraction(0, -limit, limit), .5);
+    assert.equal(axisValueAtFraction(.5, -limit, limit), 0);
+    assert.equal(axisValueAtFraction(1, -limit, limit), limit);
+});
+
 test('rectangle selection maps screen pixels to sample and Y ranges', () => {
     const { zoomRectToBounds } = require('../plotMath');
     const result = zoomRectToBounds({ x0: 200, y0: 300, x1: 600, y1: 100,

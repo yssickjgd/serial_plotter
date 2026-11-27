@@ -175,6 +175,121 @@ test('XY overlap slider previews whole percentages and stays in sync with typed 
     assert.match(f.display.querySelector('[role="alert"]').textContent, /0 至 75/);
 });
 
+test('wavelet inspector offers each family and switches coefficient views by basis', t => {
+    const f = inspector(t, 'wavelet', { basis: 'morlet', viewMode: 'phase' });
+    const modes = () => Array.from(f.get('wavelet-viewMode').options)
+        .filter(option => !option.disabled).map(option => option.value);
+    assert.deepEqual(new Set(Array.from(f.get('wavelet-basis').options, option => option.value)),
+        new Set(['morlet', 'morse', 'shannon', 'mexicanHat', 'haar', 'gaus1', 'db4', 'sym4', 'coif2', 'meyer']));
+    assert.deepEqual(modes(), ['magnitude', 'phase']);
+    f.change('wavelet-basis', 'haar');
+    assert.equal(f.widget.settings.viewMode, 'magnitude');
+    assert.deepEqual(modes(), ['magnitude', 'signed']);
+    f.change('wavelet-viewMode', 'signed');
+    f.change('wavelet-basis', 'db4');
+    assert.equal(f.widget.settings.viewMode, 'signed');
+    assert.match(f.get('wavelet-viewMode-hint').textContent, /互补色/);
+    assert.equal(f.get('wavelet-phaseUnit'), null);
+    f.change('wavelet-basis', 'shannon');
+    assert.equal(f.widget.settings.viewMode, 'magnitude');
+    assert.deepEqual(modes(), ['magnitude', 'phase']);
+    f.change('wavelet-viewMode', 'phase');
+    assert.ok(f.get('wavelet-phaseUnit'));
+});
+
+test('wavelet axes keep waveform precision, scale and range order in all coefficient views', t => {
+    const f = inspector(t, 'wavelet', { basis: 'morlet' });
+    const fields = member => {
+        const section = f.get('wavelet-' + member).closest('.control-group');
+        return Array.from(section.querySelectorAll('label'), label => label.getAttribute('for').slice('wavelet-'.length));
+    };
+    const x = ['xPrecisionMode', 'xSignificantDigits', 'xNumberNotation', 'freezeXOnZoom'];
+    const y = ['yPrecisionMode', 'ySignificantDigits', 'yNumberNotation', 'frequencyScale', 'yAuto'];
+    assert.deepEqual(fields('xNumberNotation'), x);
+    assert.deepEqual(fields('frequencyScale'), y);
+    f.change('wavelet-viewMode', 'phase');
+    f.change('wavelet-yAuto', 'manual');
+    assert.deepEqual(fields('viewMode'), ['viewMode', 'showEdgeHatching', 'phaseUnit']);
+    assert.deepEqual(fields('frequencyScale'), [...y, 'yMin', 'yMax']);
+    assert.equal(f.get('wavelet-frequencyScale').parentElement.querySelector('label').textContent, '纵轴刻度');
+    assert.equal(f.get('wavelet-phaseUnit').parentElement.querySelector('label').textContent, '数值单位');
+    f.change('wavelet-phaseUnit', 'degrees');
+    assert.equal(f.widget.settings.phaseUnit, 'degrees');
+    f.change('wavelet-frequencyScale', 'linear');
+    f.change('wavelet-viewMode', 'magnitude');
+    assert.deepEqual(fields('frequencyScale'), [...y, 'yMin', 'yMax']);
+    assert.equal(f.get('wavelet-frequencyScale').value, 'linear');
+    assert.equal(f.get('wavelet-phaseUnit'), null);
+    f.change('wavelet-viewMode', 'phase');
+    assert.equal(f.get('wavelet-phaseUnit').value, 'degrees');
+    f.change('wavelet-basis', 'haar');
+    f.change('wavelet-viewMode', 'signed');
+    assert.deepEqual(fields('xNumberNotation'), x);
+    assert.deepEqual(fields('frequencyScale'), [...y, 'yMin', 'yMax']);
+});
+
+test('wavelet row and column counts preview both sliders and commit once', t => {
+    const f = inspector(t, 'wavelet', {}, [], { windowPoints: 64 });
+    const slider = key => f.get('wavelet-' + key), number = key => f.get('wavelet-' + key + '-number');
+    const enter = key => number(key).dispatchEvent({ type: 'keydown', key: 'Enter' });
+    const type = (key, value) => {
+        const field = number(key);
+        field.value = value; field.dispatchEvent({ type: 'input' });
+    };
+    assert.equal(number('frequencyRows').value, '0');
+    number('frequencyRows').focus();
+    type('frequencyRows', '12');
+    assert.equal(slider('frequencyRows').value, '12');
+    assert.equal(f.widget.settings.frequencyRows, 0);
+    enter('frequencyRows');
+    assert.equal(f.widget.settings.frequencyRows, 12);
+    const afterEnter = f.widget.settings;
+    assert.equal(f.document.activeElement, number('frequencyRows'));
+    number('frequencyRows').dispatchEvent({ type: 'change' });
+    number('frequencyRows').dispatchEvent({ type: 'blur' });
+    assert.equal(f.widget.settings, afterEnter);
+    for (const invalid of ['1', '-2', '1.5', '', '100']) {
+        type('frequencyRows', invalid); enter('frequencyRows');
+        assert.equal(f.widget.settings.frequencyRows, 12);
+        assert.equal(f.display.querySelector('[role="alert"]').hidden, false);
+    }
+    type('timeColumns', '37');
+    assert.equal(slider('timeColumns').value, '37');
+    assert.equal(f.widget.settings.timeColumns, 0);
+    number('timeColumns').dispatchEvent({ type: 'pointerleave' });
+    assert.equal(f.widget.settings.timeColumns, 37);
+    for (const position of ['1', '63', '64', '0']) {
+        slider('timeColumns').value = position;
+        slider('timeColumns').dispatchEvent({ type: 'input' });
+        assert.equal(number('timeColumns').value, position);
+    }
+    slider('timeColumns').dispatchEvent({ type: 'change' });
+    assert.equal(f.widget.settings.timeColumns, 0);
+    type('timeColumns', '5');
+    number('timeColumns').dispatchEvent({ type: 'blur' });
+    assert.equal(f.widget.settings.timeColumns, 5);
+    type('timeColumns', '65');
+    enter('timeColumns');
+    assert.equal(f.widget.settings.timeColumns, 5);
+});
+
+test('legacy wavelet steps keep their sampling grid until the column setting is edited', t => {
+    const f = inspector(t, 'wavelet', { timeStride: 3 }, [], { windowPoints: 5000 });
+    const count = () => f.get('wavelet-timeColumns-number').value;
+    assert.equal(count(), '1667');
+    f.change('wavelet-frequencyRows-number', '24');
+    assert.equal(count(), '1667');
+    assert.equal(f.widget.settings.timeStride, 3);
+    f.change('wavelet-timeColumns-number', '1200');
+    assert.equal(f.widget.settings.timeStride, 0);
+    assert.equal(f.widget.settings.timeColumns, 1200);
+    const g = inspector(t, 'wavelet', { timeStride: 100 }, [], { windowPoints: 64 });
+    assert.equal(g.get('wavelet-timeColumns-number').value, '2');
+    g.change('wavelet-timeColumns-number', '0');
+    assert.equal(g.widget.settings.timeStride, 0);
+    assert.equal(g.widget.settings.timeColumns, 0);
+});
+
 test('XY spectral modes keep independent manual bounds and convert phase bounds on unit changes', t => {
     const f = inspector(t, 'xy', { viewMode: 'phase', phaseUnit: 'degrees', phaseYAuto: false, phaseYMin: 45, phaseYMax: 180 });
     assert.equal(f.get('xy-phaseYMin')?.value, '45');

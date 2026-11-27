@@ -1102,6 +1102,7 @@
     <script src="frameBuffer.js"></script>
     <script src="frameNavigation.js"></script>
     <script src="plotMath.js"></script>
+    <script src="plotViewport.js"></script>
     <script src="channelTransform.js"></script>
     <script src="reservedNames.js"></script>
     <script src="channelSymbols.js"></script>
@@ -1109,6 +1110,7 @@
     <script src="channelAutocomplete.js"></script>
     <script src="csvExport.js"></script>
     <script src="spectrum.js"></script>
+    <script src="waveletFamilies.js"></script>
     <script src="wavelet.js"></script>
     <script src="pairSpectrum.js"></script>
     <script src="textCodec.js"></script>
@@ -1194,9 +1196,16 @@
             <span class="monitor-title"></span><span data-role="stat-plot-fps">绘图帧率: 0 FPS</span>
         </div>
         <svg class="analysis-plot widget-content-focus" data-role="analysis-svg" role="img" tabindex="0"></svg>
+        <div class="plot-y-scrollbar-wrap" data-role="plot-y-scrollbar-wrap" hidden>
+            <div class="plot-y-scrollbar-thumb" data-role="plot-y-scrollbar-thumb"></div>
+        </div>
+        <div class="plot-scrollbar-wrap" data-role="plot-scrollbar-wrap">
+            <div class="plot-scrollbar-thumb" data-role="plot-scrollbar-thumb"></div>
+        </div>
     </div></template>
     <script src="analysisSettings.js"></script>
     <script src="analysisInspector.js"></script>
+    <script src="analysisSamples.js"></script>
     <script src="waveletPlot.js"></script>
     <script src="analysisPlot.js"></script>
     <template id="pose-widget-template"><div class="pose-panel box-border workspace-panel" data-role="pose-panel">

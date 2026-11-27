@@ -191,19 +191,33 @@ class WidgetController {
                 const timing = this.getWorkspaceCapture()?.timebases?.[widget.settings.connectionSource];
                 const timeline = this.getSourcePlotTimeline(widget.source), frames = widget.source.frames;
                 const ordinal = index >= 0 ? frames.frameOrdinalAt?.(index) : null;
-                const section = timeline?.valid && ordinal != null ? timeline.sections.findLast(entry => entry.from <= ordinal) : null;
+                const sectionIndex = timeline?.valid && ordinal != null ? timeline.sections.findLastIndex(entry => entry.from <= ordinal) : -1;
+                const section = sectionIndex >= 0 ? timeline.sections[sectionIndex] : null;
                 const estimate = widget.source.sampleRate?.rate ?? 0;
-                if (section) return { rate: section.rate || estimate, from: section.from - frames.frameOrdinalAt(0),
-                    time: timeline.timestampAt(index) / 1000 };
+                if (section) {
+                    const first = frames.frameOrdinalAt(0);
+                    const rate = section.rate || estimate;
+                    const time = type === 'wavelet' && rate > 0 ? section.start / 1000 + (ordinal - section.from) / rate
+                        : timeline.timestampAt(index) / 1000;
+                    return { rate, from: section.from - first,
+                        until: (timeline.sections[sectionIndex + 1]?.from ?? Infinity) - first, time };
+                }
                 const origin = frames.originTimestamp ?? frames.timestampAt?.(0);
                 const project = this.projectReceiveTime;
                 const timestamp = frames.timestampAt?.(index);
                 const elapsed = (project ? project(timestamp) - project(origin) : timestamp - origin) / 1000;
                 const fixed = timing?.mode === 'fixed';
-                return { rate: fixed ? timing.sampleRate : estimate, time: fixed && ordinal != null
-                    ? ordinal / timing.sampleRate : elapsed };
+                const rate = fixed ? timing.sampleRate : estimate;
+                return { rate, time: ordinal != null && rate > 0 && (fixed || type === 'wavelet') ? ordinal / rate : elapsed };
             }, type === 'wavelet' || type === 'xy' && this.service.workerPool.available ? this.service.workerPool : null,
-            index => this.channelColor(index, this.globalsFor(widget.capture).channelColors));
+            index => this.channelColor(index, this.globalsFor(widget.capture).channelColors), {
+                scrollWrap: refs['plot-scrollbar-wrap'], scrollThumb: refs['plot-scrollbar-thumb'],
+                yScrollWrap: refs['plot-y-scrollbar-wrap'], yScrollThumb: refs['plot-y-scrollbar-thumb']
+            });
+            if (type === 'wavelet') widget.view.onWaveletResolutionInfo = () => {
+                if (this.active === widget) SerialPlotter.AnalysisInspector.refreshWaveletResolution(
+                    this.element('tab-analysis-display'), widget);
+            };
         } else widget.view = new SerialPlotter.MonitorView(refs['data-log'], source.frames, {
             decodeCache: this.decodeCache, txFrames: capture.txFrames, getSourceErrors: () => widget.source.errors,
             getPendingFrame: () => widget.source.rebuilding ? null : widget.source.parser.pendingIdleFrame?.(),

@@ -9,6 +9,22 @@ const { bootArrayApplication } = require('./helpers/widgetAppHarness');
 
 const histogram = input => new HistogramWindow(AnalysisSettings.normalize('histogram', input));
 
+test('only the pointer that started an SVG box zoom can finish it, and pointer cancellation discards it', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const view = new AnalysisPlot(svg, 'xy', framesWith([[0, 1], [1, 2], [2, 1]]));
+    t.after(() => view.dispose()); view.renderNow();
+    const send = (type, pointerId, clientX, clientY) =>
+        svg.dispatchEvent({ type, button: 0, pointerId, clientX, clientY });
+    send('pointerdown', 1, 250, 175);
+    send('pointerdown', 2, 300, 200); send('pointerup', 2, 400, 275);
+    assert.ok(view.drag, 'the first pointer still owns its selection');
+    assert.ok(!view.zoom);
+    send('pointercancel', 1, 400, 275); send('pointerup', 1, 400, 275);
+    assert.ok(!view.drag);
+    assert.ok(!view.zoom);
+});
+
 test('XY spectrum modes plot paired gain, phase and coherence at a shared frequency and export the active mode', t => {
     const env = bootArrayApplication(); t.after(() => env.app.dispose());
     const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -100,10 +116,11 @@ test('switching phase units preserves the current X and Y zoom', t => {
     const view = new AnalysisPlot(svg, 'xy', frames, settings, 64);
     t.after(() => view.dispose());
     view.renderNow();
-    view.applyZoom([1, 6, -1, 1]); view.renderNow();
-    assert.deepEqual(view.range, [1, 6, -1, 1]);
+    const x = [Math.log10(2), Math.log10(6)];
+    view.applyZoom([...x, -1, 1]); view.renderNow();
+    assert.deepEqual(view.range, [...x, -1, 1]);
     view.setSettings({ ...settings, phaseUnit: 'degrees' }); view.renderNow();
-    assert.deepEqual(view.range, [1, 6, -180 / Math.PI, 180 / Math.PI]);
+    assert.deepEqual(view.range, [...x, -180 / Math.PI, 180 / Math.PI]);
     svg.dispatchEvent({ type: 'contextmenu' }); view.renderNow();
     assert.deepEqual(view.range.slice(2), [-180, 180]);
 });
@@ -588,6 +605,32 @@ test('same-source XY pairs native packet identities at duplicated timestamps, pr
     const nativeHist = histogram({ values: [-1, 0, 1] });
     nativeHist.update(ws.numericSource.frames, 0, 5, { first: 0, last: 4 });
     assert.deepEqual([...nativeHist.counts], [3, 1, 1]);
+});
+
+test('the shared scrollbars pan zoomed XY ranges on both axes', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const widget = env.app.widgets.create({ type: 'xy', settings: { equalAspect: false, xAuto: false, yAuto: false } });
+    const { view, refs } = widget, svg = view.svg;
+    const x = refs['plot-scrollbar-wrap'], y = refs['plot-y-scrollbar-wrap'];
+    view.renderNow();
+    assert.equal(y.hidden, true);
+    const { left, right, top, bottom } = view.area;
+    for (const clientX of [(left + right) / 2, right + 8]) {
+        svg.dispatchEvent({ type: 'wheel', clientX, clientY: (top + bottom) / 2, deltaY: -120 });
+        view.renderNow();
+    }
+    assert.ok(parseFloat(refs['plot-scrollbar-thumb'].style.width) < x.clientWidth);
+    assert.equal(y.hidden, false);
+    const range = [...view.range];
+    refs['plot-scrollbar-thumb'].dispatchEvent({ type: 'mousedown', clientX: 10 });
+    env.document.dispatchEvent({ type: 'mousemove', clientX: 30, buttons: 1 });
+    env.document.dispatchEvent({ type: 'mouseup' });
+    refs['plot-y-scrollbar-thumb'].dispatchEvent({ type: 'mousedown', clientY: 10 });
+    env.document.dispatchEvent({ type: 'mousemove', clientY: 30, buttons: 1 });
+    env.document.dispatchEvent({ type: 'mouseup' });
+    view.renderNow();
+    assert.ok(view.range[0] > range[0]);
+    assert.ok(view.range[2] < range[2]);
 });
 test('cross-source XY and separate protocol messages share grid time, and raw histograms skip held grid copies', () => {
     const ws = workspace();

@@ -1059,9 +1059,10 @@ input.channel-name-input {
 
 .analysis-panel { display: flex; flex-direction: column; overflow: hidden; background: #111; }
 .analysis-plot { display: block; width: 100%; flex: 1 1 0; min-width: 0; min-height: 0; touch-action: none; user-select: none; }
-.fft-overlap-controls { display: grid; grid-template-columns: minmax(0, 1fr) 4.5em; align-items: center; gap: var(--ui-group-gap); }
-.fft-overlap-controls input { width: 100%; min-width: 0; margin: 0; }
-.fft-overlap-controls input[type="range"] { accent-color: var(--primary); cursor: pointer; }
+.range-number-controls { display: grid; grid-template-columns: minmax(0, 1fr) var(--number-width, 4.5em); align-items: center; gap: var(--ui-group-gap); }
+.range-number-controls input { width: 100%; min-width: 0; margin: 0; }
+.range-number-controls input[type="range"] { accent-color: var(--primary); cursor: pointer; }
+.wavelet-resolution-controls { --number-width: 6em; }
 .xy-trace-actions, .histogram-actions { display: flex; align-items: center; gap: var(--ui-group-gap); white-space: nowrap; }
 :is(.xy-trace-actions, .histogram-actions) .input-group { flex-direction: row; align-items: center; }
 :is(.xy-trace-actions, .histogram-actions) input[type="color"] { width: 26px; height: var(--ui-control-height); padding: 2px; cursor: pointer; }

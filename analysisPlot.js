@@ -5,6 +5,7 @@
     const navigation = typeof module !== 'undefined' ? require('./frameNavigation') : S.FrameNavigation;
     const { pairSpectrum, countSpectrumBlocks } = typeof module !== 'undefined' ? require('./pairSpectrum') : S;
     const wavelet = typeof module !== 'undefined' ? require('./waveletPlot') : S.WaveletPlot;
+    const { PlotViewport, PlotScrollbar, panPlotAxis } = typeof module !== 'undefined' ? require('./plotViewport') : S;
     const NS = 'http://www.w3.org/2000/svg';
     const background = '#111111', foreground = '#d1d5db', accent = '#38bdf8';
     let nextClip = 0;
@@ -24,7 +25,7 @@
     const eventBound = (events, time, inclusive = false) => boundary(events.length,
         i => inclusive ? eventTime(events[i]) <= time : eventTime(events[i]) < time);
     const { formatDisplayNumber: numberLabel, maxAxisSignificantDigits, readAxisNumberFormat, axisNumberFieldNames,
-        formatAxisValue, customAxisNumberFormat, plotWheelAxis, zoomAxisBounds, positiveLogBounds, adaptiveLogScale,
+        formatAxisValue, customAxisNumberFormat, plotSelectionFractions, positiveLogBounds, adaptiveLogScale,
         axisFraction, axisValueAtFraction, layoutAxisTickLabels, formatPlotAxisCoordinate } = typeof module !== 'undefined' ? require('./plotMath') : S;
     const boundLabel = (value, format, digits) => value === Infinity ? '+∞' : value === -Infinity ? '−∞' : formatAxisValue(value, format, digits);
     const labelWidth = text => Array.from(text).reduce((width, c) => width + (c.charCodeAt(0) > 127 ? 12 : 7), 0);
@@ -384,6 +385,8 @@
         return el;
     }
     const pixel = n => Math.round(clamp(n, -1e8, 1e8) * 10) / 10;
+    const tilePath = ([x, y, right, bottom]) => 'M' + pixel(x) + ' ' + pixel(y) +
+        'H' + pixel(right) + 'V' + pixel(bottom) + 'H' + pixel(x) + 'Z';
     const dot = (x, y, r) => 'M' + pixel(x - r) + ' ' + pixel(y) + 'a' + r + ' ' + r + ' 0 1 0 ' +
         (2 * r) + ' 0a' + r + ' ' + r + ' 0 1 0 ' + (-2 * r) + ' 0';
     function path(parent, d, attrs) { if (d.length) node(parent, 'path', { d: d.join(''), ...attrs }); }
@@ -393,7 +396,7 @@
 
     class AnalysisPlot {
         constructor(svg, type, frames, settings = {}, windowPoints = 5000, getSpectrumClock = () => ({ rate: 0 }), spectrumPool = null,
-            getChannelColor = () => null) {
+            getChannelColor = () => null, scrollElements = {}) {
             this.svg = svg; this.type = type; this.frames = frames; this.win = svg.ownerDocument.defaultView ?? root;
             this.visible = true; this.completedDraws = 0; this.cleanups = []; this.historyOrdinal = null;
             this.clipId = 'analysis-clip-' + ++nextClip;
@@ -401,20 +404,43 @@
             this.getSpectrumClock = getSpectrumClock;
             this.getChannelColor = getChannelColor;
             this.spectrumPool = spectrumPool; this.spectra = [];
-            if (type === 'wavelet') this.wavelet = new wavelet.WaveletWindow(spectrumPool, () => this.invalidateData());
+            const listen = (element, event, callback) => {
+                element.addEventListener(event, callback);
+                this.cleanups.push(() => element.removeEventListener?.(event, callback));
+            };
+            const bars = { document: svg.ownerDocument, listen, displayScale: () => this.displayScale(),
+                enabled: () => this.visible && !this.disposed };
+            this.xScrollBar = new PlotScrollbar({ ...bars, track: scrollElements.scrollWrap, thumb: scrollElements.scrollThumb,
+                viewport: () => ({ base: this.horizontalZoomLimits(), view: this.scrollbarXView() }),
+                onPan: fraction => this.panScrollbar('x', fraction) });
+            this.yScrollBar = new PlotScrollbar({ ...bars, reverse: true, track: scrollElements.yScrollWrap, thumb: scrollElements.yScrollThumb,
+                viewport: () => ({ base: this.yZoomBase, view: this.zoom?.y, scale: this.yZoomScale }),
+                onPan: fraction => this.panScrollbar('y', fraction) });
+            if (type === 'wavelet') this.wavelet = new wavelet.WaveletWindow(spectrumPool,
+                () => this.invalidateData(), info => this.onWaveletResolutionInfo?.(info));
             svg.setAttribute('role', 'img'); svg.setAttribute('tabindex', '0');
             svg.setAttribute('aria-label', type === 'xy' ? 'XY 轨迹图' : type === 'wavelet' ? '小波变换图' : '直方图');
             svg.setAttribute('font-family', 'Consolas, monospace');
-            this.listen('wheel', e => this.wheel(e), { passive: false });
-            this.listen('pointerdown', e => this.down(e));
-            this.listen('pointermove', e => this.move(e));
-            this.listen('pointerup', e => this.up(e));
-            this.listen('lostpointercapture', () => { this.drag = null; this.drawOverlay(); });
-            this.listen('pointerleave', () => {
-                if (!this.drag) { this.pointer = null; this.drawOverlay(); }
+            this.viewport = new PlotViewport(svg, {
+                listen: (...args) => this.listen(...args),
+                layout: () => ({ width: this.width, height: this.height, area: this.area }),
+                enabled: () => this.visible && !this.disposed,
+                getAxis: axis => this.interactionAxis(axis),
+                onZoom: (axis, bounds, full) => axis === 'x' ? this.setZoom(bounds, this.zoom?.y)
+                    : this.setZoom(this.zoom?.x, full ? null : bounds),
+                onHistory: event => {
+                    if (!this.isPaused) return false;
+                    this.stepHistory(Math.sign(event.deltaY) * Math.max(1, Math.floor(this.windowPoints / 10)));
+                    return true;
+                },
+                onStart: (event, point) => this.down(event, point), onMove: event => this.move(event),
+                onEnd: event => this.up(event), onCancel: () => {
+                    this.drag = null; this.drawOverlay(); if (this.wavelet) this.invalidateData();
+                },
+                onLeave: () => { if (!this.drag) { this.pointer = null; this.drawOverlay(); } },
+                onReset: () => this.resetZoom()
             });
             this.listen('dblclick', () => this.resetZoom());
-            this.listen('contextmenu', e => { e.preventDefault(); this.resetZoom(); });
             this.listen('keydown', e => {
                 if (e.key === 'Home' || e.key === 'Escape') this.resetZoom();
                 else if (this.isPaused && ['ArrowLeft', 'ArrowRight', 'End'].includes(e.key)) {
@@ -433,6 +459,22 @@
             this.svg.addEventListener(type, listener, options);
             this.cleanups.push(() => this.svg.removeEventListener(type, listener, options));
         }
+        displayScale() { return Number(this.svg.closest?.('.workspace-surface')?.dataset.workspaceZoom) || 1; }
+        scrollbarXView() { return this.wavelet ? this.range?.slice(0, 2) : this.zoom?.x; }
+        panScrollbar(axis, fraction) {
+            if (axis === 'x') {
+                const bounds = panPlotAxis(this.horizontalZoomLimits(), this.scrollbarXView(), fraction);
+                if (bounds) this.setZoom(bounds, this.zoom?.y, fraction === 1 ? 'follow' : 'history');
+            } else {
+                const bounds = panPlotAxis(this.yZoomBase, this.zoom?.y, fraction, this.yZoomScale, true);
+                if (bounds) this.setZoom(this.zoom?.x, bounds);
+            }
+        }
+        updateScrollbars() {
+            this.xScrollBar.update();
+            if (!this.yScrollBar.track || !this.zoom?.y) { this.yScrollBar.update(); return; }
+            this.yScrollBar.update(this.viewport.verticalTrack(this.displayScale()));
+        }
         resize() {
             const rect = this.svg.getBoundingClientRect();
             this.width = Math.max(1, Math.round(this.svg.clientWidth || rect.width || 480));
@@ -445,10 +487,22 @@
                 const old = this.settings;
                 if (old.channel !== next.channel || old.basis !== next.basis || windowPoints !== this.windowPoints) {
                     this.wavelet.clear(); this.zoom = null; this.waveletTimeBounds = null; this.yZoomBase = null;
+                    this.waveletFollowFrom = null;
                 } else if (old.frequencyScale !== next.frequencyScale || old.yAuto !== next.yAuto ||
                     old.yMin !== next.yMin || old.yMax !== next.yMax) {
                     if (this.zoom) this.zoom.y = null;
                     this.yZoomBase = null;
+                }
+                if (old.removeDc !== next.removeDc) {
+                    this.wavelet.clear();
+                    this.waveletDrawSnapshot = null;
+                }
+                this.wavelet.setResolution(next);
+                if (old.frequencyScale !== next.frequencyScale) this.waveletDrawSnapshot = null;
+                if (old.freezeXOnZoom !== next.freezeXOnZoom && this.zoom && this.waveletDrawSnapshot) {
+                    this.zoom.x = this.range.slice(0, 2);
+                    this.waveletFollowFrom = next.freezeXOnZoom ? null : this.waveletAxisLiveTime;
+                    this.wavelet.cancel();
                 }
                 if (JSON.stringify(old) !== JSON.stringify(next) || windowPoints !== this.windowPoints) this.paintKey = null;
                 this.settings = next; this.windowPoints = windowPoints; this.invalidateData();
@@ -473,7 +527,7 @@
                     const factor = next.phaseUnit === 'degrees' ? 180 / Math.PI : Math.PI / 180;
                     if (this.zoom.y) this.zoom.y = this.zoom.y.map(value => value * factor);
                     if (this.yZoomBase) this.yZoomBase = this.yZoomBase.map(value => value * factor);
-                } else { this.zoom = null; this.yZoomBase = null; }
+                } else { this.zoom = null; this.xZoomBase = null; this.yZoomBase = null; }
                 this.settings = next; this.histogram = null; this.dataKey = null;
                 this.resetSpectrum();
                 if (samePhaseView && this.zoom?.x) this.spectrumAxisSize = axisSize;
@@ -486,9 +540,9 @@
             this.frames = frames; this.clear();
         }
         clear() {
-            this.wavelet?.clear(); this.waveletTimeBounds = null;
+            this.wavelet?.clear(); this.waveletDrawSnapshot = null; this.waveletTimeBounds = null;
             this.histogram = null; this.dataKey = null; this.resetSpectrum();
-            this.zoom = null; this.yZoomBase = null; this.drag = null; this.pointer = null; this.followLatest();
+            this.zoom = null; this.xZoomBase = null; this.yZoomBase = null; this.drag = null; this.pointer = null; this.followLatest();
         }
         invalidateLabels() { this.paintKey = null; this.invalidateData(); }
         setPaused(paused) {
@@ -517,10 +571,21 @@
             const ordinal = this.frames.frameOrdinalAt?.(0);
             return finite(ordinal) ? ordinal : this.frames.head ?? 0;
         }
-        currentFrameIndex() {
+        analysisEndIndex() {
             if (!this.frames.length) return -1;
-            return this.historyOrdinal == null ? this.frames.length - 1 :
-                clamp(this.historyOrdinal - this.oldestOrdinal(), 0, this.frames.length - 1);
+            const ordinal = this.historyOrdinal;
+            return ordinal == null ? this.frames.length - 1 :
+                clamp(ordinal - this.oldestOrdinal(), 0, this.frames.length - 1);
+        }
+        currentFrameIndex() {
+            const frames = this.frames, snapshot = this.waveletDrawSnapshot;
+            if (!this.zoom?.x || !snapshot || !frames.length) return this.analysisEndIndex();
+            if (finite(snapshot.viewNativeTime)) {
+                const index = boundary(frames.length, i => frames.timestampAt(i) <= snapshot.viewNativeTime) - 1;
+                return Math.max(0, index);
+            }
+            return finite(snapshot.viewOrdinal) ? clamp(snapshot.viewOrdinal - this.oldestOrdinal(), 0, frames.length - 1)
+                : this.analysisEndIndex();
         }
         getVisibleFrameIndex() { return this.currentFrameIndex(); }
         getReferenceByteOffset() {
@@ -540,7 +605,7 @@
             const ordinal = this.oldestOrdinal() + index;
             if (ordinal !== this.historyOrdinal) {
                 if (this.spectral) this.resetSpectrum();
-                if (this.wavelet) { this.wavelet.clear(); this.zoom = null; }
+                if (this.wavelet) { this.wavelet.clear(); this.zoom = null; this.waveletFollowFrom = null; }
             }
             this.historyOrdinal = ordinal; this.invalidateData(); return true;
         }
@@ -549,7 +614,10 @@
         }
         followLatest() {
             if (this.spectral && this.historyOrdinal != null) this.resetSpectrum();
-            if (this.wavelet && this.historyOrdinal != null) { this.wavelet.clear(); this.zoom = null; }
+            if (this.wavelet && (this.historyOrdinal != null || this.zoom?.x)) {
+                this.wavelet.resumeFullWindow(); this.waveletDrawSnapshot = null;
+                this.zoom = null; this.waveletFollowFrom = null;
+            }
             this.historyOrdinal = null; this.setNavigationMarkers({});
         }
         setNavigationMarkers(markers) {
@@ -557,7 +625,8 @@
             this.paintKey = null; this.invalidateData();
         }
         resetZoom() {
-            this.zoom = null; this.yZoomBase = null; this.drag = null; this.drawOverlay(); this.invalidateData();
+            if (this.wavelet) this.followLatest();
+            this.zoom = null; this.xZoomBase = null; this.yZoomBase = null; this.drag = null; this.drawOverlay(); this.invalidateData();
         }
         extentForXY() {
             let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
@@ -760,20 +829,30 @@
         }
         waveletRange() {
             const { settings: s, zoom } = this;
-            const snapshot = this.wavelet.snapshot;
+            const snapshot = this.wavelet.snapshot ?? this.wavelet.requestedWindow;
             const bounds = snapshot ? [snapshot.t0, snapshot.lastTime] : [0, 1];
-            const frequencies = snapshot?.result.frequencies;
-            let y = s.yAuto ? frequencies?.length ? [frequencies[0], frequencies.at(-1)] : [1, 10] : [s.yMin, s.yMax];
+            const frequencies = snapshot?.result?.frequencies;
+            let y = s.yAuto ? frequencies?.length ? [frequencies[0], snapshot.rate / 2] :
+                snapshot?.frequencyRange ?? [1, 10] : [s.yMin, s.yMax];
             if (s.frequencyScale === 'log' && !(y[0] > 0)) y = [Math.min(1, y[1] / 10), y[1]];
             this.yScale = s.frequencyScale;
-            this.waveletTimeBounds = bounds;
-            return [...(zoom?.x ?? bounds), ...(zoom?.y ?? y)];
+            this.waveletTimeBounds = snapshot?.retained ?? bounds;
+            this.waveletAxisLiveTime = snapshot?.liveTime;
+            let x = zoom?.x;
+            if (x && snapshot) {
+                // Until the worker publishes a complete image, keep the axis and the image on the same clock.
+                const delta = finite(this.waveletFollowFrom) ? snapshot.liveTime - this.waveletFollowFrom : 0;
+                x = wavelet.selectedTimeRange(x, snapshot.retained, delta, snapshot.rate);
+                if (snapshot.zoom === this.zoom.x && snapshot.followFrom === this.waveletFollowFrom) x = snapshot.selection;
+            }
+            return [...(x ?? bounds), ...(zoom?.y ?? y)];
         }
         renderNow(synchronousSpectrum = false, freezeWavelet = false) {
             if (this.disposed) return;
             this.cancelRender();
+            if (this.wavelet && this.drag && !freezeWavelet) return;
             const { frames, settings: s, width, height, svg } = this;
-            const end = this.currentFrameIndex() + 1;
+            const end = this.analysisEndIndex() + 1;
             let start = Math.max(0, end - this.windowPoints);
             const xy = this.type === 'xy', spectral = this.spectral, cwt = this.wavelet;
             let rate = 0;
@@ -786,19 +865,13 @@
                 this.updateSpectra(start, end, bounds, rate, synchronousSpectrum);
                 this.frequencyRate = this.spectrumKey ? this.spectrumRate : rate;
             }
-            if (cwt && !freezeWavelet) {
-                const predict = index => this.getSpectrumClock(index);
-                const newest = predict(end - 1);
-                const moveBy = this.historyOrdinal == null && !this.isPaused && this.zoom?.x && cwt.snapshot && finite(newest.time)
-                    ? newest.time - cwt.snapshot.lastTime : 0;
-                cwt.update(frames, start, end, predict, s, this.zoom?.x?.map(value => value + moveBy),
-                    this.isPaused || this.historyOrdinal != null);
-                if (this.zoom?.x && cwt.snapshot && this.waveletTimeBounds && this.historyOrdinal == null && !this.isPaused) {
-                    const advance = cwt.snapshot.lastTime - this.waveletTimeBounds[1];
-                    this.zoom.x = this.zoom.x.map(value => value + advance);
-                }
-            }
-            const input = cwt ? [cwt.snapshot?.key, cwt.message, cwt.error, Boolean(cwt.request)] :
+            if (cwt && !freezeWavelet) cwt.update(frames, start, end, this.getSpectrumClock, s, this.zoom?.x,
+                this.isPaused || this.historyOrdinal != null, { followFrom: this.waveletFollowFrom,
+                    windowPoints: this.windowPoints, historical: this.historyOrdinal != null });
+            // Replacing a running job does not change an already displayed heatmap.
+            const waveletStatus = cwt && !wavelet.hasWaveletCoefficients(cwt.snapshot?.result)
+                ? cwt.request ? 'pending' : cwt.message : '';
+            const input = cwt ? [cwt.snapshot?.key, waveletStatus, cwt.error] :
                 spectral ? [this.spectrumKey, this.frequencyRate, !!this.spectrumRequest] :
                 [frames.version, start, end, bounds.first, bounds.last];
             const { x: xZoom, y: yZoom } = this.zoom ?? {};
@@ -818,7 +891,17 @@
                 this.paintKey = null;
             }
             const paintKey = [height, this.windowPoints, this.historyOrdinal, xZoom, yZoom].join('|');
-            if (this.paintKey === paintKey) return;
+            if (this.paintKey === paintKey) {
+                if (cwt?.snapshot) {
+                    this.waveletAxisLiveTime = cwt.snapshot.liveTime;
+                    const retained = cwt.snapshot.retained;
+                    if (this.waveletTimeBounds?.[0] !== retained[0] || this.waveletTimeBounds?.[1] !== retained[1]) {
+                        this.waveletTimeBounds = retained;
+                        this.xScrollBar.update();
+                    }
+                }
+                return;
+            }
             this.paintKey = paintKey;
             const yFormat = readAxisNumberFormat(s, 'y');
             const digits = yFormat.mode === 'decimal' ? yFormat.decimalPlaces : yFormat.significantDigits;
@@ -862,7 +945,21 @@
             node(clip, 'rect', { x: left, y: top, width: right - left, height: bottom - top });
             if (!cwt) this.axes();
             const group = node(svg, 'g', { 'clip-path': 'url(#' + this.clipId + ')', ...(cwt && { 'data-wavelet-heatmap': '' }) });
-            if (cwt) { this.drawWavelet(group); this.drawWaveletNyquistBand(); this.axes(); }
+            if (cwt) {
+                this.waveletDrawSnapshot = cwt.displaySnapshot(this.zoom?.x ? range.slice(0, 2) : null, true);
+                this.drawWavelet(group);
+                if (s.showEdgeHatching) {
+                    this.drawWaveletReference(defs);
+                    this.drawWaveletNyquistBand();
+                }
+                this.axes();
+                if (this.waveletDrawSnapshot && (cwt.error || this.waveletDrawSnapshot.resolutionKey !== cwt.resolutionKey)) {
+                    const message = cwt.error || '正在按新分辨率计算…';
+                    const notice = label(svg, left + 4, top + 14, '显示上次结果 · ' + message,
+                        { 'font-size': 10, fill: '#ffd783', stroke: background, 'stroke-width': 3, 'paint-order': 'stroke' });
+                    node(notice, 'title', {}, message);
+                }
+            }
             else if (spectral) this.drawSpectrum(group);
             else if (xy) this.drawXY(group);
             else this.drawHistogram(group);
@@ -875,24 +972,29 @@
             }
             this.overlay = node(svg, 'g', { 'pointer-events': 'none', 'data-overlay': '' });
             this.drawOverlay();
+            this.updateScrollbars();
             this.completedDraws++;
         }
         px(x) {
             if (this.range[0] === this.range[1]) return this.area.left;
-            return this.area.left + fraction(x, this.range[0], this.range[1]) * this.area.width;
+            return this.area.left + axisFraction(x, this.range[0], this.range[1]) * this.area.width;
+        }
+        xAt(ratio) {
+            const [min, max] = this.range;
+            return min === max ? min : axisValueAtFraction(ratio, min, max);
         }
         yAt(ratio) {
             const [, , min, max] = this.range;
-            return this.yScale === 'linear' ? mix(min, max, ratio) : axisValueAtFraction(ratio, min, max, this.yScale);
+            return axisValueAtFraction(ratio, min, max, this.yScale);
         }
         py(y) {
             const [, , min, max] = this.range;
-            const ratio = this.yScale === 'linear' ? fraction(y, min, max) : axisFraction(Math.max(min, y), min, max, this.yScale);
+            const ratio = axisFraction(this.yScale === 'linear' ? y : Math.max(min, y), min, max, this.yScale);
             return this.area.bottom - ratio * this.area.height;
         }
         coords(x, y) {
-            const a = this.area, r = this.range;
-            return [mix(r[0], r[1], (x - a.left) / a.width), this.yAt((a.bottom - y) / a.height)];
+            const a = this.area;
+            return [this.xAt((x - a.left) / a.width), this.yAt((a.bottom - y) / a.height)];
         }
         axes() {
             const { range: r, area: a, svg, settings: s } = this;
@@ -918,7 +1020,7 @@
                 const divisions = this.spectral ? Math.min(5, nx) : nx;
                 const last = r[0] === r[1] ? 0 : divisions;
                 const positions = Array.from({ length: last + 1 }, (_, i) => {
-                    const value = mix(r[0], r[1], i / divisions);
+                    const value = this.xAt(i / divisions);
                     return this.spectral ? this.binToAxis(Math.round(this.axisToBin(value))) : value;
                 }).filter((value, i, values) => value >= r[0] && value <= r[1] && value !== values[i - 1]);
                 const values = positions.map(value => this.spectral ? this.frequencyAtBin(Math.round(this.axisToBin(value))) : value);
@@ -948,54 +1050,81 @@
             path(svg, marks, { fill: 'none', stroke: '#888' });
         }
         drawWavelet(group) {
-            const job = this.wavelet, snapshot = job.snapshot, { settings: s, frames, svg } = this;
-            const phase = s.viewMode === 'phase';
-            const name = channelLabel(frames, s.channel), mode = phase ? '小波相位图' : '小波幅度图';
+            const job = this.wavelet, snapshot = this.waveletDrawSnapshot, { settings: s, frames, svg } = this;
+            const mode = s.viewMode, phase = mode === 'phase', signed = mode === 'signed';
+            const name = channelLabel(frames, s.channel);
             const sourceColor = this.getChannelColor(s.channel) || '#ffffff';
-            const header = mode + ' · ' + name;
+            const header = (phase ? '小波相位图' : signed ? '有符号系数图' : '小波幅度图') + ' · ' + name;
             const maxChars = Math.max(6, Math.floor((this.area.width - (this.area.width > 300 ? 120 : 0)) / 12));
             const heading = label(svg, this.area.left, 14, header.length > maxChars ? header.slice(0, maxChars - 1) + '…' : header,
                 { fill: '#d1d5db', 'font-size': 11 });
             node(heading, 'title', {}, header);
-            if (!snapshot || !snapshot.result.magnitude.some(finite)) {
-                this.empty(job.error ? '小波计算失败：' + job.error : job.request ? '正在计算小波变换…' : job.message);
+            if (!snapshot || !wavelet.hasWaveletCoefficients(snapshot.result)) {
+                this.empty(job.error ? '小波计算失败：' + job.error : job.request || (!snapshot && job.snapshot) ?
+                    '正在计算小波变换…' : job.message);
                 return;
             }
-            const palette = wavelet.waveletPalette(sourceColor, phase);
+            if (!this.waveletColors || this.waveletColors.sourceColor !== sourceColor || this.waveletColors.mode !== mode)
+                this.waveletColors = { sourceColor, mode, palette: wavelet.waveletPalette(sourceColor, mode) };
+            const { palette } = this.waveletColors;
+            const scale = wavelet.heatmapColorScale(this, snapshot, phase);
             const { left, top, width, height, right } = this.area;
             const legendWidth = Math.min(100, width * .2);
-            if (width > 300 && snapshot.result.peak > 0) {
-                const legend = node(svg, 'g', { 'aria-label': phase ? '从负半周到正半周' : '从零到窗口幅度最大值' });
-                for (let i = 0, steps = 32; i < steps; i++) {
-                    const color = palette[phase ? 7 * 64 + (32 + Math.round(i * 64 / (steps - 1))) % 64 : Math.round(i * 63 / (steps - 1))];
-                    node(legend, 'rect', { x: right - legendWidth + i * legendWidth / steps, y: 7,
-                        width: legendWidth / steps + .15, height: 6, fill: 'rgb(' + color.join(',') + ')' });
+            if (width > 300 && scale.max > 0) {
+                const legend = node(svg, 'g', { 'aria-label': phase ? '从负半周到正半周' : signed ? '视口内有符号系数范围，中间为零' : '视口内幅度范围' });
+                const ramp = this.waveletRamp;
+                if (ramp?.palette === palette && ramp.width === legendWidth && ramp.right === right) legend.appendChild(ramp.group);
+                else {
+                    const group = node(legend, 'g');
+                    for (let i = 0, steps = signed ? 33 : 32; i < steps; i++) {
+                        const fraction = i / (steps - 1);
+                        const color = palette[phase ? 7 * 64 + (32 + Math.round(fraction * 64)) % 64 : Math.round(fraction * (palette.length - 1))];
+                        node(group, 'rect', { x: right - legendWidth + i * legendWidth / steps, y: 7,
+                            width: legendWidth / steps + .15, height: 6, fill: 'rgb(' + color.join(',') + ')' });
+                    }
+                    this.waveletRamp = { palette, width: legendWidth, right, group };
                 }
                 const unit = s.phaseUnit === 'degrees' ? '180°' : 'π';
-                label(legend, right - legendWidth - 4, 14, phase ? '−' + unit : '0', { 'text-anchor': 'end', 'font-size': 10 });
-                label(legend, right + 4, 14, phase ? '+' + unit : formatAxisValue(snapshot.result.peak), { 'font-size': 10 });
+                label(legend, right - legendWidth - 4, 14, phase ? '−' + unit : formatAxisValue(signed ? -scale.max : scale.min),
+                    { 'text-anchor': 'end', 'font-size': 10 });
+                label(legend, right + 4, 14, phase ? '+' + unit : formatAxisValue(scale.max), { 'font-size': 10 });
             }
             const canvas = this.waveletCanvas ??= svg.ownerDocument.createElement('canvas');
-            const image = wavelet.heatmapImage(this, snapshot, phase, palette, canvas);
-            if (image) {
-                node(group, 'image', { x: left, y: top, width, height, href: image, preserveAspectRatio: 'none', 'image-rendering': 'pixelated' });
+            if (wavelet.paintHeatmap(this, snapshot, mode, palette, canvas, scale)) {
+                const bounds = [left, top, width, height].join('|');
+                if (this.waveletLayer?.bounds === bounds && this.waveletLayer.canvas === canvas) group.appendChild(this.waveletLayer.element);
+                else {
+                    const element = node(group, 'foreignObject', { x: left, y: top, width, height,
+                        'pointer-events': 'none', 'data-wavelet-canvas': '' });
+                    canvas.style.cssText = 'display:block;width:100%;height:100%;image-rendering:pixelated';
+                    element.appendChild(canvas);
+                    this.waveletLayer = { bounds, canvas, element };
+                }
                 return;
             }
-            this.drawWaveletTiles(group, snapshot, phase, palette);
+            this.drawWaveletTiles(group, snapshot, mode, palette, scale);
         }
-        drawWaveletTiles(group, snapshot, phase, palette) {
+        drawWaveletTiles(group, snapshot, mode, palette, scale) {
             const tiles = node(group, 'g', { 'data-wavelet-tiles': '', 'shape-rendering': 'crispEdges' });
-            for (const [color, paths] of wavelet.heatmapPaths(this, snapshot, phase, palette)) {
-                path(tiles, paths.map(([x, y, right, bottom]) =>
-                    'M' + pixel(x) + ' ' + pixel(y) + 'H' + pixel(right) + 'V' + pixel(bottom) + 'H' + pixel(x) + 'Z'),
-                { fill: 'rgb(' + color.join(',') + ')' });
-            }
+            for (const [color, paths] of wavelet.heatmapPaths(this, snapshot, mode, palette, scale))
+                path(tiles, paths.map(tilePath), { fill: 'rgb(' + color.join(',') + ')' });
+        }
+        drawWaveletReference(defs) {
+            const snapshot = this.waveletDrawSnapshot;
+            const areas = snapshot && wavelet.heatmapReferenceAreas(this, snapshot, this.settings.viewMode === 'phase');
+            if (!areas?.length) return;
+            const id = this.clipId + '-wavelet-reference';
+            const pattern = node(defs, 'pattern', { id, width: 6, height: 6, patternUnits: 'userSpaceOnUse' });
+            node(pattern, 'path', { d: 'M-1 1L1 -1M0 6L6 0M5 7L7 5', stroke: '#d4e8fa', 'stroke-opacity': .32 });
+            const reference = node(this.svg, 'path', { d: areas.map(tilePath).join(''), fill: 'url(#' + id + ')',
+                'clip-path': 'url(#' + this.clipId + ')', 'pointer-events': 'none', 'data-wavelet-reference': '' });
+            node(reference, 'title', {}, '斜纹区域使用镜像延拓，系数仅供参考');
         }
         drawWaveletNyquistBand() {
-            const snapshot = this.wavelet.snapshot;
+            const snapshot = this.waveletDrawSnapshot;
             if (!snapshot?.result.frequencies.length) return;
             const start = Math.max(this.range[2], snapshot.result.highBandStart);
-            const end = Math.min(this.range[3], snapshot.rate / 2);
+            const end = Math.min(this.range[3], snapshot.result.frequencies.at(-1));
             if (!(end > start)) return;
             const top = this.py(end), bottom = this.py(start);
             const band = node(this.svg, 'rect', { x: this.area.left, y: top, width: this.area.width, height: bottom - top,
@@ -1132,63 +1261,54 @@
         }
         empty(message) { label(this.svg, (this.area.left + this.area.right) / 2, (this.area.top + this.area.bottom) / 2,
             message, { 'text-anchor': 'middle', fill: '#9ca3af' }); }
-        localPoint(e) {
-            const rect = this.svg.getBoundingClientRect(), a = this.area;
-            if (!a || !rect.width || !rect.height) return null;
-            const rawX = (e.clientX - rect.left) * this.width / rect.width;
-            const rawY = (e.clientY - rect.top) * this.height / rect.height;
-            return { x: clamp(rawX, a.left, a.right), y: clamp(rawY, a.top, a.bottom), rawX, rawY,
-                inside: rawX >= a.left && rawX <= a.right && rawY >= a.top && rawY <= a.bottom };
-        }
-        wheel(e) {
-            if (e.ctrlKey || e.metaKey || !e.deltaY) return;
-            const p = this.localPoint(e);
-            if (!p) return;
-            if (e.shiftKey) {
-                if (!p.inside || !this.isPaused) return;
-                this.stepHistory(Math.sign(e.deltaY) * Math.max(1, Math.floor(this.windowPoints / 10)));
-            } else {
-                const { left, right, top, bottom, width, height } = this.area;
-                const axis = plotWheelAxis(p.rawX, p.rawY, { left, right, top, width: this.width, height: this.height });
-                if (!axis) return;
-                const [xMin, xMax, yMin, yMax] = this.range;
-                if (axis === 'x') {
-                    const bounds = zoomAxisBounds(xMin, xMax, (p.x - left) / width, e.deltaY, this.horizontalZoomLimits());
-                    if (bounds) this.setZoom(bounds, this.zoom?.y);
-                } else {
-                    const base = this.yZoomBase ?? [yMin, yMax];
-                    const bounds = zoomAxisBounds(yMin, yMax, (bottom - p.y) / height, e.deltaY, base, this.yScale);
-                    if (bounds) this.setZoom(this.zoom?.x, bounds[0] === base[0] && bounds[1] === base[1] ? null : bounds);
-                }
-            }
-            e.preventDefault(); e.stopPropagation();
+        interactionAxis(axis) {
+            if (!this.range) return null;
+            if (axis === 'x') return { view: this.range.slice(0, 2), base: this.horizontalZoomLimits() };
+            const view = this.range.slice(2);
+            return { view, base: this.yZoomBase ?? view, scale: this.yScale };
         }
         horizontalZoomLimits() {
             if (this.spectral) return this.spectrumXBounds();
             if (this.wavelet) return this.waveletTimeBounds;
             if (this.histogram) return [0, this.histogram.bins.length];
+            return this.xZoomBase ?? this.range?.slice(0, 2);
         }
         applyZoom(bounds) {
             this.setZoom(bounds.slice(0, 2), bounds.length === 4 ? bounds.slice(2) : null);
         }
-        setZoom(x = null, y = null) {
+        setZoom(x = null, y = null, navigationMode) {
+            const keepX = Boolean(this.wavelet && this.zoom?.x && x === this.zoom.x && !navigationMode);
+            if (keepX) x = this.range.slice(0, 2);
+            if (this.wavelet && !x && y && this.settings.freezeXOnZoom && !this.zoom?.x) x = this.range.slice(0, 2);
             const limits = x && this.horizontalZoomLimits();
             if (limits) x = [Math.max(x[0], limits[0]), Math.min(x[1], limits[1])];
             if ([x, y].some(range => range && (!range.every(finite) || !(range[0] < range[1])))) return;
+            if (x && !this.wavelet && limits && x[0] === limits[0] && x[1] === limits[1]) x = null;
+            if (this.wavelet && !keepX) {
+                const snapshot = this.waveletDrawSnapshot ?? this.wavelet.snapshot;
+                const follow = navigationMode ? navigationMode === 'follow' :
+                    !this.settings.freezeXOnZoom && this.historyOrdinal == null && (!this.zoom?.x || finite(this.waveletFollowFrom));
+                this.waveletFollowFrom = follow && x ? this.waveletAxisLiveTime : null;
+                if (snapshot && x) {
+                    const span = (wavelet.maxWaveletWindowPoints - 1) / snapshot.rate;
+                    if (x[1] - x[0] > span) x = [x[1] - span, x[1]];
+                }
+                if (navigationMode) this.historyOrdinal = null;
+                if (x) this.wavelet.cancel();
+                else if (this.zoom?.x) { this.wavelet.resumeFullWindow(); this.waveletDrawSnapshot = null; }
+            }
+            this.xZoomBase = x ? this.xZoomBase ?? limits : null;
             this.yZoomBase = y ? this.yZoomBase ?? this.range.slice(2) : null;
             this.yZoomScale = y ? this.yScale : null;
-            this.zoom = x || y ? { x, y } : null;
+            this.zoom = x || y ? { x: keepX ? this.zoom.x : x, y } : null;
             this.invalidateData();
         }
-        down(e) {
-            const p = this.localPoint(e);
-            if (e.ctrlKey || e.metaKey || e.button !== 0 || !p?.inside) return;
+        down(e, p) {
             this.drag = { ...p, pan: Boolean(e.shiftKey && this.wavelet && this.zoom?.x) };
             this.pointer = p; this.svg.focus?.({ preventScroll: true });
-            this.svg.setPointerCapture?.(e.pointerId); e.preventDefault();
         }
         move(e) {
-            this.pointer = this.localPoint(e);
+            this.pointer = this.viewport.point(e);
             this.drawOverlay();
         }
         drawOverlay() {
@@ -1203,21 +1323,20 @@
             } else if (p.inside) this.hover(p);
         }
         up(e) {
-            const p = this.localPoint(e), start = this.drag;
+            const p = this.viewport.point(e), start = this.drag;
             if (!start) return;
             this.drag = null; this.pointer = p; this.drawOverlay();
-            if (this.svg.hasPointerCapture?.(e.pointerId)) this.svg.releasePointerCapture(e.pointerId);
             if (start.pan && p && this.zoom?.x && this.waveletTimeBounds) {
-                const [first, last] = this.zoom.x, span = last - first;
+                const [first, last] = this.range, span = last - first;
                 const [min, max] = this.waveletTimeBounds;
                 const next = clamp(first - (p.rawX - start.rawX) * span / this.area.width, min, Math.max(min, max - span));
-                this.setZoom([next, next + span], this.zoom.y);
+                this.setZoom([next, next + span], this.zoom.y, next + span >= max ? 'follow' : 'history');
                 return;
             }
-            if (!p || Math.abs(p.x - start.x) < 5 || Math.abs(p.y - start.y) < 5) return;
-            const lo = this.coords(Math.min(p.x, start.x), Math.max(p.y, start.y));
-            const hi = this.coords(Math.max(p.x, start.x), Math.min(p.y, start.y));
-            this.applyZoom([lo[0], hi[0], lo[1], hi[1]]);
+            const rect = p && plotSelectionFractions(start.x, start.y, p.x, p.y, this.area);
+            if (rect) this.applyZoom([this.xAt(rect[0]), this.xAt(rect[1]),
+                this.yAt(rect[2]), this.yAt(rect[3])]);
+            else if (this.wavelet) this.invalidateData();
         }
         hoverSpectrum(p) {
             const { left, right, top, bottom } = this.area;
@@ -1283,21 +1402,25 @@
             const xFormat = readAxisNumberFormat(this.settings, 'x'), yFormat = readAxisNumberFormat(this.settings, 'y');
             let lines;
             if (this.wavelet) {
-                const [time, frequency] = this.coords(p.x, p.y), snapshot = this.wavelet.snapshot;
+                const [time, frequency] = this.coords(p.x, p.y), snapshot = this.waveletDrawSnapshot;
                 node(this.overlay, 'path', { d: 'M' + this.area.left + ' ' + p.y + 'H' + this.area.right +
                     'M' + p.x + ' ' + this.area.top + 'V' + this.area.bottom, stroke: '#888', 'stroke-dasharray': '4 3' });
                 const cell = snapshot && wavelet.waveletCell(snapshot, time, frequency);
+                const qualifier = cell?.reference ? '参考' : '';
                 let value = '该位置暂无有效系数';
                 if (this.settings.viewMode === 'phase' && finite(cell?.phase)) {
                     const degrees = this.settings.phaseUnit === 'degrees';
-                    value = '相位 ' + numberLabel(degrees ? cell.phase * 180 / Math.PI : cell.phase, 6) + (degrees ? ' °' : ' rad');
+                    value = qualifier + '相位 ' + numberLabel(degrees ? cell.phase * 180 / Math.PI : cell.phase, 6) + (degrees ? ' °' : ' rad');
+                } else if (this.settings.viewMode === 'signed' && finite(cell?.signed)) {
+                    value = qualifier + '系数 ' + numberLabel(cell.signed, 6);
                 } else if (this.settings.viewMode === 'magnitude' && finite(cell?.magnitude)) {
-                    value = '幅度 ' + numberLabel(cell.magnitude, 6);
-                } else if (cell && this.settings.viewMode === 'phase' && cell.frequency === snapshot.rate / 2) {
-                    value = '奈奎斯特频点无可辨相位';
+                    value = qualifier + '幅度 ' + numberLabel(cell.magnitude, 6);
+                } else if (frequency > snapshot?.result.frequencies.at(-1)) {
+                    value = '高于最高小波中心频率，暂无系数';
                 }
                 lines = [channelLabel(this.frames, this.settings.channel) + ' · ' + value,
                     formatAxisValue(time, xFormat) + ' s   ' + formatAxisValue(frequency, yFormat) + ' Hz'];
+                if (cell?.reference) lines.push('镜像延拓 · 仅供参考');
                 if (cell?.frequency >= snapshot?.result.highBandStart) lines.push('高频侧响应受奈奎斯特边界限制');
             } else if (this.spectral) lines = this.hoverSpectrum(p);
             else if (this.type === 'xy') {
@@ -1327,8 +1450,11 @@
             lines.forEach((line, i) => label(this.overlay, x + 6, y + 15 + i * 16, line));
         }
         exportSvg(title = this.type === 'xy' ? '李萨如图' : this.wavelet ? '小波变换' : '频度直方图') {
-            if (this.wavelet && !this.wavelet.snapshot?.result.magnitude.some(finite)) throw new Error('当前没有可导出的小波系数');
-            this.renderNow(true, Boolean(this.wavelet));
+            this.renderNow(true, Boolean(this.wavelet?.snapshot));
+            if (this.wavelet && (!this.waveletDrawSnapshot || this.waveletDrawSnapshot !==
+                this.wavelet.displaySnapshot(this.zoom?.x ? this.range.slice(0, 2) : null) ||
+                !wavelet.hasWaveletCoefficients(this.waveletDrawSnapshot.result)))
+                throw new Error(this.wavelet.error || '当前分辨率没有可导出的小波系数');
             const output = this.svg.ownerDocument.createElementNS(NS, 'svg'), band = 26;
             output.setAttribute('width', this.width); output.setAttribute('height', this.height + band);
             output.setAttribute('viewBox', [0, 0, this.width, this.height + band].join(' '));
@@ -1338,12 +1464,12 @@
             label(output, 8, 18, title, { 'font-size': 14 });
             const chart = node(output, 'g', { transform: 'translate(0 ' + band + ')' });
             for (const child of this.svg.children) if (child !== this.overlay) {
-                if (!this.wavelet || child.getAttribute('data-wavelet-heatmap') === null || !child.querySelector('image')) {
+                if (!this.wavelet || child.getAttribute('data-wavelet-heatmap') === null || !child.querySelector('[data-wavelet-canvas]')) {
                     chart.appendChild(child.cloneNode(true));
                 } else {
                     const group = chart.appendChild(child.cloneNode(false));
-                    const phase = this.settings.viewMode === 'phase', color = this.getChannelColor(this.settings.channel) || '#ffffff';
-                    this.drawWaveletTiles(group, this.wavelet.snapshot, phase, wavelet.waveletPalette(color, phase));
+                    const mode = this.settings.viewMode, color = this.getChannelColor(this.settings.channel) || '#ffffff';
+                    this.drawWaveletTiles(group, this.waveletDrawSnapshot, mode, wavelet.waveletPalette(color, mode));
                 }
             }
             const Serializer = this.win.XMLSerializer ?? root.XMLSerializer;
@@ -1351,7 +1477,9 @@
             return new Serializer().serializeToString(output);
         }
         dispose() {
-            this.wavelet?.clear(); this.waveletCanvas = null;
+            this.viewport.cancel();
+            this.wavelet?.clear(); this.waveletDrawSnapshot = null; this.waveletCanvas = null;
+            this.waveletLayer = null; this.waveletRamp = null;
             this.disposed = true; this.cancelRender(); this.cancelSpectrumRequest(); this.observer?.disconnect();
             this.cleanups.splice(0).forEach(f => f()); this.traces = null; this.histogram = null; this.hitPoints = null; this.spectra = null;
         }
