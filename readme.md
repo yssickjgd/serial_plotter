@@ -532,7 +532,7 @@ Windows Chrome 153、24 个逻辑处理器，两个波形（23 通道全部可�
 
 ## 12 贡献
 
-欢迎提交 Issue 和 Pull Request。
+欢迎提交 Issue 和 Pull Request。编写界面文字和文档时，请遵循[项目术语约定](AGENTS.md#技术术语)。
 
 建议在提交问题时附带：
 
