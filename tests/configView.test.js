@@ -36,6 +36,8 @@ const { applyConfigToView, collectConfigFromView } = require('../configView');
     assert.equal(elements.wrapPlotFreqAxis.style.display, 'none');
     assert.equal(elements.wrapPlotYBounds.style.display, 'none');
     assert.equal(elements.plotFftWindow.value, 'hann');
+    assert.equal(elements.plotFreqXScale.value, 'log');
+    assert.equal(elements.plotFreqXUnit.value, 'hz');
     applyConfigToView({ plotViewMode: 'frequency', plotFreqXUnit: 'bins',
         plotFreqXScale: 'log', plotFreqYScale: 'log',
         plotYScaleMode: 'manual', plotFftWindow: 'flatTop' }, {

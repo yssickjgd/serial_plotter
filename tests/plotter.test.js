@@ -27,7 +27,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
         document, window: { addEventListener() {} }, performance, requestAnimationFrame() {}, console
     });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js', 'channelTransform.js',
-        'spectrum.js', 'csvExport.js', 'plotter.js']) {
+        'spectrum.js', 'csvExport.js', 'plotViewport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { Plotter, FrameBuffer, exportFrameCsv } = context.SerialPlotter;
@@ -55,7 +55,7 @@ test('plotter uses the full sample window for CSV and bounds draw work to pixels
     assert.equal(plotter.frames.getValue(0, 0), 1000);
     assert.ok(exportFrameCsv(frames, plotter.getChannelMeta()).startsWith('Index,"a,b",CH00002\r\n0,1000,-1000\r\n'));
     assert.ok(lineToCount < 10000, `draw called lineTo ${lineToCount} times`);
-    plotter.setDisplayOptions({ displayMode: 'frequency' });
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqXScale: 'linear' });
     const start = performance.now();
     plotter.draw();
     assert.equal(plotter._drawState.startIdx, 0);
@@ -200,7 +200,7 @@ test('a 39% waveform budgets vertices and backing pixels for its displayed size'
     const context = vm.createContext({ document, window: document.defaultView, performance,
         requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js', 'channelTransform.js',
-        'spectrum.js', 'plotter.js']) {
+        'spectrum.js', 'plotViewport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { Plotter, FrameBuffer } = context.SerialPlotter;

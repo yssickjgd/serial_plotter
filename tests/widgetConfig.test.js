@@ -2,6 +2,31 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { migrateWorkspaceConfig, normalizeBufferExportSettings, validateWorkspaceConfig } = require('../widgetConfig');
 
+test('waveform frequency scale migration preserves explicit units and spacing and defaults missing fields', () => {
+    const axes = (config) => {
+        const wave = config.widgets.find(widget => widget.type === 'wave').settings;
+        return [wave.plotFreqXUnit, wave.plotFreqXScale];
+    };
+    assert.deepEqual(axes(migrateWorkspaceConfig({})), ['hz', 'log']);
+    const flat = migrateWorkspaceConfig({ plotFreqXUnit: 'bins', plotFreqXScale: 'linear' });
+    assert.deepEqual(axes(flat), ['bins', 'linear']);
+    assert.deepEqual(axes(validateWorkspaceConfig(JSON.parse(JSON.stringify(flat)))), ['bins', 'linear']);
+    delete flat.widgets.find(widget => widget.type === 'wave').settings.plotFreqXScale;
+    assert.deepEqual(axes(validateWorkspaceConfig(flat)), ['bins', 'log']);
+});
+
+test('old sampled waveforms keep their freeze-on-zoom behavior on import', () => {
+    const legacy = migrateWorkspaceConfig({});
+    assert.equal(legacy.widgets[0].settings.plotTimeFreezeXOnZoom, true);
+    const settings = legacy.widgets[0].settings;
+    delete settings.plotTimeFreezeXOnZoom;
+    assert.equal(validateWorkspaceConfig(legacy).widgets[0].settings.plotTimeFreezeXOnZoom, true);
+    settings.plotTimeFreezeXOnZoom = false;
+    assert.equal(validateWorkspaceConfig(legacy).widgets[0].settings.plotTimeFreezeXOnZoom, false);
+    settings.plotTimeFreezeXOnZoom = 'false';
+    assert.throws(() => validateWorkspaceConfig(legacy));
+});
+
 test('interface layout defaults migrate and custom panel preferences roundtrip with strict validation', () => {
     const config = migrateWorkspaceConfig(null);
     assert.deepEqual(config.uiLayout, { leftWidth: 268, rightWidth: 320, leftOpen: true, rightOpen: true, sendHeight: 200, leftSplitRatio: .5 });

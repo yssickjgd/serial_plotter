@@ -38,7 +38,7 @@ function createPlotter(canvasScale = 1) {
         requestAnimationFrame() {}, console
     });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'plotViewport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
@@ -307,6 +307,66 @@ test('left-button rectangle zoom selects both sample and Y ranges', () => {
     assert.equal(plotter.yBounds.time.max, 1);
     assert.ok(Math.abs(plotter._drawState.min - 21) < 1e-9);
     assert.ok(Math.abs(plotter._drawState.max - 79) < 1e-9);
+});
+
+test('live time zoom preserves its distance behind new samples and manual history stays put', () => {
+    const { plotter, fire } = createPlotter();
+    plotter.setDisplayOptions({ timeFreezeXOnZoom: false });
+    const width = plotter._drawState.plotW, height = plotter._drawState.plotH;
+    fire('pointerdown', width / 4, height / 4);
+    fire('pointerup', width * 3 / 4, height * 3 / 4);
+    assert.equal(plotter.vp.time.autoFollow, true);
+    for (let i = 101; i <= 120; i++) plotter.addFrame([i], [], '', i, i);
+    assert.equal(plotter._timeViewportRange().start, 45);
+    assert.equal(plotter._timeViewportRange().end, 96);
+    plotter._panXToFraction(0.2);
+    const historical = plotter._timeViewportRange().start;
+    plotter.addFrame([121], [], '', 121, 121);
+    assert.equal(plotter._timeViewportRange().start, historical);
+    plotter._panXToFraction(1);
+    plotter.addFrame([122], [], '', 122, 122);
+    assert.equal(plotter._timeViewportRange().end, 123);
+});
+
+test('live seconds zoom tracks elapsed time with uneven arrivals and freezes on request', () => {
+    const { plotter, fire } = createPlotter();
+    plotter.receiveTimeAxis = true;
+    plotter.setDisplayOptions({ timeXUnit: 's', timeFreezeXOnZoom: false });
+    plotter.draw();
+    fire('wheel', plotter._drawState.plotW / 2, 100, { deltaY: -1 });
+    plotter.draw();
+    const initial = { ...plotter._drawState.aligned };
+    plotter.addFrame([101], [], '', 101, 107);
+    plotter.draw();
+    assert.equal(plotter._drawState.aligned.first, initial.first + 7);
+    assert.equal(plotter._drawState.aligned.last, initial.last + 7);
+    plotter.setDisplayOptions({ timeFreezeXOnZoom: true });
+    plotter.addFrame([102], [], '', 102, 118);
+    plotter.draw();
+    assert.equal(plotter._drawState.aligned.last, initial.last + 7);
+    plotter.setDisplayOptions({ timeFreezeXOnZoom: false });
+    plotter.addFrame([103], [], '', 103, 119);
+    plotter.draw();
+    assert.equal(plotter._drawState.aligned.last, initial.last + 8);
+});
+
+test('rectangle zoom keeps its original live lag when the buffer rotates during selection', () => {
+    const { plotter, fire } = createPlotter();
+    plotter.setMaxPoints(101);
+    plotter.setPlotWindowPoints(41);
+    plotter.setDisplayOptions({ timeFreezeXOnZoom: false });
+    plotter.draw();
+    const { plotW, plotH } = plotter._drawState;
+    fire('pointerdown', plotW / 4, plotH / 4);
+    for (let i = 101; i <= 110; i++) plotter.addFrame([i], [], '', i, i);
+    plotter.draw();
+    fire('pointerup', plotW * 3 / 4, plotH * 3 / 4);
+    const range = plotter._timeViewportRange();
+    assert.equal(plotter.frames.orderAt(range.start), 80);
+    assert.equal(plotter.frames.orderAt(range.end - 1), 100);
+    plotter.clear();
+    assert.equal(plotter.vp.time.followLag, undefined);
+    assert.equal(plotter.vp.time.autoFollow, true);
 });
 
 test('user viewport callbacks cover X/Y zoom and pan in both modes and right-click reset only', () => {

@@ -22,7 +22,7 @@ const GLOBAL_DEFAULTS = {
 };
 const WAVE_DEFAULTS = {
     connectionSource: 'primary', engineSource: null, plotViewMode: 'time', plotTraceMode: 'both',
-    plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotFreqXUnit: 'hz', xSignificantDigits: 0, ySignificantDigits: 0,
+    plotTimeXUnit: 'samples', plotTimeXUnitExplicit: false, plotTimeFreezeXOnZoom: false, plotFreqXUnit: 'hz', xSignificantDigits: 0, ySignificantDigits: 0,
     plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann', plotFftRemoveDc: true,
     plotContent: 'samples', plotMagnitudeUnit: 'db', plotDbFactor: '10', plotPhaseUnwrap: true, plotPhaseUnit: 'radians',
     plotResponseSampleRate: '1000', plotResponseTimePoints: '20', responseChannels: [], responseViewport: null,
@@ -116,7 +116,7 @@ function legacyWindowPoints(settings = {}) {
         ? settings.plotResponsePoints : settings.plotWindowPoints ?? settings.plotResponsePoints;
 }
 
-function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS) {
+function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS, restoring = false) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('控件设置无效');
     const connectionSource = settings.connectionSource ?? 'primary';
     if (typeof connectionSource !== 'string' || !(connectionSource === 'workspace' && ['wave', 'xy', 'histogram', 'wavelet'].includes(type)) &&
@@ -136,6 +136,7 @@ function normalizeWidgetSettings(type, settings = {}, globals = GLOBAL_DEFAULTS)
     }
     if (type === 'wave') {
         const result = pick(settings, WAVE_DEFAULTS);
+        if (restoring && settings.plotTimeFreezeXOnZoom === undefined) result.plotTimeFreezeXOnZoom = true;
         const { normalizeAxisNumberSettings } = typeof module !== 'undefined' ? require('./plotMath') : globalThis.SerialPlotter;
         Object.assign(result, normalizeAxisNumberSettings(settings));
         result.plotResponseTimePoints = settings.plotResponseTimePoints ?? settings.plotResponsePoints ?? WAVE_DEFAULTS.plotResponseTimePoints;
@@ -329,7 +330,7 @@ function validateWorkspaceConfig(config) {
         if (sourceId === 'workspace' ? !workspaceChannels.mappings.length : sourceId !== 'primary' && !entry)
             throw new Error('控件引用了不存在的接收来源');
         return { id: widget.id, type: widget.type, title: widget.title,
-            settings: normalizeWidgetSettings(widget.type, widget.settings, entry ? serialSourceGlobals(globals, entry) : globals) };
+            settings: normalizeWidgetSettings(widget.type, widget.settings, entry ? serialSourceGlobals(globals, entry) : globals, true) };
     });
     const workspace = copy(config.workspace ?? { step: 10, rects: {} });
     if (workspace.zoom === undefined) workspace.zoom = 1;
@@ -454,10 +455,10 @@ function migrateWorkspaceConfig(legacy, legacyLayout) {
     const globals = { ...pick(legacy, legacyDefaults), symbolVersion: legacy.symbolVersion,
         channelNames: legacy.channels?.map((channel, index) => channel.name ?? `CH${String(index + 1).padStart(5, '0')}`) ?? ['CH00001'] };
     globals.plotWindowPoints = String(Math.min(Number(legacyWindowPoints(legacy) ?? legacyDefaults.plotWindowPoints), Number(globals.maxPoints)));
-    const waveSettings = normalizeWidgetSettings('wave', {
+    const waveSettings = {
         plotResponseTimePoints: legacy.plotResponseTimePoints ?? legacy.plotResponsePoints ?? globals.plotWindowPoints,
         plotResponseSampleRate: '0', ...legacy
-    }, globals);
+    };
     const widgets = [
         { id: 'wave-1', type: 'wave', title: '波形 1', settings: waveSettings },
         { id: 'byte-1', type: 'byte', title: '字节流 1', settings: { ...BYTE_DEFAULTS, ...pick(legacy, BYTE_DEFAULTS),

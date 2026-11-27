@@ -35,6 +35,7 @@ class WidgetController {
         this.register('wavelet', { template: 'analysis-widget-template', title: '小波变换' });
         this.fieldIds = {
             plotViewMode: 'plot-view-mode', plotTraceMode: 'plot-trace-mode', plotTimeXUnit: 'plot-time-x-unit',
+            plotTimeFreezeXOnZoom: 'plot-time-freeze-x-on-zoom',
             plotFreqXScale: 'plot-freq-x-scale', plotFreqYScale: 'plot-freq-y-scale',
             xPrecisionMode: 'plot-x-precision-mode', yPrecisionMode: 'plot-y-precision-mode',
             xSignificantDigits: 'plot-x-significant-digits', ySignificantDigits: 'plot-y-significant-digits',
@@ -319,6 +320,7 @@ class WidgetController {
             const useSeconds = !response && (combined || ((view.fixedTimeRate || view.timeProjection) && !settings.plotTimeXUnitExplicit));
             view.setDisplayOptions({ displayMode: settings.plotViewMode, traceMode: settings.plotTraceMode,
                 timeXUnit: useSeconds ? 's' : settings.plotTimeXUnit,
+                timeFreezeXOnZoom: settings.plotTimeFreezeXOnZoom,
                 ...SerialPlotter.normalizeAxisNumberSettings(settings),
                 freqXUnit: settings.plotFreqXUnit, freqXScale: settings.plotFreqXScale, freqYScale: settings.plotFreqYScale,
                 magnitudeUnit: this._magnitudeUnit(settings), dbFactor: settings.plotDbFactor,

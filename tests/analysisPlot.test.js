@@ -594,17 +594,34 @@ function workspace(channelDefinitions = []) {
 function event(time, order, values, extra = {}) {
     return { time, values, origin: { sourceId: 'primary', epoch: 1, order, byteOffset: order, ...extra } };
 }
-test('same-source XY pairs native packet identities at duplicated timestamps, preserves time order, marks recovered slots and gaps', () => {
+test('same-source XY pairs native packet identities and leaves missing slots as gaps', () => {
     const ws = workspace();
     ws.ingest([event(0, 1, [[0, -1], [1, 0]]), event(0, 2, [[0, -1], [1, 2]]),
         event(1, 3, [[0, 1], [1, 3]]), event(3, 5, [[0, -1], [1, 1]], { missingBefore: 1, period: 1 }),
         event(4, 6, [[0, 0], [1, 0]], { breakBefore: true })]);
     const rows = points(ws.numericSource.frames, { x: 0, y: 1 });
     assert.deepEqual(rows, [[-1, 0, 0, true, false], [-1, 2, 0, false, false], [1, 3, 1, false, false],
-        [0, 2, 2, false, true], [-1, 1, 3, false, false], [0, 0, 4, true, false]]);
+        [-1, 1, 3, true, false], [0, 0, 4, true, false]]);
     const nativeHist = histogram({ values: [-1, 0, 1] });
     nativeHist.update(ws.numericSource.frames, 0, 5, { first: 0, last: 4 });
     assert.deepEqual([...nativeHist.counts], [3, 1, 1]);
+});
+
+test('same-source spectra use packet samples and their rate even on the global channel table', t => {
+    const env = bootArrayApplication(); t.after(() => env.app.dispose());
+    const ws = workspace(); t.after(() => ws.dispose());
+    const svg = env.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const packets = Array.from({ length: 32 }, (_, i) => {
+        const angle = Math.PI * i / 4;
+        return event(10 * Math.floor(i / 8), i, [[0, Math.cos(angle)], [1, Math.sin(angle)]], { sampleRate: 800 });
+    });
+    ws.ingest(packets);
+    const view = new AnalysisPlot(svg, 'xy', ws.numericSource.frames, { viewMode: 'phase', fftWindow: 'rectangular' }, 32);
+    t.after(() => view.dispose());
+    view.renderNow();
+    assert.equal(view.spectra[0].samples, 32);
+    assert.equal(view.spectra[0].recovered, 0);
+    assert.equal(view.frequencyAtBin(view.spectrumBin(2, view.spectra[0])), 100);
 });
 
 test('the shared scrollbars pan zoomed XY ranges on both axes', t => {

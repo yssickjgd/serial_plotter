@@ -147,7 +147,8 @@ test('XY spectrum settings default old workspaces to trajectory and preserve ind
     const spectralKeys = ['viewMode', 'freqXScale', 'phaseUnit', 'phaseUnwrap', 'phaseYAuto', 'phaseYMin', 'phaseYMax',
         'coherenceYAuto', 'coherenceYMin', 'coherenceYMax', 'fftOverlap', 'fftWindow', 'fftRemoveDc'];
     assert.deepEqual(spectralKeys.map(key => defaults[key]),
-        ['trajectory', 'hz-linear', 'radians', true, true, -Math.PI, Math.PI, false, 0, 1, 50, 'hann', true]);
+        ['trajectory', 'hz-log', 'radians', true, true, -Math.PI, Math.PI, false, 0, 1, 50, 'hann', true]);
+    assert.equal(normalize('xy', { viewMode: 'gain', freqXScale: 'hz-linear' }).freqXScale, 'hz-linear');
     const custom = normalize('xy', { ...defaults, viewMode: 'coherence', freqXScale: 'bins-log', phaseUnit: 'radians',
         phaseUnwrap: true, phaseYAuto: true, phaseYMin: -5, phaseYMax: 2, coherenceYMin: -0.05, coherenceYMax: 1.05,
         fftSize: 8192, fftOverlap: 75, fftWindow: 'flatTop', fftRemoveDc: false });

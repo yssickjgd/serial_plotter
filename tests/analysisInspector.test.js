@@ -125,7 +125,10 @@ test('XY inspector switches axis panels while retaining channel bindings and FFT
     assert.ok(f.get('xy-xMin').parentElement.parentElement === f.get('xy-xMax').parentElement.parentElement);
     assert.equal(f.get('xy-xMin').parentElement.parentElement.className, 'row');
     const pairs = f.get('xy-0-y-toggle');
-    f.change('xy-viewMode', 'phase');
+    for (const mode of ['gain', 'coherence', 'phase']) {
+        f.change('xy-viewMode', mode);
+        assert.equal(f.get('xy-freqXScale').value, 'hz-log');
+    }
     assert.deepEqual(sections(), ['显示内容', '采样窗口']);
     assert.equal(f.get('xy-phaseUnit').value, 'radians');
     assert.equal(f.get('xy-traceMode').value, 'both');

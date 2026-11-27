@@ -39,7 +39,7 @@ function fixture() {
         IntersectionObserver: class { constructor(fn) { this.fn = fn; observers.push(this); }
             observe(target) { this.target = target; } disconnect() { this.disconnected = true; } }
     });
-    for (const file of ['projectLimits', 'frameBuffer', 'plotMath', 'channelTransform', 'spectrum', 'plotter'])
+    for (const file of ['projectLimits', 'frameBuffer', 'plotMath', 'channelTransform', 'spectrum', 'plotViewport', 'plotter'])
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context);
     const canvas = () => ({ ...target(), ownerDocument: document, parentElement: target(),
         getContext: () => new Proxy({}, { get: (_, key) => key === 'measureText'

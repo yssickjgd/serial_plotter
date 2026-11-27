@@ -346,7 +346,7 @@ test('leaving the title editor commits to the original widget without Enter', t 
     assert.equal(f.get('widget-title').value, second.title);
 });
 
-test('new spectra default to Hz log, decibels ten, DC removal, and unwrapped radians', t => {
+test('new sampled and system-response spectra share a logarithmic Hz axis', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     for (const plotViewMode of ['frequency', 'phase']) {
         const wave = f.app.widgets.create({ type: 'wave', settings: { plotViewMode } });
@@ -356,6 +356,9 @@ test('new spectra default to Hz log, decibels ten, DC removal, and unwrapped rad
         assert.equal(wave.view.phaseUnwrap, true);
         assert.equal(wave.view.magnitudeUnit, 'db');
         assert.equal(wave.view.dbFactor, 10);
+        f.change('plot-content', 'response');
+        assert.equal(f.get('plot-freq-x-scale').value, 'hz-log');
+        assert.equal(wave.view.freqXScale, 'log');
     }
 });
 

@@ -18,6 +18,7 @@ const plotterLimits = typeof module !== 'undefined'
     ? require('./projectLimits').PROJECT_LIMITS : globalThis.SerialPlotter.Limits;
 const PlotWaveGpuRenderer = typeof module !== 'undefined'
     ? require('./waveGpuRenderer').WaveGpuRenderer : globalThis.SerialPlotter.WaveGpuRenderer;
+const WavePlotViewport = typeof module !== 'undefined' ? require('./plotViewport') : globalThis.SerialPlotter;
 const plotSampleMarkerSize = 3;
 const timeSummarySpectrumIntervalMs = 100;
 
@@ -39,7 +40,12 @@ function plotTimeOrigin(plot) {
     return plot.projectReceiveTime ? plot.projectReceiveTime(origin) : origin;
 }
 
-function sampleTimeBounds(plot, start, end, follow = plot.vp?.time.autoFollow) {
+function sampleTimeBounds(plot, start, end, follow) {
+    if (follow === undefined) {
+        const zoom = plot._selection?.timeBounds ?? plot._timeZoomBounds?.();
+        if (zoom) return zoom;
+        follow = plot.vp?.time.autoFollow;
+    }
     if (plot.frames.liveTimeBounds && follow)
         return plot.frames.liveTimeBounds(plot.vp.time.displayCount);
     if (plot.frames.timeBounds) return plot.frames.timeBounds(start, end, false);
@@ -102,8 +108,9 @@ class Plotter {
         this.traceMode = 'both';
         this.sampleRateHz = 0;
         this.timeXUnit = 'samples';
+        this.timeFreezeXOnZoom = true;
         this.freqXUnit = 'hz';
-        this.freqXScale = 'linear';
+        this.freqXScale = 'log';
         this.freqYScale = 'linear';
         this.axisNumberFormats = { x: globalThis.SerialPlotter.readAxisNumberFormat({}, 'x'),
             y: globalThis.SerialPlotter.readAxisNumberFormat({}, 'y') };
@@ -151,19 +158,21 @@ class Plotter {
         this.yScrollbarThumb = element('yScrollThumb', 'plot-y-scrollbar-thumb');
         this.plotHeader = element('header', 'plot-header');
         this.plotInfoRow = element('infoRow', 'plot-info-row');
-        this._initScrollbar();
-        this._initYScrollbar();
+        this._initPlotScrollbars();
 
-        // Canvas events
-        this._listen(this.canvas, 'wheel',       (e) => this._onWheel(e), { passive: false });
-        this._listen(this.canvas, 'pointerdown', e => this._onPointerDown(e));
-        this._listen(this.canvas, 'pointermove', e => this._onPointerMove(e));
-        this._listen(this.canvas, 'pointerup', e => this._onPointerUp(e));
-        this._listen(this.canvas, 'pointercancel', e => this._onPointerCancel(e));
-        this._listen(this.canvas, 'lostpointercapture', e => this._onPointerCancel(e));
-        this._listen(this.canvas, 'pointerleave', () => this._onMouseLeave());
-        this._listen(this.canvas, 'contextmenu', e => {
-            e.preventDefault(); this.followLatest();
+        this.viewport = new WavePlotViewport.PlotViewport(this.canvas, {
+            listen: (...args) => this._listen(this.canvas, ...args),
+            layout: () => ({ width: this.width, height: this.height, area: { left: 0, top: 0,
+                right: this.width - this.pX, bottom: this.height - this.pY } }),
+            enabled: () => !this._presentationDeferred,
+            getAxis: axis => this._interactionAxis(axis),
+            onZoom: (axis, bounds, full) => {
+                if (axis === 'y') this._setYZoom(bounds, full);
+                else if (bounds[1] - bounds[0] >= 1 - 1e-9) this._setXZoom(bounds[0], bounds[1] - bounds[0] + 1);
+            },
+            onStart: (event, point) => this._onPointerDown(event, point), onMove: event => this._onPointerMove(event),
+            onEnd: event => this._onPointerUp(event), onCancel: event => this._onPointerCancel(event),
+            onLeave: () => this._onMouseLeave(), onReset: () => this.followLatest()
         });
 
         this.resize();
@@ -262,6 +271,7 @@ class Plotter {
         this._timeTickScale = null;
         this._sourceFirstOrder = frames.orderAt(0);
         this._timeWindowStartOrder = null;
+        this._clearTimeZoomAnchor();
         this._invalidateFft();
         this._drawState = null;
         this._timeCenterOrder = null;
@@ -273,7 +283,7 @@ class Plotter {
     invalidateData() {
         if (this._disposed || this._presentationDeferred) return;
         const view = this.vp.time;
-        if (view.autoFollow) view.scrollOffset = Math.max(0, this.frames.length - view.displayCount);
+        if (view.autoFollow) view.scrollOffset = this._liveTimeStart();
         else if (Number.isFinite(this._timeWindowStartOrder) &&
             this.frames.orderAt(0) !== this._sourceFirstOrder)
             view.scrollOffset = Math.max(0, this.frames.indexAtOrAfterOrder(this._timeWindowStartOrder));
@@ -296,8 +306,7 @@ class Plotter {
         this.intersectionObserver?.disconnect();
         this.canvas.width = this.canvas.height = 1;
         this.gpuRenderer?.dispose();
-        if (this._selection && this.canvas.hasPointerCapture?.(this._selection.pointerId))
-            this.canvas.releasePointerCapture?.(this._selection.pointerId);
+        this.viewport.cancel();
         this._selection = null;
         this._timeSeriesCache = null;
         this._drawState = null;
@@ -313,6 +322,7 @@ class Plotter {
     followLatest() {
         const previousViewport = this._viewportState();
         this._selection = null; this._timeCenterOrder = null;
+        this._clearTimeZoomAnchor();
         this._markViewDirty();
         this._vp.displayCount = this.displayMode === 'time'
             ? this.plotWindowPoints : this.frames.responseMode ? this._scrollTotal() : this.maxPoints;
@@ -512,7 +522,28 @@ class Plotter {
         if (opts.yScaleMode) this.yScaleMode = opts.yScaleMode;
         if (opts.yScaleModeTime) this.yScaleModes.time = opts.yScaleModeTime;
         if (opts.yScaleModeFreq) this.yScaleModes.frequency = opts.yScaleModeFreq;
-        if (opts.timeXUnit) this.timeXUnit = opts.timeXUnit;
+        if (opts.timeXUnit && opts.timeXUnit !== this.timeXUnit) {
+            const view = this.vp.time, range = this._timeViewportRange();
+            this.timeXUnit = opts.timeXUnit;
+            if (!this.frames.liveTimeBounds && (view.followLag != null || view.followTime)) {
+                view.scrollOffset = range.start;
+                view.displayCount = Math.max(2, range.end - range.start);
+                if (view.followLag != null) view.followLag = Math.max(0, this.frames.length - range.end);
+                const bounds = sampleTimeBounds(this, range.start, range.end, false);
+                if (bounds) this._setTimeZoomBounds(bounds, this._timeExtent().last);
+                else delete view.followTime;
+            }
+        }
+        if (typeof opts.timeFreezeXOnZoom === 'boolean' && this.timeFreezeXOnZoom !== opts.timeFreezeXOnZoom) {
+            const view = this.vp.time;
+            if (view.followLag != null && !this.frames.responseMode) {
+                const bounds = this._timeZoomBounds();
+                view.autoFollow = !opts.timeFreezeXOnZoom;
+                view.followLag = Math.max(0, this.frames.length - view.scrollOffset - view.displayCount);
+                if (bounds) this._setTimeZoomBounds(bounds, this._timeExtent().last);
+            }
+            this.timeFreezeXOnZoom = opts.timeFreezeXOnZoom;
+        }
         if (opts.freqXUnit) this.freqXUnit = opts.freqXUnit;
         if (opts.freqXScale) this.freqXScale = opts.freqXScale;
         if (opts.freqYScale) this.freqYScale = opts.freqYScale;
@@ -570,7 +601,7 @@ class Plotter {
         const evictsOldest = previousLength === this.frames.capacity;
         this.frames.append(valuesArray, frameBytes, timeStr, order, timestamp, metadata);
         if (timeView.autoFollow)
-            timeView.scrollOffset = Math.max(0, this.frames.length - timeView.displayCount);
+            timeView.scrollOffset = this._liveTimeStart();
         else {
             if (evictsOldest) timeView.scrollOffset = Math.max(0, previousOffset - 1);
             this._scrollbarDirty = true;
@@ -586,6 +617,7 @@ class Plotter {
 
     /** 清空所有通道数据，重置时域/频域视口到跟随模式 */
     clear() {
+        this._clearTimeZoomAnchor();
         this._selection = null;
         this._timeCenterOrder = null;
         this.navigationMarkers = { timeOrder: null, matches: [], currentMatch: -1 };
@@ -673,6 +705,7 @@ class Plotter {
         this.plotWindowPoints = Math.min(this.plotWindowPoints, size);
         this.vp.time.displayCount = Math.min(this.vp.time.displayCount, this.plotWindowPoints);
         if (windowShrank) {
+            this._clearTimeZoomAnchor();
             this.vp.time.displayCount = this.plotWindowPoints;
             this.vp.time.autoFollow = true;
             this.vp.time.scrollOffset = Math.max(0, this.frames.length - this.plotWindowPoints);
@@ -690,6 +723,7 @@ class Plotter {
             throw new RangeError(`波形监视台内采样点数需为 ${plotterLimits.minPoints}–${Math.min(
                 this.maxPoints, plotterLimits.maxPlotWindowPoints)}`);
         if (size === this.plotWindowPoints) return;
+        this._clearTimeZoomAnchor();
         this._timeCenterOrder = null;
         this.plotWindowPoints = size;
         this.vp.time.displayCount = size;
@@ -704,6 +738,7 @@ class Plotter {
     jumpToFrame(index) {
         if (this.frames.responseMode) return false;
         if (!this.frames.length) return false;
+        this._clearTimeZoomAnchor();
         const target = Math.max(0, Math.min(this.frames.length - 1, Math.round(index)));
         const view = this.vp.time;
         const count = Math.max(2, Math.min(this.plotWindowPoints, view.displayCount));
@@ -744,7 +779,8 @@ class Plotter {
     currentTimeFrameIndex() {
         if (this.frames.responseMode) return -1;
         if (!this.frames.length) return -1;
-        if (this.vp.time.autoFollow && this._timeCenterOrder === null) return this.frames.length - 1;
+        if (this.vp.time.autoFollow && !this.vp.time.followLag && !this.vp.time.followTime?.lag &&
+            this._timeCenterOrder === null) return this.frames.length - 1;
         if (this._timeCenterOrder !== null) {
             const range = this._timeViewportRange();
             if (this._timeCenterOrder !== null)
@@ -837,6 +873,9 @@ class Plotter {
     /** Center where possible, but never extend a time window past retained samples. */
     _timeViewportRange() {
         const total = this.frames.length;
+        const bounds = this._selection?.timeBounds ?? this._timeZoomBounds();
+        if (bounds) return { start: this._timeBoundaryIndex(bounds.first, false),
+            end: this._timeBoundaryIndex(bounds.last, true) };
         const count = Math.min(total, Math.max(2, Math.floor(this.vp.time.displayCount)));
         let start = Math.floor(this.vp.time.scrollOffset);
         if (this._timeCenterOrder !== null) {
@@ -846,6 +885,50 @@ class Plotter {
         }
         start = Math.max(0, Math.min(start, total - count));
         return { start, end: start + count };
+    }
+
+    _clearTimeZoomAnchor() {
+        delete this.vp.time.followLag;
+        delete this.vp.time.followTime;
+        this._frozenTimeEnd = null;
+    }
+
+    _liveTimeStart() {
+        const view = this.vp.time;
+        return Math.max(0, this.frames.length - view.displayCount - (view.followLag ?? 0));
+    }
+
+    _timeExtent() {
+        if (this.frames.responseMode) return null;
+        return this.frames.liveTimeBounds ? this.frames.liveTimeBounds(Infinity)
+            : sampleTimeBounds(this, 0, this.frames.length, false);
+    }
+
+    _timeZoomBounds() {
+        const view = this.vp.time;
+        if (!view.followTime) return null;
+        const extent = this._timeExtent();
+        if (!extent) return null;
+        // A restored historical viewport uses its retained sample offset as its anchor.
+        if (!view.autoFollow && this._frozenTimeEnd == null)
+            this._frozenTimeEnd = Math.min(extent.last, plotTimeAt(this, Math.min(this.frames.length - 1,
+                Math.floor(view.scrollOffset))) + view.followTime.span);
+        const end = view.autoFollow ? extent.last - view.followTime.lag : this._frozenTimeEnd;
+        if (!Number.isFinite(end)) return null;
+        const first = Math.max(extent.first, Math.min(extent.last - view.followTime.span, end - view.followTime.span));
+        return { first, last: Math.min(extent.last, first + view.followTime.span) };
+    }
+
+    _setTimeZoomBounds(bounds, latest) {
+        // Several frames can share one browser-read timestamp. Keep their sample viewport
+        // until two distinct timestamps define a duration.
+        if (!(bounds.last > bounds.first) || !Number.isFinite(latest)) {
+            delete this.vp.time.followTime;
+            this._frozenTimeEnd = null;
+            return;
+        }
+        this.vp.time.followTime = { lag: Math.max(0, latest - bounds.last), span: bounds.last - bounds.first };
+        this._frozenTimeEnd = this.vp.time.autoFollow ? null : bounds.last;
     }
 
     _frequencyViewport(total) {
@@ -978,6 +1061,7 @@ class Plotter {
         const receiveSeconds = this.receiveTimeAxis && this.timeXUnit === 's';
         if (this.displayMode === 'time' && cached?.frames === this.frames && cached.version === this.frames.version &&
             cached.start === startIdx && cached.end === actualEnd && cached.receiveSeconds === receiveSeconds &&
+            cached.first === aligned?.first && cached.last === aligned?.last &&
             cached.timeProjection === timeProjection && cached.projectReceiveTime === this.projectReceiveTime) return cached.series;
         const series = [];
         for (let idx = 0; idx < this.channels.length; idx++) {
@@ -1010,6 +1094,7 @@ class Plotter {
         }
         if (this.displayMode === 'time') this._timeSeriesCache = {
             frames: this.frames, version: this.frames.version, start: startIdx, end: actualEnd,
+            first: aligned?.first, last: aligned?.last,
             receiveSeconds, timeProjection, projectReceiveTime: this.projectReceiveTime, series
         };
         return series;
@@ -1076,53 +1161,64 @@ class Plotter {
         if (!this._disposed && this.onViewportChange && previous !== this._viewportState()) this.onViewportChange();
     }
 
-    /** 绘图区和 X 轴刻度带缩放 X；Y 轴刻度带缩放 Y。 */
-    _onWheel(e) {
-        if (this._presentationDeferred || !e.deltaY || e.ctrlKey || e.metaKey || e.shiftKey) return;
-        e.preventDefault();
-        const pointer = this._pointerClient;
-        // Wheel events may round client coordinates that pointermove reports fractionally.
-        const samePixel = pointer && Math.abs(pointer.clientX - e.clientX) < 1 && Math.abs(pointer.clientY - e.clientY) < 1;
-        const point = this._pointFromPointer(samePixel ? pointer : e);
-        const axis = globalThis.SerialPlotter.plotWheelAxis(point.x, point.y,
-            { right: this.width - this.pX, width: this.width, height: this.height });
-        if (axis === 'y') this._zoomYAt(point.y, e.deltaY);
-        else if (axis === 'x') this._zoomXAt(point.x, e.deltaY);
+    _interactionAxis(axis) {
+        if (axis === 'x') {
+            if (this._scrollTotal() < 2 && !(this.displayMode === 'time' &&
+                this.frames.hasPendingTrace && this.frames.latestTrace > this.frames.earliestTrace)) return null;
+            return this.displayMode === 'time' ? { zoomSamples: (ratio, delta) => this._zoomTimeAt(ratio, delta) }
+                : this._xScrollViewport();
+        }
+        const state = this._drawState;
+        if (!state) return null;
+        const view = [state.min, state.max], base = this._zoomBaseY[this.displayMode];
+        return { view, base: base ? [base.min, base.max] : view, scale: state.yScale };
     }
 
-    _zoomXAt(mouseX, deltaY) {
-        const previousViewport = this._viewportState();
-        const total = this._scrollTotal(), plotW = this.width - this.pX;
-        if (total < 2 || !(plotW > 0)) return;
-        const ratio = Math.max(0, Math.min(1, mouseX / plotW));
-        const factor = deltaY < 0 ? 0.8 : 1.25;
-        let nextStart, nextCount;
-        if (this.displayMode === 'time') {
-            const { start, end } = this._timeViewportRange(), count = end - start;
-            const limit = this.frames.responseMode ? total : this.plotWindowPoints;
-            nextCount = Math.round(Math.max(2, Math.min(limit, total, count * factor)));
-            if (nextCount === count) return;
-            const bounds = sampleTimeBounds(this, start, end);
-            nextStart = bounds && bounds.last > bounds.first
-                ? this._timeZoomStart(bounds.first + ratio * (bounds.last - bounds.first), ratio, nextCount)
-                : Math.round(start + ratio * (count - nextCount));
-            this._timeCenterOrder = null;
-        } else {
-            const { axisToDomain, axisFromDomain, zoomAxisBounds } = globalThis.SerialPlotter;
-            const scale = this.freqXScale, minimum = this._minimumXIndex(), maximum = total - 1;
-            const { first, last } = this._frequencyViewport(total);
-            const limits = [axisToDomain(minimum, scale), axisToDomain(maximum, scale)];
-            const bounds = zoomAxisBounds(axisToDomain(first, scale), axisToDomain(last, scale), ratio, deltaY, limits);
-            if (!bounds) return;
-            nextStart = Math.max(minimum, axisFromDomain(bounds[0], scale));
-            const nextLast = Math.min(maximum, axisFromDomain(bounds[1], scale));
-            if (nextLast - nextStart < 1 - 1e-9) return;
-            nextCount = nextLast - nextStart + 1;
-        }
-        this._vp.scrollOffset = nextStart;
-        this._vp.displayCount = nextCount;
-        this._vp.autoFollow = false;
+    _zoomTimeAt(ratio, delta) {
+        const { start, end } = this._timeViewportRange();
+        const bounds = sampleTimeBounds(this, start, end);
+        const extent = bounds && this._timeExtent();
+        const gridRate = this.frames.liveTimeBounds && this.frames.sampleRate;
+        const count = gridRate && bounds ? Math.max(2, Math.round((bounds.last - bounds.first) * gridRate / 1000) + 1)
+            : this.vp.time.followTime ? this.vp.time.displayCount : end - start;
+        const total = gridRate && extent ? Math.round((extent.last - extent.first) * gridRate / 1000) + 1 : this._scrollTotal();
+        const limit = this.frames.responseMode ? total : this.plotWindowPoints;
+        const next = Math.round(Math.max(2, Math.min(limit, total, count * (delta < 0 ? .8 : 1.25))));
+        if (next === count) return;
+        if (extent && !gridRate && bounds.last > bounds.first && (this.timeFreezeXOnZoom || !this.vp.time.followTime)) {
+            const first = this._timeZoomStart(bounds.first + ratio * (bounds.last - bounds.first), ratio, next);
+            this._setXZoom(first, next, sampleTimeBounds(this, first, first + next, false));
+        } else if (extent && bounds.last > bounds.first && count > 1) {
+            const span = Math.min(extent.last - extent.first, (bounds.last - bounds.first) * (next - 1) / (count - 1));
+            const first = Math.max(extent.first, Math.min(extent.last - span, bounds.first + ratio * (bounds.last - bounds.first - span)));
+            this._setXZoom(this._timeBoundaryIndex(first, false), next, { first, last: first + span });
+        } else this._setXZoom(Math.round(start + ratio * (count - next)), next);
+    }
+
+    _applyXZoom(nextStart, nextCount, bounds, followed, reference) {
+        const view = this._vp, time = this.displayMode === 'time' && !this.frames.responseMode;
+        const liveZoom = time && (followed || view.followLag != null);
+        if (this.displayMode === 'time') this._timeCenterOrder = null;
+        view.scrollOffset = nextStart;
+        view.displayCount = nextCount;
+        view.autoFollow = false;
         this._clampScroll();
+        if (time) {
+            // Explicit history navigation stays pinned even when zooming at its right edge.
+            view.autoFollow = liveZoom && !this.timeFreezeXOnZoom;
+            if (liveZoom) {
+                view.followLag = reference?.lag ?? Math.max(0, this.frames.length - view.scrollOffset - view.displayCount);
+                if (view.autoFollow) view.scrollOffset = this._liveTimeStart();
+            }
+            if (bounds) this._setTimeZoomBounds(bounds, reference?.latest ?? this._timeExtent().last);
+            else delete view.followTime;
+            this._timeWindowStartOrder = this.frames.orderAt(Math.floor(view.scrollOffset));
+        }
+    }
+
+    _setXZoom(nextStart, nextCount, bounds) {
+        const previousViewport = this._viewportState();
+        this._applyXZoom(nextStart, nextCount, bounds, this._vp.autoFollow);
         this._markViewDirty();
         this._updateScrollbar();
         if (this.isPaused) this.draw();
@@ -1142,19 +1238,13 @@ class Plotter {
         return low > 0 && Math.abs(timeAt(low - 1) - anchor) < Math.abs(timeAt(low) - anchor) ? low - 1 : low;
     }
 
-    _zoomYAt(mouseY, deltaY) {
+    _setYZoom(bounds, full) {
         const previousViewport = this._viewportState();
         const state = this._drawState;
-        if (!state || !(state.max > state.min)) return;
         const mode = this.displayMode;
-        const scale = state.yScale;
-        const base = this._zoomBaseY[mode] || { min: state.min, max: state.max, yScale: scale };
-        const anchorRatio = 1 - Math.max(0, Math.min(1, mouseY / state.plotH));
-        const bounds = globalThis.SerialPlotter.zoomAxisBounds(state.min, state.max, anchorRatio, deltaY, [base.min, base.max], scale);
-        if (!bounds) return;
-        if (bounds[0] === base.min && bounds[1] === base.max) this._clearYZoom(mode);
+        if (full) this._clearYZoom(mode);
         else {
-            this._zoomBaseY[mode] = base;
+            this._zoomBaseY[mode] ??= { min: state.min, max: state.max, yScale: state.yScale };
             this._boxZoomY[mode] = { min: bounds[0], max: bounds[1] };
         }
         this._markViewDirty();
@@ -1171,28 +1261,23 @@ class Plotter {
     }
 
     _pointFromPointer(event) {
-        const rect = this.canvas.getBoundingClientRect();
-        return {
-            x: rect.width > 0 ? (event.clientX - rect.left) * this.width / rect.width : -1,
-            y: rect.height > 0 ? (event.clientY - rect.top) * this.height / rect.height : -1
-        };
+        const point = this.viewport.point(event);
+        return { x: point?.rawX ?? -1, y: point?.rawY ?? -1 };
     }
 
-    _onPointerDown(event) {
-        if (this._presentationDeferred || event.button !== 0 || !this._drawState) return;
-        const point = this._pointFromPointer(event);
-        const { plotW, plotH } = this._drawState;
-        if (point.x < 0 || point.x > plotW || point.y < 0 || point.y > plotH) return;
-        event.preventDefault();
+    _onPointerDown(event, point) {
+        if (!this._drawState) return false;
         this._selection = {
             pointerId: event.pointerId, mode: this.displayMode,
             autoFollow: this._vp.autoFollow,
+            timeBounds: this._drawState.aligned,
+            reference: { length: this.frames.length, latest: this._drawState.aligned && this._timeExtent()?.last,
+                firstOrdinal: this.frames.frameOrdinalAt?.(0), xFirst: this._drawState.xFirst, xLast: this._drawState.xLast },
             x0: point.x, y0: point.y, x1: point.x, y1: point.y
         };
         this._vp.autoFollow = false;
         this.mousePos = null;
         this._pointerClient = null;
-        if (this.canvas.setPointerCapture) this.canvas.setPointerCapture(event.pointerId);
         this._markViewDirty();
         if (this.isPaused) this.draw();
     }
@@ -1227,33 +1312,44 @@ class Plotter {
         if (this._selection === selection) this._onPointerMove(event);
         const selectionValid = this._selection === selection;
         this._selection = null;
-        if (this.canvas.releasePointerCapture &&
-            (!this.canvas.hasPointerCapture || this.canvas.hasPointerCapture(event.pointerId)))
-            this.canvas.releasePointerCapture(event.pointerId);
         if (!selectionValid) return;
         const state = this._drawState;
+        const bounds = selection.timeBounds;
+        const gridRate = bounds && this.frames.liveTimeBounds && this.frames.sampleRate;
+        const gridCount = gridRate ? Math.round((bounds.last - bounds.first) * gridRate / 1000) + 1 : 0;
+        const sampleBox = selection.mode === 'time' && !bounds;
+        const xRange = gridRate ? { xFirst: 0, xLast: gridCount - 1 } : sampleBox ? selection.reference : state;
         const zoom = state && selection.mode === this.displayMode
             ? globalThis.SerialPlotter.zoomRectToBounds({
                 ...selection, plotWidth: state.plotW, plotHeight: state.plotH,
-                startIndex: state.xFirst, visibleCount: state.xLast - state.xFirst + 1,
+                startIndex: xRange.xFirst, visibleCount: xRange.xLast - xRange.xFirst + 1,
                 min: state.min, max: state.max,
                 xScale: state.xScale, yScale: state.yScale,
-                indexAtFraction: state.aligned?.last > state.aligned?.first ? (ratio, right) => {
+                indexAtFraction: !gridRate && state.aligned?.last > state.aligned?.first ? (ratio, right) => {
                     const { first, last } = state.aligned;
                     return this._timeBoundaryIndex(first + ratio * (last - first), right) - Number(right);
                 } : undefined
             }) : null;
         if (zoom) {
-            if (this.displayMode === 'time') this._timeCenterOrder = null;
-            this._vp.scrollOffset = zoom.scrollOffset;
-            this._vp.displayCount = zoom.displayCount;
-            this._clampScroll();
-            this._vp.autoFollow = false;
+            let selectedTime;
+            if (bounds && bounds.last > bounds.first) {
+                const at = x => bounds.first + x / state.plotW * (bounds.last - bounds.first);
+                selectedTime = { first: at(Math.min(selection.x0, selection.x1)), last: at(Math.max(selection.x0, selection.x1)) };
+            }
+            let start = gridRate ? this._timeBoundaryIndex(selectedTime.first, false) : zoom.scrollOffset;
+            if (sampleBox) {
+                selection.reference.lag = Math.max(0, selection.reference.length - start - zoom.displayCount);
+                const evicted = this.frames.frameOrdinalAt?.(0) - selection.reference.firstOrdinal;
+                if (Number.isFinite(evicted)) start -= evicted;
+            }
+            this._applyXZoom(start, zoom.displayCount, selectedTime, selection.autoFollow, selection.reference);
+            if (this.displayMode !== 'time' || this.frames.responseMode) this._vp.autoFollow = false;
             if (!this._zoomBaseY[this.displayMode])
                 this._zoomBaseY[this.displayMode] = { min: state.min, max: state.max, yScale: state.yScale };
             this._boxZoomY[this.displayMode] = { min: zoom.yMin, max: zoom.yMax };
         } else if (selection.mode === this.displayMode) {
             this._vp.autoFollow = selection.autoFollow;
+            if (this.displayMode === 'time' && selection.autoFollow) this._vp.scrollOffset = this._liveTimeStart();
         }
         this._markViewDirty();
         this.draw();
@@ -1301,149 +1397,93 @@ class Plotter {
     _clampScroll() {
         const minimum = this._minimumXIndex(), maximum = Math.max(minimum, this._scrollTotal() - this._vp.displayCount);
         this._vp.scrollOffset = Math.max(minimum, Math.min(this._vp.scrollOffset, maximum));
-        if (this._vp.scrollOffset >= maximum) this._vp.autoFollow = true;
+        if (this._vp.scrollOffset >= maximum && !(this.displayMode === 'time' &&
+            (this._vp.followLag != null || this._vp.followTime)))
+            this._vp.autoFollow = true;
     }
 
-    /** 初始化滚动条拖拽和点击跳转事件 */
-    _initScrollbar() {
-        if (!this.scrollbarWrap || !this.scrollbarThumb) return;
-        let dragging = false, dragStartX = 0, dragStartOff = 0;
-
-        this._listen(this.scrollbarThumb, 'mousedown', (e) => {
-            if (this._presentationDeferred) return;
-            if (this.displayMode === 'time') this._timeCenterOrder = null;
-            dragging = true; dragStartX = e.clientX; dragStartOff = this._vp.scrollOffset;
-            e.preventDefault();
-        });
-        this._listen(this.document, 'mousemove', (e) => {
-            if (this._presentationDeferred || e.buttons === 0) dragging = false;
-            if (!dragging) return;
-            const previousViewport = this._viewportState();
-            this._markViewDirty();
-            const wrapW  = this.scrollbarWrap.clientWidth;
-            const thumbW = this.scrollbarThumb.offsetWidth;
-            const dx     = (e.clientX - dragStartX) / this._displayScale();
-            const range = Math.max(0, this._scrollTotal() - this._minimumXIndex() - this._vp.displayCount);
-            const offset = dragStartOff + dx / Math.max(1, wrapW - thumbW) * range;
-            this._vp.scrollOffset = this.displayMode === 'time' ? Math.round(offset) : offset;
-            this._vp.autoFollow = false;
-            this._clampScroll(); this._updateScrollbar();
-            if (this.isPaused) this.draw();
-            this._notifyViewportChange(previousViewport);
-        });
-        this._listen(this.document, 'mouseup', () => { dragging = false; });
-
-        this._listen(this.scrollbarWrap, 'click', (e) => {
-            if (this._presentationDeferred || e.target === this.scrollbarThumb) return;
-            const previousViewport = this._viewportState();
-            if (this.displayMode === 'time') this._timeCenterOrder = null;
-            this._markViewDirty();
-            const rect  = this.scrollbarWrap.getBoundingClientRect();
-            const ratio = (e.clientX - rect.left) / rect.width;
-            const minimum = this._minimumXIndex();
-            const offset = minimum + ratio * Math.max(0, this._scrollTotal() - minimum - this._vp.displayCount);
-            this._vp.scrollOffset = this.displayMode === 'time' ? Math.round(offset) : offset;
-            this._vp.autoFollow = false;
-            this._clampScroll(); this._updateScrollbar();
-            if (this.isPaused) this.draw();
-            this._notifyViewportChange(previousViewport);
-        });
+    _initPlotScrollbars() {
+        const options = {
+            document: this.document, listen: (...args) => this._listen(...args),
+            displayScale: () => this._displayScale(), enabled: () => !this._presentationDeferred
+        };
+        this.xScrollBar = new WavePlotViewport.PlotScrollbar({ ...options,
+            track: this.scrollbarWrap, thumb: this.scrollbarThumb,
+            viewport: () => this._xScrollViewport(), onPan: fraction => this._panXToFraction(fraction) });
+        this.yScrollBar = new WavePlotViewport.PlotScrollbar({ ...options, reverse: true,
+            track: this.yScrollbarWrap, thumb: this.yScrollbarThumb,
+            viewport: () => this._yScrollViewport(), onPan: fraction => this._panYToFraction(fraction) });
     }
 
-    _initYScrollbar() {
-        if (!this.yScrollbarWrap || !this.yScrollbarThumb) return;
-        this.yScrollbarWrap.hidden = true;
-        let dragging = false, dragStartY = 0, dragStartTop = 0;
-        this._listen(this.yScrollbarThumb, 'mousedown', e => {
-            if (this._presentationDeferred) return;
-            dragging = true;
-            dragStartY = e.clientY;
-            dragStartTop = parseFloat(this.yScrollbarThumb.style.top) || 0;
-            e.preventDefault();
-        });
-        this._listen(this.document, 'mousemove', e => {
-            if (this._presentationDeferred || e.buttons === 0) dragging = false;
-            if (!dragging) return;
-            const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
-            const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
-            this._panYToFraction((dragStartTop + (e.clientY - dragStartY) / this._displayScale()) /
-                Math.max(1, height - thumbHeight));
-        });
-        this._listen(this.document, 'mouseup', () => { dragging = false; });
-        this._listen(this.yScrollbarWrap, 'click', e => {
-            if (this._presentationDeferred || e.target === this.yScrollbarThumb) return;
-            const rect = this.yScrollbarWrap.getBoundingClientRect();
-            const height = parseFloat(this.yScrollbarWrap.style.height) || 1;
-            const thumbHeight = parseFloat(this.yScrollbarThumb.style.height) || height;
-            this._panYToFraction(((e.clientY - rect.top) / this._displayScale() - thumbHeight / 2) /
-                Math.max(1, height - thumbHeight));
-        });
+    _xScrollViewport() {
+        if (this.displayMode !== 'time') {
+            const total = this._scrollTotal(), { first, last } = this._frequencyViewport(total);
+            return { base: [this._minimumXIndex(), total - 1], view: [first, last], scale: this.freqXScale };
+        }
+        const extent = this._vp.followTime && this._timeExtent(), zoom = extent && this._timeZoomBounds();
+        if (zoom) return { base: [extent.first, extent.last], view: [zoom.first, zoom.last] };
+        const { scrollOffset, displayCount } = this._vp;
+        return { base: [this._minimumXIndex(), this._scrollTotal()], view: [scrollOffset, scrollOffset + displayCount] };
+    }
+
+    _yScrollViewport() {
+        const base = this._zoomBaseY[this.displayMode], view = this._boxZoomY[this.displayMode];
+        const state = this._drawState;
+        return { base: state && base && [base.min, base.max], view: view && [view.min, view.max], scale: base?.yScale ?? state?.yScale };
+    }
+
+    _panXToFraction(fraction) {
+        if (!Number.isFinite(fraction)) return;
+        const previous = this._viewportState();
+        const { base, view, scale } = this._xScrollViewport();
+        const next = WavePlotViewport.panPlotAxis(base, view, fraction, scale);
+        if (!next) return;
+        if (this.displayMode === 'time') {
+            this._timeCenterOrder = null;
+            const timed = this._vp.followTime && this._timeExtent();
+            this._clearTimeZoomAnchor();
+            if (timed) {
+                this._vp.scrollOffset = this._timeBoundaryIndex(next[0], false);
+                this._vp.autoFollow = fraction >= 1;
+                if (this._vp.autoFollow) this._vp.followLag = 0;
+                this._setTimeZoomBounds({ first: next[0], last: next[1] }, timed.last);
+            } else {
+                this._vp.scrollOffset = Math.round(next[0]);
+                this._vp.autoFollow = false;
+                this._clampScroll();
+            }
+            this._timeWindowStartOrder = this.frames.orderAt(Math.floor(this._vp.scrollOffset));
+        } else {
+            this._vp.displayCount = Math.max(2, next[1] - next[0] + 1);
+            this._vp.scrollOffset = next[0];
+            this._vp.autoFollow = false;
+            this._clampScroll();
+        }
+        this._markViewDirty(); this._updateScrollbar();
+        if (this.isPaused) this.draw();
+        this._notifyViewportChange(previous);
     }
 
     _panYToFraction(fraction) {
-        const previousViewport = this._viewportState();
-        const base = this._zoomBaseY[this.displayMode];
-        const zoom = this._boxZoomY[this.displayMode];
-        if (!base || !zoom) return;
-        const scale = base.yScale ?? this._drawState?.yScale ?? 'linear';
-        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
-        const fromDomain = value => globalThis.SerialPlotter.axisFromDomain(value, scale);
-        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
-        const span = toDomain(zoom.max) - toDomain(zoom.min);
-        const travel = baseMax - baseMin - span;
-        if (!(travel > 0)) return;
-        const nextMin = Math.max(baseMin,
-            baseMax - Math.max(0, Math.min(1, fraction)) * travel - span);
-        this._boxZoomY[this.displayMode] = {
-            min: fromDomain(nextMin), max: fromDomain(nextMin + span)
-        };
-        this._markViewDirty();
-        this._updateYScrollbar();
+        const { base, view, scale } = this._yScrollViewport();
+        const next = WavePlotViewport.panPlotAxis(base, view, fraction, scale, true);
+        if (!next) return;
+        const previous = this._viewportState();
+        this._boxZoomY[this.displayMode] = { min: next[0], max: next[1] };
+        this._markViewDirty(); this._updateYScrollbar();
         if (this.isPaused) this.draw();
-        this._notifyViewportChange(previousViewport);
+        this._notifyViewportChange(previous);
     }
 
-    /** 根据当前模式的视口位置和可滚动范围更新滚动条 thumb 的宽度和位置 */
     _updateScrollbar() {
-        if (this._presentationDeferred || !this.scrollbarWrap || !this.scrollbarThumb) return;
-        const minimum = this._minimumXIndex(), total = this._scrollTotal() - minimum;
-        if (this._vp.displayCount >= total) {
-            this.scrollbarThumb.style.left = '0'; this.scrollbarThumb.style.width = '100%'; return;
-        }
-        const wrapW = this.scrollbarWrap.clientWidth;
-        const thumbW = Math.min(wrapW, Math.max(24, Math.round(wrapW * this._vp.displayCount / total)));
-        const travel = total - this._vp.displayCount;
-        const left = Math.round(Math.max(0, Math.min(1, (this._vp.scrollOffset - minimum) / travel)) * (wrapW - thumbW));
-        this.scrollbarThumb.style.width = thumbW + 'px';
-        this.scrollbarThumb.style.left  = left  + 'px';
+        if (!this._presentationDeferred && this.scrollbarWrap) this.xScrollBar.update();
     }
 
     _updateYScrollbar() {
-        if (!this.yScrollbarWrap || !this.yScrollbarThumb) return;
-        const base = this._zoomBaseY[this.displayMode];
-        const zoom = this._boxZoomY[this.displayMode];
+        if (!this.yScrollbarWrap) return;
         const state = this._drawState;
-        if (!base || !zoom || !state) { this.yScrollbarWrap.hidden = true; return; }
-        const scale = base.yScale ?? state.yScale;
-        const toDomain = value => globalThis.SerialPlotter.axisToDomain(value, scale);
-        const baseMin = toDomain(base.min), baseMax = toDomain(base.max);
-        const zoomMin = toDomain(zoom.min), zoomMax = toDomain(zoom.max);
-        const baseSpan = baseMax - baseMin, zoomSpan = zoomMax - zoomMin;
-        if (!(baseSpan > 0) || !(zoomSpan > 0) || zoomSpan >= baseSpan * (1 - 1e-12)) {
-            this.yScrollbarWrap.hidden = true;
-            return;
-        }
-        const canvasRect = this.canvas.getBoundingClientRect();
-        const parentRect = this.canvas.parentElement.getBoundingClientRect();
-        const height = state.plotH * canvasRect.height / this.height / this._displayScale();
-        const thumbHeight = Math.min(height, Math.max(20, height * zoomSpan / baseSpan));
-        const topFraction = Math.max(0, Math.min(1,
-            (baseMax - zoomMax) / (baseSpan - zoomSpan)));
-        this.yScrollbarWrap.style.top = `${(canvasRect.top - parentRect.top) / this._displayScale()}px`;
-        this.yScrollbarWrap.style.height = `${height}px`;
-        this.yScrollbarThumb.style.height = `${thumbHeight}px`;
-        this.yScrollbarThumb.style.top = `${topFraction * (height - thumbHeight)}px`;
-        this.yScrollbarWrap.hidden = false;
+        if (!state) { this.yScrollBar.update(); return; }
+        this.yScrollBar.update(this.viewport.verticalTrack(this._displayScale()));
     }
 
     /* ── 渲染 ── */
@@ -1523,7 +1563,7 @@ class Plotter {
         const snapshot = Object.assign(Object.create(this), {
             canvas, ctx: canvas.getContext('2d'), gpuRenderer: null, fftWorkerPool: null,
             _fftPending: null, _fftCache: new Map(), _fftVersion: -1, _spectrumDisplayCache: new WeakMap(),
-            _timeSeriesCache: null, scrollbarWrap: null, plotHeader: null, _layoutHeaderHeight: 0,
+            _timeSeriesCache: null, scrollbarWrap: null, yScrollbarWrap: null, plotHeader: null, _layoutHeaderHeight: 0,
             onStatsUpdate: null, onStatusUpdate: null
         });
         snapshot._renderFrame(true);

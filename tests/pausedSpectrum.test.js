@@ -19,7 +19,7 @@ function createPlotter() {
     const context = vm.createContext({ document, window: { addEventListener() {} },
         performance, requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'plotViewport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'),
             context, { filename: file });
     }

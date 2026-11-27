@@ -41,6 +41,17 @@ function normalizeWidgetViewport(input) {
             throw new TypeError('Widget viewport range is invalid');
         result[mode] = { displayCount: view.displayCount, autoFollow: view.autoFollow,
             startFraction: view.startFraction, yZoom: normalizeViewportYZoom(view.yZoom) };
+        if (mode === 'time' && view.followLag != null) {
+            if (!Number.isFinite(view.followLag) || view.followLag < 0)
+                throw new TypeError('时域跟随滞后点数无效');
+            result.time.followLag = view.followLag;
+        }
+        if (mode === 'time' && view.followTime != null) {
+            const { lag, span } = view.followTime;
+            if (!Number.isFinite(lag) || lag < 0 || !Number.isFinite(span) || span <= 0)
+                throw new TypeError('时域跟随的滞后或跨度无效');
+            result.time.followTime = { lag, span };
+        }
     }
     return result;
 }
@@ -71,6 +82,19 @@ function captureWidgetViewport(plotter) {
             startFraction: travel > 0 ? Math.max(0, Math.min(1, view.scrollOffset / travel)) : 0,
             yZoom: zoom ? { ...viewportBounds(zoom), ...(base ? { base: {
                 ...viewportBounds(base), yScale: viewportYScale(base.yScale) } } : {}) } : null };
+        if (mode === 'time') {
+            result.time.followLag = view.followLag;
+            result.time.followTime = view.followTime;
+            if (!view.autoFollow && view.followTime) {
+                const extent = plotter._timeExtent(), bounds = extent && plotter._timeZoomBounds();
+                if (bounds) {
+                    const travelMs = extent.last - extent.first - view.followTime.span;
+                    result.time.startFraction = travelMs > 0
+                        ? Math.max(0, Math.min(1, (bounds.first - extent.first) / travelMs)) : 0;
+                    result.time.followTime = { lag: Math.max(0, extent.last - bounds.last), span: view.followTime.span };
+                }
+            }
+        }
     }
     return normalizeWidgetViewport(result);
 }
@@ -85,7 +109,9 @@ function restoreWidgetViewport(plotter, input) {
         const total = mode === 'time' ? plotter.frames.length : widgetFrequencyTotal(plotter);
         const travel = Math.max(0, total - view.displayCount);
         const start = saved.startFraction * travel;
-        view.scrollOffset = saved.autoFollow ? travel : mode === 'time' ? Math.round(start) : start;
+        view.scrollOffset = saved.autoFollow
+            ? Math.max(0, travel - (saved.followLag ?? 0))
+            : mode === 'time' ? Math.round(start) : start;
         const zoom = saved.yZoom;
         plotter._boxZoomY[mode] = zoom ? { min: zoom.min, max: zoom.max } : null;
         if (!zoom) plotter._zoomBaseY[mode] = null;
@@ -98,6 +124,18 @@ function restoreWidgetViewport(plotter, input) {
             };
         }
         if (mode === 'time') {
+            view.followLag = saved.followLag;
+            view.followTime = saved.followTime;
+            plotter._frozenTimeEnd = null;
+            if (!saved.autoFollow && saved.followTime) {
+                const extent = plotter._timeExtent();
+                if (extent) {
+                    const { span } = saved.followTime;
+                    const first = extent.first + saved.startFraction * Math.max(0, extent.last - extent.first - span);
+                    plotter._frozenTimeEnd = first + span;
+                    view.scrollOffset = Math.min(plotter.frames.length - 1, plotter._timeBoundaryIndex(first, false));
+                }
+            }
             const center = Math.min(plotter.frames.length - 1,
                 view.scrollOffset + Math.floor(Math.max(2, Math.floor(view.displayCount)) / 2));
             plotter._timeCenterOrder = saved.autoFollow ? null : plotter.frames.orderAt(center);

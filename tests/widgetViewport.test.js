@@ -13,7 +13,7 @@ function createPlotter(length = 128, firstOrder = 1) {
     const context = vm.createContext({ document, window: { addEventListener() {} },
         performance, requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'plotter.js'])
+        'channelTransform.js', 'spectrum.js', 'plotViewport.js', 'plotter.js'])
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context);
     const frames = new context.SerialPlotter.FrameBuffer(1, 1024);
     for (let i = 0; i < length; i++) frames.append([i], Uint8Array.of(i & 255),
@@ -29,6 +29,62 @@ const state = () => ({
     frequency: { displayCount: 17, autoFollow: false, startFraction: 0.5, yZoom: null }
 });
 const viewportApi = () => require('../widgetViewport');
+
+test('a live time zoom roundtrips its offset in samples and duration in milliseconds', () => {
+    const { captureWidgetViewport, restoreWidgetViewport, normalizeWidgetViewport } = viewportApi();
+    const first = createPlotter();
+    Object.assign(first.vp.time, { displayCount: 32, scrollOffset: 84, autoFollow: true,
+        followLag: 12, followTime: { lag: 24, span: 62 } });
+    const saved = captureWidgetViewport(first);
+    assert.equal(saved.time.followLag, 12);
+    assert.deepEqual(saved.time.followTime, { lag: 24, span: 62 });
+    assert.notEqual(saved.time.followTime, first.vp.time.followTime);
+    const other = createPlotter(160);
+    assert.equal(restoreWidgetViewport(other, saved), true);
+    assert.equal(other.vp.time.scrollOffset, 116);
+    assert.equal(other.vp.time.followLag, 12);
+    assert.deepEqual(other.vp.time.followTime, { lag: 24, span: 62 });
+    assert.equal(restoreWidgetViewport(other, state()), true);
+    assert.equal(other.vp.time.followLag, undefined);
+    assert.equal(other.vp.time.followTime, undefined);
+    saved.time.followTime.span = 0;
+    assert.throws(() => normalizeWidgetViewport(saved));
+    saved.time.followLag = -1;
+    delete saved.time.followTime;
+    assert.throws(() => normalizeWidgetViewport(saved));
+});
+
+test('manual time scrollbar restores a historical time fraction across unevenly spaced samples', () => {
+    const { captureWidgetViewport, restoreWidgetViewport } = viewportApi();
+    function timedPlotter(times) {
+        const plotter = createPlotter(0);
+        for (const [i, time] of times.entries()) plotter.frames.append([i], Uint8Array.of(i), '', i + 1, time);
+        plotter.receiveTimeAxis = true;
+        plotter.timeXUnit = 's';
+        plotter.vp.time.displayCount = 3;
+        return plotter;
+    }
+    const source = timedPlotter([0, 1, 2, 3, 4, 200, 205, 500]);
+    Object.assign(source.vp.time, { autoFollow: true, followLag: 0, followTime: { lag: 0, span: 100 } });
+    source._panXToFraction(.5);
+    const saved = captureWidgetViewport(source);
+    assert.equal(saved.time.autoFollow, false);
+    assert.equal(saved.time.followLag, undefined);
+    assert.equal(saved.time.startFraction, .5);
+    assert.deepEqual(saved.time.followTime, { lag: 200, span: 100 });
+    const restored = timedPlotter([1000, 1010, 1015, 1120, 1212, 1300, 1400, 1500]);
+    restored._frozenTimeEnd = 1234;
+    restoreWidgetViewport(restored, saved);
+    assert.deepEqual({ ...restored._timeZoomBounds() }, { first: 1200, last: 1300 });
+    assert.equal(restored.vp.time.scrollOffset, 4);
+    assert.equal(restored.vp.time.followLag, undefined);
+    restored.frames.append([8], Uint8Array.of(8), '', 9, 1600);
+    restored.invalidateData();
+    assert.deepEqual({ ...restored._timeZoomBounds() }, { first: 1200, last: 1300 });
+    assert.equal(captureWidgetViewport(restored).time.startFraction, .4);
+    restoreWidgetViewport(restored, state());
+    assert.equal(restored._frozenTimeEnd, null);
+});
 
 test('capture saves independent portable ranges without source coordinates', () => {
     const { captureWidgetViewport } = viewportApi();

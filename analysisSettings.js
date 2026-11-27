@@ -74,7 +74,7 @@
         xAuto = true, yAuto = true, xMin = -1, xMax = 1, yMin = -1, yMax = 1,
         gainUnit = 'ratio', gainYAuto = true, gainYMin = 0, gainYMax = 2,
         gainDbYAuto = true, gainDbYMin = -40, gainDbYMax = 20,
-        freqXScale = 'hz-linear', phaseUnit = 'radians', phaseUnwrap = true, phaseYAuto = true,
+        freqXScale = 'hz-log', phaseUnit = 'radians', phaseUnwrap = true, phaseYAuto = true,
         phaseYMin = phaseUnit === 'radians' ? -Math.PI : -180, phaseYMax = phaseUnit === 'radians' ? Math.PI : 180,
         coherenceYAuto = false, coherenceYMin = 0, coherenceYMax = 1,
         fftOverlap = 50, fftWindow = 'hann', fftRemoveDc = true, ...settings }) {

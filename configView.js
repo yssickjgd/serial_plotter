@@ -60,7 +60,7 @@ function applyConfigToView(config, { elements, bounds, updateConnectionModeUI,
             Number(elements.maxPoints.value) || 1000));
     for (const [key, defaultValue] of Object.entries({
         plotTimeXUnit: 'samples', plotFreqXUnit: 'hz',
-        plotFreqXScale: 'linear', plotFreqYScale: 'linear', plotFftWindow: 'hann'
+        plotFreqXScale: 'log', plotFreqYScale: 'linear', plotFftWindow: 'hann'
     })) {
         if (!elements[key].value) elements[key].value = defaultValue;
     }

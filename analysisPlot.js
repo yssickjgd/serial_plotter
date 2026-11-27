@@ -6,6 +6,8 @@
     const { pairSpectrum, countSpectrumBlocks } = typeof module !== 'undefined' ? require('./pairSpectrum') : S;
     const wavelet = typeof module !== 'undefined' ? require('./waveletPlot') : S.WaveletPlot;
     const { PlotViewport, PlotScrollbar, panPlotAxis } = typeof module !== 'undefined' ? require('./plotViewport') : S;
+    const { nativeChannelEvents, rewindNativeEvents, nativeEventRate } =
+        typeof module !== 'undefined' ? require('./analysisSamples') : S.AnalysisSamples;
     const NS = 'http://www.w3.org/2000/svg';
     const background = '#111111', foreground = '#d1d5db', accent = '#38bdf8';
     let nextClip = 0;
@@ -42,6 +44,9 @@
     const channelLabel = (frames, index) => index == null ? '未绑定' :
         (frames.names?.[index] || frames.channelNames?.[index] || 'CH' + String(index + 1).padStart(5, '0'));
     const native = (frames, channel) => frames.events instanceof Map && channel < frames.rawChannelCount;
+    const sameNativePacket = (frames, pair) => native(frames, pair.x) && native(frames, pair.y) &&
+        frames.channelSourceIds?.[pair.x] === frames.channelSourceIds?.[pair.y] &&
+        frames.channelPacketGroups?.[pair.x] === frames.channelPacketGroups?.[pair.y];
     function timeBounds(frames, start, end, liveCount) {
         const live = liveCount && frames.liveTimeBounds?.(liveCount);
         if (live) return live;
@@ -65,20 +70,24 @@
     // Within a source, two channels must refer to the very same packet. A batch can
     // have many different packets with one timestamp, and protocol fields may be sparse.
     function compareEvents(x, y) {
-        const delta = eventTime(x) - eventTime(y);
-        if (delta || x.origin === y.origin) return delta;
-        if (!x.origin || !y.origin) return x.origin ? 1 : -1;
+        if (x.origin && x.origin === y.origin) return 0;
+        if (!x.origin || !y.origin) return eventTime(x) - eventTime(y) || Number(Boolean(x.origin)) - Number(Boolean(y.origin));
         return (x.origin.epoch ?? 0) - (y.origin.epoch ?? 0) ||
+            (x.origin.generation ?? 0) - (y.origin.generation ?? 0) ||
             (x.origin.order ?? 0) - (y.origin.order ?? 0) ||
-            (x.origin.byteOffset ?? 0) - (y.origin.byteOffset ?? 0);
+            (x.origin.byteOffset ?? 0) - (y.origin.byteOffset ?? 0) || eventTime(x) - eventTime(y);
     }
-    function nativePairs(frames, pair, bounds, emit) {
-        const xs = frames.events.get(pair.x) ?? [], ys = frames.events.get(pair.y) ?? [];
-        let i = Math.max(0, eventBound(xs, bounds.first) - 1), j = Math.max(0, eventBound(ys, bounds.first) - 1);
-        const endX = Math.min(xs.length, eventBound(xs, bounds.last, true) + 1);
-        const endY = Math.min(ys.length, eventBound(ys, bounds.last, true) + 1);
-        let previous = null, gap = true;
-        const expiry = Math.min(...[pair.x, pair.y].map(c => frames.expiry?.[c] > 0 ? frames.expiry[c] * 1000 : Infinity));
+    function nativePairs(frames, pair, bounds, emit, limit = Infinity) {
+        const xs = nativeChannelEvents(frames, pair.x), ys = nativeChannelEvents(frames, pair.y);
+        const endX = eventBound(xs, bounds.last ?? Infinity, true), endY = eventBound(ys, bounds.last ?? Infinity, true);
+        let i = eventBound(xs, bounds.first ?? -Infinity), j = eventBound(ys, bounds.first ?? -Infinity);
+        if (finite(limit)) {
+            i = Math.max(i, rewindNativeEvents(xs, endX, limit));
+            j = Math.max(j, rewindNativeEvents(ys, endY, limit));
+        }
+        const sections = frames.channelSourceIds ? [] : frames.segments ?? [];
+        let section = boundary(sections.length, index => sections[index].time <= eventTime(xs[i] ?? { timestamp: -Infinity }));
+        let previous = null, firstPacket = null, lastPacket = null, count = 0, gap = true;
         while (i < endX && j < endY) {
             const x = xs[i], y = ys[j], order = compareEvents(x, y);
             if (order) {
@@ -87,36 +96,21 @@
             }
             i++; j++;
             const time = eventTime(x), origin = x.origin;
+            while (section < sections.length && sections[section].time <= time) { section++; gap = true; }
             if (!origin || !finite(x.value) || !finite(y.value)) { gap = true; previous = null; continue; }
-            if (origin.breakBefore || previous && origin.epoch !== previous.epoch) gap = true;
-            if (previous && !gap && origin.missingBefore > 0 && origin.period > 0) {
-                const base = time - origin.missingBefore * origin.period;
-                const from = Math.max(0, Math.ceil((bounds.first - base) / origin.period));
-                const stop = Math.min(origin.missingBefore, Math.floor((bounds.last - base) / origin.period) + 1);
-                const stride = Math.max(1, Math.ceil((stop - from) / 256));
-                for (let slot = from; slot < stop; slot += stride) {
-                    const t = base + slot * origin.period;
-                    if (t <= previous.time || t >= time || t < bounds.first || t > bounds.last) continue;
-                    const xv = frames._estimate(pair.x, t, true)?.value, yv = frames._estimate(pair.y, t, true)?.value;
-                    if (finite(xv) && finite(yv)) { emit(xv, yv, t, gap, true); gap = false; }
-                    else gap = true;
-                }
-            } else if (previous && time - previous.time >= expiry) gap = true;
-            if (time >= bounds.first && time <= bounds.last) { emit(x.value, y.value, time, gap, false); gap = false; }
-            // The predecessor may be outside the visible window and still establish
-            // the interpolation interval for the first visible recovered sample.
-            if (time < bounds.first) gap = false;
-            previous = { time, epoch: origin.epoch };
+            if (origin.breakBefore || origin.missingBefore || previous &&
+                (origin.epoch !== previous.epoch || origin.generation !== previous.generation ||
+                    origin.fixedSampleRate !== previous.fixedSampleRate)) gap = true;
+            emit(x.value, y.value, time, gap, false);
+            if (gap) { firstPacket = x; count = 0; }
+            firstPacket ??= x; lastPacket = x; count++;
+            gap = false; previous = origin;
         }
+        return nativeEventRate(firstPacket, lastPacket, count);
     }
-    function readPairs(frames, pair, start, end, bounds, emit, gridOnly = false) {
+    function readPairs(frames, pair, start, end, bounds, emit, gridOnly = false, nativeLimit = Infinity) {
         if (![pair.x, pair.y].every(c => validChannel(frames, c))) return;
-        if (!gridOnly && native(frames, pair.x) && native(frames, pair.y) &&
-            frames.channelSourceIds?.[pair.x] === frames.channelSourceIds?.[pair.y] &&
-            frames.channelPacketGroups?.[pair.x] === frames.channelPacketGroups?.[pair.y]) {
-            nativePairs(frames, pair, bounds, emit);
-            return;
-        }
+        if (sameNativePacket(frames, pair)) return nativePairs(frames, pair, bounds, emit, nativeLimit);
         [start, end] = gridRange(frames, start, end, bounds);
         const xs = frames.copyChannel?.(pair.x, start, end), ys = pair.y === pair.x ? xs : frames.copyChannel?.(pair.y, start, end);
         const events = [...new Set([pair.x, pair.y])].filter(c => native(frames, c)).map(channel => {
@@ -150,25 +144,28 @@
         }
     }
 
-    function readSpectrumInput(frames, pair, start, end, bounds, preferredSize, overlap) {
-        const xValues = new Float64Array(end - start), yValues = new Float64Array(end - start), segments = [];
+    function readSpectrumInput(frames, pair, start, end, bounds, preferredSize, overlap, windowPoints, historical, gridRate) {
+        const nativePair = sameNativePacket(frames, pair);
+        const size = nativePair ? windowPoints : end - start;
+        const xValues = new Float64Array(size), yValues = new Float64Array(size), segments = [];
         let first = 0, recovered = 0, samples = 0;
         const finish = () => {
             if (samples - first >= 2) segments.push({ x: xValues.subarray(first, samples), y: yValues.subarray(first, samples) });
             first = samples;
         };
-        readPairs(frames, pair, start, end, bounds, (x, y, time, gap, filled) => {
+        const nativeBounds = nativePair ? { last: historical ? bounds.last : Infinity } : bounds;
+        const sourceRate = readPairs(frames, pair, start, end, nativeBounds, (x, y, time, gap, filled) => {
             if (gap) finish();
             xValues[samples] = x; yValues[samples++] = y;
             if (filled) recovered++;
-        }, true);
+        }, true, size);
         finish();
         let fftSize = preferredSize, blocks = countSpectrumBlocks(segments, fftSize, overlap);
         while (blocks < 2 && fftSize > 2) {
             fftSize /= 2;
             blocks = countSpectrumBlocks(segments, fftSize, overlap);
         }
-        return { segments, pair, recovered, samples, fftSize, blocks };
+        return { segments, pair, recovered, samples, fftSize, blocks, rate: nativePair ? sourceRate ?? 0 : gridRate };
     }
 
     function histogramDigits(length, valueAt) {
@@ -288,7 +285,7 @@
 
     // Simplify in two-dimensional display space. Time buckets can connect opposite
     // sides of a fast closed orbit with a chord that the source never traversed.
-    function trajectory(frames, pair, start, end, bounds, budget, viewport, aspect = .6) {
+    function trajectory(frames, pair, start, end, bounds, budget, viewport, aspect = .6, nativeLimit = Infinity) {
         let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
         let small = [], segment = 0, seq = 0;
         readPairs(frames, pair, start, end, bounds, (x, y, time, gap, recovered) => {
@@ -298,7 +295,7 @@
             seq++;
             xMin = Math.min(xMin, x); xMax = Math.max(xMax, x);
             yMin = Math.min(yMin, y); yMax = Math.max(yMax, y);
-        });
+        }, false, nativeLimit);
         const limits = [xMin, xMax, yMin, yMax];
         if (small) return { pair, points: small, samples: small, limits };
         const xr = finite(viewport?.[0]) ? viewport.slice(0, 2) : extent(xMin, xMax);
@@ -355,7 +352,7 @@
             }
             block.push(sample);
             if (block.length === 96) flush();
-        });
+        }, false, nativeLimit);
         flush();
         if (prior && lastDrawn !== prior) { prior.move = true; points.push(prior); }
         return { pair, points, samples, limits };
@@ -654,7 +651,10 @@
         frequencyAtBin(bin) { return this.frequencyUnit === 'Hz' ? bin * this.frequencyRate / this.axisFftSize : bin; }
         // Use the finest grid among the displayed spectra. Coarser FFTs are
         // drawn at the same physical frequencies on that grid.
-        spectrumBin(bin, spectrum) { return bin * this.axisFftSize / spectrum.fftSize; }
+        spectrumBin(bin, spectrum) {
+            const ratio = this.frequencyUnit === 'Hz' && spectrum.rate > 0 ? spectrum.rate / this.frequencyRate : 1;
+            return bin * ratio * this.axisFftSize / spectrum.fftSize;
+        }
         binToAxis(bin) { return this.logFrequency ? Math.log10(bin) : bin; }
         axisToBin(x) { return this.logFrequency ? 10 ** x : x; }
         spectrumWindow(start, end) {
@@ -682,7 +682,7 @@
         }
         publishSpectra(results, key, rate) {
             const s = this.settings;
-            const previousSize = this.axisFftSize;
+            const previousSize = this.axisFftSize, previousRate = this.frequencyRate;
             this.spectra = results.map(data => {
                 const values = data[s.viewMode];
                 if (this.phaseSpectrum) {
@@ -704,10 +704,14 @@
             });
             this.spectrumAxisSize = this.spectra.reduce((size, { fftSize, values }) =>
                 fftSize > size && values.some((value, bin) => (!this.logFrequency || bin > 0) && finite(value)) ? fftSize : size, 0) || null;
+            const rates = this.spectra.filter(({ blocks }) => blocks >= 2).map(data => data.rate ?? rate);
+            this.frequencyRate = this.spectrumRate = rates.length ? rates.every(value => value > 0) ? Math.max(...rates) : 0 : rate;
+            this.mixedSpectrumRates = this.frequencyUnit === 'Hz' && rates.some(value => value !== this.frequencyRate);
             this.referenceBins = this.spectra.some(({ fftSize, values }) =>
                 fftSize !== this.axisFftSize && values.some((value, bin) => (!this.logFrequency || bin > 0) && finite(value)));
-            if (this.zoom?.x && previousSize !== this.axisFftSize) {
-                const ratio = this.axisFftSize / previousSize;
+            if (this.zoom?.x && (previousSize !== this.axisFftSize || previousRate !== this.frequencyRate)) {
+                const ratio = this.axisFftSize / previousSize *
+                    (this.frequencyUnit === 'Hz' && previousRate > 0 ? previousRate / this.frequencyRate : 1);
                 const [lower, upper] = this.zoom.x;
                 const [min, max] = this.spectrumXBounds();
                 const first = Math.max(min, this.binToAxis(this.axisToBin(lower) * ratio));
@@ -716,7 +720,6 @@
                 if (!this.zoom.x && !this.zoom.y) this.zoom = null;
             }
             this.spectrumKey = key;
-            this.spectrumRate = rate;
             this.dataKey = null;
         }
         updateSpectra(start, end, bounds, rate, synchronous) {
@@ -726,7 +729,8 @@
             this.cancelSpectrumRequest();
             const { fftWindow, fftOverlap, fftRemoveDc, pairs } = this.settings;
             const preferredSize = this.fftSize;
-            const inputs = pairs.filter(pair => pair.visible).map(pair => readSpectrumInput(this.frames, pair, start, end, bounds, preferredSize, fftOverlap));
+            const inputs = pairs.filter(pair => pair.visible).map(pair => readSpectrumInput(this.frames, pair, start, end,
+                bounds, preferredSize, fftOverlap, this.windowPoints, this.historyOrdinal != null, rate));
             const gainUnit = this.gainSpectrum ? (this.gainInDb ? this.settings.gainUnit : 'ratio') : null;
             const parameters = fftSize => ({ fftSize, fftWindow, fftOverlap, fftRemoveDc, gainUnit });
             const empty = info => ({ ...info, [this.settings.viewMode]: [] });
@@ -759,7 +763,11 @@
                 this.invalidateData();
             });
         }
-        spectrumXBounds() { return [this.binToAxis(this.logFrequency ? 1 : 0), this.binToAxis(this.axisFftSize / 2)]; }
+        spectrumXBounds() {
+            const min = this.spectra.reduce((lowest, spectrum) => spectrum.blocks >= 2
+                ? Math.min(lowest, this.spectrumBin(1, spectrum)) : lowest, 1);
+            return [this.binToAxis(this.logFrequency ? min : 0), this.binToAxis(this.axisFftSize / 2)];
+        }
         spectrumRange() {
             const s = this.settings, key = config.spectrumYRangeKey(s);
             const fixed = [s[key + 'Min'], s[key + 'Max']];
@@ -776,8 +784,8 @@
             const wrapThreshold = this.maxSpectrumPhaseStep;
             let min = Infinity, max = -Infinity;
             const include = value => { min = Math.min(min, value); max = Math.max(max, value); };
-            for (const { values, fftSize } of this.spectra) {
-                const stride = this.axisFftSize / fftSize;
+            for (const spectrum of this.spectra) {
+                const { values } = spectrum, stride = this.spectrumBin(1, spectrum);
                 const first = Math.max(this.logFrequency ? 1 : 0, Math.floor(firstRef / stride));
                 const last = Math.min(values.length - 1, Math.ceil(lastRef / stride));
                 for (let bin = first; bin <= last; bin++) {
@@ -881,7 +889,9 @@
                     const viewport = [...(xZoom ?? [s.xAuto ? null : s.xMin, s.xMax]),
                         ...(yZoom ?? [s.yAuto ? null : s.yMin, s.yMax])];
                     this.traces = s.pairs.filter(p => p.visible).map(p =>
-                        trajectory(frames, p, start, end, bounds, Math.max(128, width * 3), viewport, height / width));
+                        trajectory(frames, p, start, end, sameNativePacket(frames, p)
+                            ? { last: this.historyOrdinal == null ? Infinity : bounds.last } : bounds,
+                        Math.max(128, width * 3), viewport, height / width, this.windowPoints));
                 }
                 else if (!xy && !cwt) {
                     this.histogram ??= new HistogramWindow(s);
@@ -1021,9 +1031,13 @@
                 const last = r[0] === r[1] ? 0 : divisions;
                 const positions = Array.from({ length: last + 1 }, (_, i) => {
                     const value = this.xAt(i / divisions);
-                    return this.spectral ? this.binToAxis(Math.round(this.axisToBin(value))) : value;
+                    return this.spectral && !this.mixedSpectrumRates ? this.binToAxis(Math.round(this.axisToBin(value))) : value;
                 }).filter((value, i, values) => value >= r[0] && value <= r[1] && value !== values[i - 1]);
-                const values = positions.map(value => this.spectral ? this.frequencyAtBin(Math.round(this.axisToBin(value))) : value);
+                const values = positions.map(value => {
+                    if (!this.spectral) return value;
+                    const bin = this.axisToBin(value);
+                    return this.frequencyAtBin(this.mixedSpectrumRates ? bin : Math.round(bin));
+                });
                 const hz = this.spectral && this.frequencyUnit === 'Hz', bins = this.spectral && !hz;
                 const xLabels = hz ? values.map(value => formatPlotAxisCoordinate(value, xFormat))
                     : bins ? values.map(String) : tickLabels(values, xFormat);
@@ -1138,7 +1152,8 @@
             const wrapThreshold = this.maxSpectrumPhaseStep;
             const peaks = [], showPeaks = this.gainSpectrum || this.phaseSpectrum;
             let legendX = left, found = false, complete = false;
-            for (const { pair, values, blocks, recovered, samples, fftSize, xDominantBin, yDominantBin } of this.spectra) {
+            for (const spectrum of this.spectra) {
+                const { pair, values, blocks, recovered, samples, fftSize, xDominantBin, yDominantBin } = spectrum;
                 const name = channelLabel(this.frames, pair.x) + ' / ' + channelLabel(this.frames, pair.y);
                 const segment = fftSize + ' 点/段';
                 if (legendX < right - 36) {
@@ -1150,7 +1165,7 @@
                     legendX += 28 + caption.length * 7;
                 }
                 complete ||= blocks >= 2;
-                const stride = this.axisFftSize / fftSize;
+                const stride = this.spectrumBin(1, spectrum);
                 const first = Math.max(this.logFrequency ? 1 : 0, Math.floor(firstRef / stride));
                 const end = Math.min(values.length - 1, Math.ceil(lastRef / stride));
                 const line = [], dots = [];
@@ -1350,8 +1365,8 @@
             node(this.overlay, 'line', { x1: p.x, x2: p.x, y1: top, y2: bottom, ...guide });
             node(this.overlay, 'line', { x1: left, x2: right, y1: p.y, y2: p.y, ...guide });
             const points = [], maxStep = this.maxSpectrumPhaseStep;
-            for (const { fftSize, pair, values } of this.spectra) {
-                const stride = this.axisFftSize / fftSize;
+            for (const spectrum of this.spectra) {
+                const { pair, values } = spectrum, stride = this.spectrumBin(1, spectrum);
                 const bin = reference / stride, nearest = Math.round(bin);
                 const exact = Math.abs(bin - nearest) <= 8 * Number.EPSILON * Math.max(1, bin);
                 let lo = exact ? nearest : Math.floor(bin), hi = exact ? nearest : Math.ceil(bin);

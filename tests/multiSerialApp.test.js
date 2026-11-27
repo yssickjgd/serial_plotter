@@ -381,6 +381,46 @@ test('global waveforms receive aligned batches while painting is deferred and an
     assert.equal(widgets.active, other);
 });
 
+test('zoomed live workspace follows both native traces while the synchronous grid is waiting', async t => {
+    const f = bootApplication();
+    t.after(() => f.app.dispose());
+    addSerial(f);
+    f.selectConnection('serial-2', 'engine-parsing');
+    f.change('engine-mode', 'Data_Array');
+    await f.app.engineView.apply();
+    f.click('serial-manager-close');
+    f.click('workspace-channel-auto-map');
+    const widgets = f.app.widgets, workspace = f.app.workspaceChannels;
+    const { view } = widgets.create({ type: 'wave', settings: { connectionSource: 'workspace' } });
+    widgets.setChannelVisible(0, true);
+    widgets.setChannelVisible(1, true);
+    widgets.setPlotWindowPoints(64);
+    const events = (start, count) => Array.from({ length: count }, (_, i) => ({
+        time: 1000 + start + i, values: [[0, start + i], [1, -(start + i)]], origin: {}
+    }));
+    workspace.ingest(events(0, 200));
+    view.draw();
+    view.canvas.dispatchEvent({ type: 'wheel', clientX: 220, clientY: 120, deltaY: -120 });
+    view.draw();
+    const zoomed = { ...view._drawState.aligned };
+    assert.ok(zoomed.last - zoomed.first < 63, 'wheel narrows the 64-sample window');
+    assert.ok(zoomed.last < 1199, 'zoom around the pointer leaves an offset from latest');
+    const gridCount = workspace.numericSource.frames.length;
+    workspace.ingest(events(200, 12), true, 1199);
+    assert.equal(workspace.numericSource.frames.length, gridCount);
+    view.draw();
+    assert.equal(view._drawState.aligned.first, zoomed.first + 12);
+    assert.equal(view._drawState.aligned.last, zoomed.last + 12);
+    const series = view._timeSeriesCache.series;
+    assert.equal(series.length, 2);
+    const time = Math.floor(zoomed.last + 12);
+    for (const { channelIndex, times, rawValues } of series) {
+        const index = times.indexOf(time);
+        assert.ok(index >= 0, 'the newly visible native sample is in the drawn trace');
+        assert.equal(rawValues[index], channelIndex === 0 ? time - 1000 : 1000 - time);
+    }
+});
+
 test('source timebase settings update retained samples atomically and survive configuration reload', async t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     f.change('chk-header', false); f.change('chk-footer', false);

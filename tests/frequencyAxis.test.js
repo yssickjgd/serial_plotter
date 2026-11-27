@@ -45,7 +45,7 @@ function createPlotter(responseFrames = null, options = {}) {
     const context = vm.createContext({ document, window: { addEventListener() {} },
         performance, requestAnimationFrame() {}, console });
     for (const file of ['projectLimits.js', 'frameBuffer.js', 'plotMath.js',
-        'channelTransform.js', 'spectrum.js', 'systemResponse.js', 'waveSvg.js', 'plotter.js']) {
+        'channelTransform.js', 'spectrum.js', 'systemResponse.js', 'waveSvg.js', 'plotViewport.js', 'plotter.js']) {
         vm.runInContext(fs.readFileSync(require.resolve(`../${file}`), 'utf8'), context, { filename: file });
     }
     const { FrameBuffer, Plotter } = context.SerialPlotter;
@@ -447,7 +447,9 @@ test('frequency axis and cursor show hertz after a measured sample rate is avail
     plotter.setSampleRateHz(1024);
     plotter.draw();
     assert.ok(plotter._drawState.min >= 0, 'linear magnitude axis has no negative amplitudes');
-    assert.ok(labels.includes('0 Hz'));
+    assert.equal(plotter.freqXScale, 'log');
+    assert.ok(labels.includes('1 Hz'), 'the default logarithmic axis starts at the first positive bin');
+    assert.ok(!labels.includes('0 Hz'));
     assert.ok(labels.includes('512 Hz'), 'rightmost label includes the Nyquist bin');
     labels.length = 0;
     plotter.vp.frequency.scrollOffset = 100;
@@ -457,6 +459,18 @@ test('frequency axis and cursor show hertz after a measured sample rate is avail
     assert.ok(labels.includes('100 Hz'), 'zoomed axis keeps the absolute bin offset');
     assert.ok(labels.some(label => label.includes('100 Hz') && label.includes('Bin 100')),
         'cursor frequency and bin refer to the same sample');
+});
+
+test('panning a logarithmic frequency viewport keeps its displayed frequency ratio', () => {
+    const { plotter } = createPlotter();
+    plotter.setDisplayOptions({ freqXScale: 'log' }); plotter.draw();
+    Object.assign(plotter.vp.frequency, { scrollOffset: 2, displayCount: 15, autoFollow: false });
+    const read = () => plotter._frequencyViewport(plotter._scrollTotal());
+    const initial = read();
+    plotter._panXToFraction(1);
+    const end = read();
+    assert.equal(end.last, plotter._scrollTotal() - 1);
+    assert.ok(Math.abs(end.last / end.first - initial.last / initial.first) < 1e-9);
 });
 
 test('wheel zoom keeps the cursor near the same frequency on a log axis', () => {
@@ -723,7 +737,7 @@ test('time system response hover interpolates the sample position from the visib
 test('frequency hover retains hertz alongside the bin when the axis displays bins', () => {
     const { plotter, labels } = createPlotter();
     plotter.setSampleRateHz(2048);
-    plotter.setDisplayOptions({ freqXUnit: 'bins' });
+    plotter.setDisplayOptions({ freqXUnit: 'bins', freqXScale: 'linear' });
     plotter.vp.frequency.scrollOffset = 100;
     plotter.vp.frequency.displayCount = 101;
     plotter.mousePos = { x: (plotter.canvas.width - plotter.pX) / 2, y: 100 };
@@ -857,7 +871,7 @@ test('hover preserves sample or bin positions when the sample rate is unknown', 
     plotter.draw();
     assert.ok(labels.includes('Time: -- s (Sample 200.5)'));
     plotter.mousePos.x = 0;
-    plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins' });
+    plotter.setDisplayOptions({ displayMode: 'frequency', freqXUnit: 'bins', freqXScale: 'linear' });
     labels.length = 0;
     plotter.draw();
     assert.ok(labels.includes('Freq: -- Hz (Bin 0)'));

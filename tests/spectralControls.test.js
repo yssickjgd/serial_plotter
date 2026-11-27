@@ -2,6 +2,39 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApplication } = require('./helpers/widgetAppHarness');
 
+test('time zoom freeze is per widget and visible only in sampled time mode', async t => {
+    const f = bootApplication(); t.after(() => f.app.dispose());
+    const first = f.app.widgets.create({ type: 'wave' });
+    const option = f.get('plot-time-freeze-x-on-zoom'), section = f.get('wrap-plot-time-axis');
+    assert.equal(option.checked, false);
+    assert.equal(section.style.display, '');
+    f.change(option.id, true);
+    assert.equal(first.settings.plotTimeFreezeXOnZoom, true);
+    for (const mode of ['frequency', 'phase']) {
+        f.change('plot-view-mode', mode);
+        assert.equal(section.style.display, 'none');
+    }
+    f.change('plot-view-mode', 'time');
+    f.change('plot-content', 'response');
+    assert.equal(section.style.display, 'none');
+    f.change('plot-content', 'samples');
+    assert.equal(section.style.display, '');
+    f.change('engine-mode', 'Data_Array');
+    await f.app.engineView.apply();
+    f.click('workspace-channel-auto-map');
+    const second = f.app.widgets.create({ type: 'wave', settings: { connectionSource: 'workspace' } });
+    assert.equal(option.checked, false);
+    assert.equal(section.style.display, '');
+    assert.equal(option.disabled, false);
+    const saved = f.app.getConfig();
+    const restored = bootApplication(saved); t.after(() => restored.app.dispose());
+    for (const [id, expected] of [[first.id, true], [second.id, false]]) {
+        restored.app.widgets.activate(id);
+        assert.equal(restored.get(option.id).checked, expected);
+        assert.equal(restored.app.widgets.widgets.get(id).settings.plotTimeFreezeXOnZoom, expected);
+    }
+});
+
 test('phase units sit above unwrapping and remain independent per waveform through reload', t => {
     const f = bootApplication(); t.after(() => f.app.dispose());
     const wave = f.app.widgets.create({ type: 'wave', settings: { plotViewMode: 'phase' } });
