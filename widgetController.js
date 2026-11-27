@@ -30,7 +30,7 @@ class WidgetController {
         this.register('wave', { template: 'wave-widget-template', title: '波形' });
         this.register('byte', { template: 'byte-widget-template', title: '字节流' });
         this.register('pose', { template: 'pose-widget-template', title: '位姿' });
-        this.register('xy', { template: 'analysis-widget-template', title: '李萨如图' });
+        this.register('xy', { template: 'analysis-widget-template', title: 'Lissajous 图' });
         this.register('histogram', { template: 'analysis-widget-template', title: '频度直方图' });
         this.register('wavelet', { template: 'analysis-widget-template', title: '小波变换' });
         this.fieldIds = {

@@ -109,7 +109,7 @@ function validateConfig(config) {
         !Number.isFinite(Number(config.plotResponseSampleRate)) || Number(config.plotResponseSampleRate) < 0))
         throw new RangeError('系统响应采样率需为非负有限数值；0 表示未设置');
     if (config.serialBaud !== undefined)
-        parseIntInRange(config.serialBaud, 1, Number.MAX_SAFE_INTEGER, '波特率');
+        parseIntInRange(config.serialBaud, 1, Number.MAX_SAFE_INTEGER, 'Baud rate');
     if (config.idleGapSeconds !== undefined &&
         (String(config.idleGapSeconds).trim() === '' || !Number.isFinite(Number(config.idleGapSeconds)) ||
             Number(config.idleGapSeconds) < 0.001 || Number(config.idleGapSeconds) * 1000 > 2147483647))
@@ -117,7 +117,7 @@ function validateConfig(config) {
     for (const key of ['enableHeader', 'enableFooter', 'enableChecksum', 'plotFftRemoveDc',
         'plotPhaseUnwrap', 'plotTimeXUnitExplicit', 'plotTimeFreezeXOnZoom', 'rebuildHistory', 'captureVisibleOnly']) {
         if (config[key] !== undefined && typeof config[key] !== 'boolean')
-            throw new Error(`${key} 必须是布尔值`);
+            throw new Error(`${key} 必须是 Boolean 值`);
     }
     if (config.netPort !== undefined && config.netPort !== '') parsePort(config.netPort);
     if (config.netLocalPort !== undefined && config.netLocalPort !== '') parsePort(config.netLocalPort);

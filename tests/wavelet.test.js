@@ -2,9 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { bootArrayApplication } = require('./helpers/widgetAppHarness');
 
-function analyze(values, basis, cuts = [], rate = 1024) {
+function analyze(values, basis, cuts = [], rate = 1024, edgeExtension) {
     const { createWaveletProcessor } = require('../wavelet');
-    const processor = createWaveletProcessor({ values, rate, basis, cuts });
+    const processor = createWaveletProcessor({ values, rate, basis, cuts, edgeExtension });
     while (!processor.step(4096)) { /* Exercise the sliced fallback. */ }
     return processor.result();
 }
@@ -105,23 +105,26 @@ test('toggling wavelet DC removal on paused data invalidates coefficients withou
     assert.equal(frames.getValue(0, 0), 20);
 });
 
-test('wavelets reflect each finite run independently and leave missing samples blank', () => {
+test('all wavelet extensions isolate each finite run and leave missing samples blank', () => {
     const values = Float64Array.from({ length: 1024 }, (_, i) => Math.cos(Math.PI * i / 4));
     values[320] = NaN;
-    const real = analyze(values, 'mexicanHat', [640]);
-    assert.equal(real.phase, null);
-    const offset = (real.frequencies.length - 1) * real.columns;
-    assert.ok(Number.isNaN(real.magnitude[offset + 320 / real.hop]));
-    for (const index of [0, 640]) {
-        assert.ok(Number.isFinite(real.magnitude[offset + index / real.hop]));
-        assert.equal(real.reference[offset + index / real.hop], 1);
-    }
-    assert.ok(Number.isFinite(real.magnitude[offset + 768 / real.hop]));
     const changed = values.slice();
     changed.fill(1000, 640);
-    const next = analyze(changed, 'mexicanHat', [640]);
-    const left = offset + 638 / real.hop;
-    assert.equal(real.magnitude[left], next.magnitude[left], 'a hard cut isolates the fill on either side');
+    for (const edgeExtension of ['mirror', 'zero', 'hold']) {
+        const real = analyze(values, 'mexicanHat', [640], 1024, edgeExtension);
+        assert.equal(real.phase, null);
+        const offset = (real.frequencies.length - 1) * real.columns;
+        assert.ok(Number.isNaN(real.magnitude[offset + 320 / real.hop]));
+        for (const index of [0, 640]) {
+            assert.ok(Number.isFinite(real.magnitude[offset + index / real.hop]));
+            assert.equal(real.reference[offset + index / real.hop], 1);
+        }
+        assert.equal(real.reference[offset + 768 / real.hop], 0);
+        assert.ok(Number.isFinite(real.magnitude[offset + 768 / real.hop]));
+        const next = analyze(changed, 'mexicanHat', [640], 1024, edgeExtension);
+        const left = offset + 638 / real.hop;
+        assert.equal(real.magnitude[left], next.magnitude[left], 'a hard cut isolates the fill on either side');
+    }
 });
 
 test('a missing input between downsampled columns stays blank in hover and SVG tiles', () => {

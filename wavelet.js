@@ -268,9 +268,10 @@
             return runs;
         }
 
-        function createWaveletProcessor({ values, rate, basis, cuts = [], removeDc = false,
+        function createWaveletProcessor({ values, rate, basis, cuts = [], removeDc = false, edgeExtension = 'mirror',
             visibleStart = 0, visibleLength = values.length, ...resolution }, range = {}) {
             const profile = bases[basis];
+            if (!['mirror', 'zero', 'hold'].includes(edgeExtension)) throw new RangeError('小波时域延拓策略无效');
             if (!(values instanceof Float64Array) || values.length > maxWindowPoints + 2 * waveletContextSamples(maxWindowPoints) ||
                 !Number.isSafeInteger(visibleStart) || !Number.isSafeInteger(visibleLength) || visibleStart < 0 ||
                 visibleStart + visibleLength > values.length) throw new RangeError('小波分析参数无效');
@@ -338,8 +339,8 @@
             function prepareRun(run) {
                 const { start, end, from, until } = run;
                 const length = end - start, radius = windowRadius;
-                // Only reflect the part that can contribute to displayed
-                // centers, at most once per side inside this finite run.
+                // Extend only the support missing after consuming real context. Each
+                // side uses at most one run length minus one, including at hard cuts.
                 // Manual column counts select from one full-window transform, including after a crop.
                 const firstSample = positions ? Math.max(start, visibleStart) : centerAt(from);
                 const lastSample = positions ? Math.min(end - 1, visibleStart + visibleLength - 1) : centerAt(until - 1);
@@ -352,8 +353,14 @@
                 if (removeDc) {
                     for (let i = offset; i < offset + length; i++) signalRe[i] = signalRe[i] - dcReference - meanDelta;
                 }
-                for (let i = 1; i <= left; i++) signalRe[offset - i] = signalRe[offset + i];
-                for (let i = 1; i <= right; i++) signalRe[offset + length - 1 + i] = signalRe[offset + length - 1 - i];
+                if (edgeExtension === 'mirror') {
+                    for (let i = 1; i <= left; i++) signalRe[offset - i] = signalRe[offset + i];
+                    for (let i = 1; i <= right; i++) signalRe[offset + length - 1 + i] = signalRe[offset + length - 1 - i];
+                } else if (edgeExtension === 'hold') {
+                    const stop = offset + length;
+                    signalRe.fill(signalRe[offset], offset - left, offset);
+                    signalRe.fill(signalRe[stop - 1], stop, stop + right);
+                }
                 fft(signalRe, signalIm, fftPlan(size));
                 const outSize = size / foldHop, inversePlan = fftPlan(outSize);
                 const centers = new Uint32Array(until - from);

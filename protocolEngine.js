@@ -554,7 +554,7 @@
         const compileRule = source => {
             const rule = { stage: 'validation', strength: 'weak', send: 'verify', enabled: true, ...source };
             if (typeof rule.id !== 'string' || !rule.id || ids.has(rule.id) || entries.has(rule.id) || rule.id === compiled.id || compiled.messageById.has(rule.id)) fail('rules', '规则 ID 缺失或重复');
-            if (typeof rule.enabled !== 'boolean') fail('rules', '规则启用状态必须是布尔值');
+            if (typeof rule.enabled !== 'boolean') fail('rules', '规则启用状态必须是 Boolean 值');
             ids.add(rule.id);
             if (!['parsing', 'validation', 'both'].includes(rule.stage)) fail('rules', '规则参与阶段无效');
             if (!['strong', 'weak'].includes(rule.strength) || !['verify', 'fill'].includes(rule.send)) fail('rules', '规则强度或发送行为无效');
@@ -1771,7 +1771,7 @@
         return output;
     }
     function validateChecksumResult(config, details={}) {
-        if(config.invertResult!==undefined&&typeof config.invertResult!=='boolean')fail('checksum','结果取反必须为布尔值',{...details});
+        if(config.invertResult!==undefined&&typeof config.invertResult!=='boolean')fail('checksum','结果取反必须为 Boolean 值',{...details});
     }
     function checksum(bytes, config) {
         bytes = bytesOf(bytes);

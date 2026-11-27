@@ -234,7 +234,7 @@
         }
         xy(display) {
             const trajectory = this.settings.viewMode === 'trajectory';
-            this.property(display, 'viewMode', '显示模式', [['trajectory', '李萨如图'], ['gain', '幅度比频谱图'],
+            this.property(display, 'viewMode', '显示模式', [['trajectory', 'Lissajous 图'], ['gain', '幅度比频谱图'],
                 ['phase', '相位差频谱图'], ['coherence', '相干度频谱图']]);
             this.waveformProperty(display, 'traceMode', 'plot-trace-mode');
             if (trajectory) {
@@ -329,6 +329,9 @@
         }
         wavelet(content) {
             const settings = this.settings;
+            const basisChoices = settingsApi.waveletBases.map(([key, label]) =>
+                [key, label + (settingsApi.waveletCoefficientMode(key) === 'signed' ? '（实数域）' : '（复数域）')]);
+            this.property(content, 'basis', '小波基', basisChoices);
             const mode = this.property(content, 'viewMode', '图模式', settingsApi.waveletViews);
             const coefficientMode = settingsApi.waveletCoefficientMode(settings.basis);
             for (const option of mode.options)
@@ -352,9 +355,7 @@
             this.property(y, 'frequencyScale', '纵轴刻度', hzScales);
             this.xyAxisRange(y, 'Y', 'y');
             const group = this.group(this.display, '小波设置');
-            this.property(group, 'basis', '小波基', settingsApi.waveletBases);
-            group.append(this.element('p', 'hint-text', '分析会优先借用窗口外已采集的连续样点。边缘不足时用镜像延拓计算，浅色斜纹表示参考系数。缺失样点仍留空。'));
-            group.append(this.element('p', 'hint-text', '分析的最高频率低于采样率的一半。浅色区域提示高频侧响应受限。'));
+            this.property(group, 'edgeExtension', '时域延拓策略', settingsApi.waveletEdgeExtensions);
             const removeDc = this.property(group, 'removeDc', '频域去直流', 'checkbox');
             const dcHint = this.element('p', 'hint-text', '勾选后，先计算当前分析窗口内有效样点的均值，再从参与变换的样值中减去该均值。');
             dcHint.id = removeDc.id + '-hint';

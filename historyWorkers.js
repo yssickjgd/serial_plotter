@@ -577,9 +577,9 @@ class HistoryWorkerPool {
         let lanes = Math.min(free, 4);
         if (denseGrid || largeInverse) {
             const { nextPow2 } = typeof module !== 'undefined' ? require('./spectrum') : globalThis.SerialPlotter;
-            // Bound one worker's FFT workspace using the largest possible reflected run and fold alignment.
-            const reflection = Math.min(task.values.length - 1, waveletContextSamples(visibleLength) + 1);
-            const fftSize = nextPow2(2 * (task.values.length + 2 * reflection + inverseStride - 1));
+            // Bound one worker's FFT workspace using the longest possible extended run and fold alignment.
+            const padding = Math.min(task.values.length - 1, waveletContextSamples(visibleLength) + 1);
+            const fftSize = nextPow2(2 * (task.values.length + 2 * padding + inverseStride - 1));
             const scratch = 2 * Float64Array.BYTES_PER_ELEMENT * (fftSize + fftSize / inverseStride);
             // Keep capacity for incoming work when expanding the parallel transform.
             const expanded = Math.min(denseGrid ? 8 : 6, Math.max(2, free - 1),

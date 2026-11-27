@@ -15,7 +15,7 @@
             { names: ['HEADER'], category: '协议作用域', description: '旧协议公共头字段作用域；真实结构体使用自己的变量名。', scopes: ['channel','field'] },
             { names: ['INDEX'], category: '协议变量', description: '重复字段或 TLV 当前条目的索引，从 0 开始。', scopes: ['channel','field'] },
             { names: ['SEQ'], category: '协议变量', description: '结构化发送的自动序号；字段通过 valueSource: "SEQ" 显式绑定，仅在成功发送后推进。普通字段名称可自行定义。', scopes: ['channel','field'] },
-            { names: ['TRUE','FALSE'], category: '协议常量', description: '布尔常量，用于条件表达式。', scopes: ['channel','field'] },
+            { names: ['TRUE','FALSE'], category: '协议常量', description: 'Boolean 常量，用于条件表达式。', scopes: ['channel','field'] },
             { names: ['MIN','MAX','ABS'], category: '协议函数', description: '最小值、最大值、绝对值；例如 MIN(data_length, 64)。', scopes: ['channel','field'] },
             { names: ['LEN'], category: '协议函数', description: '返回指定字段或数据段实际编码所占的字节数，如 LEN(payload)；不是数组元素数或字符数，包含该段内的固定内容、校验和填充。普通表达式引用已读取字段，整帧长度表达式只引用可独立确定长度的段，禁止循环依赖。', scopes: ['channel','field'] },
             { names: ['_raw','_unknownTail','_segmentTails','_inferLength','rawPayload'], category: '内部记录键', description: '原始数值、未解释尾字节和内部布局状态；保持既有 JSON 键名，不可用作协议字段。', scopes: ['field'] },

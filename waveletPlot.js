@@ -148,7 +148,8 @@
         }
         update(frames, start, end, clock, settings, zoom, paused,
             { historical, followFrom, windowPoints = end - start } = {}) {
-            const { channel, basis, removeDc = false, frequencyScale = 'log', frequencyRows = 0, timeColumns = 0, timeStride = 0 } = settings;
+            const { channel, basis, edgeExtension = 'mirror', removeDc = false, frequencyScale = 'log',
+                frequencyRows = 0, timeColumns = 0, timeStride = 0 } = settings;
             this.message = channel == null ? '请选择一个输入通道' : '等待有效数值样点';
             if (channel == null || channel >= frames.channelCount || frames.isSignal?.(channel) === false) {
                 this.clear();
@@ -250,7 +251,7 @@
                 finite(frames.generation) && (events || frames.raw || frames.segments);
             const revision = stableHistory ? [frames.generation, frames.revision, frames.storageRevision] : frames.version;
             const key = [revision, ordinal + start, ordinal + end, ordinal + inputStart, ordinal + inputEnd,
-                channel, basis, removeDc, rate, t0, first, last, minimumHop, this.resolutionKey].join('|');
+                channel, basis, edgeExtension, removeDc, rate, t0, first, last, minimumHop, this.resolutionKey].join('|');
             const viewIndex = selection ? start + clamp(Math.round((selection[1] - t0) * rate), 0, count - 1) : end - 1;
             const viewNativeTime = input?.timestampAt(viewIndex);
             const viewOrdinal = input ? null : frames.frameOrdinalAt?.(viewIndex) ?? ordinal + viewIndex;
@@ -283,7 +284,7 @@
                 const samples = input ? input.read(inputStart, inputEnd) : {
                     values: frames.copyChannel?.(channel, inputStart, inputEnd) ??
                         Float64Array.from({ length: inputEnd - inputStart }, (_, i) => frames.getValue(channel, inputStart + i)) };
-                return { kind: 'wavelet', ...samples, ...gridOptions, removeDc, visibleStart: start - inputStart };
+                return { kind: 'wavelet', ...samples, ...gridOptions, edgeExtension, removeDc, visibleStart: start - inputStart };
             };
             const snapshot = { key, rate, t0, lastTime, resolutionKey: this.resolutionKey, ...position,
                 coverage: [t0 + first / rate, t0 + last / rate] };

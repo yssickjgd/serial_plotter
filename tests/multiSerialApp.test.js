@@ -747,7 +747,7 @@ test('serial configuration is a draft until saved and connected ports keep their
     f.change('serial-baud', '0');
     saveSerialConfig(f);
     assert.equal(dialog().open, true);
-    assert.match(f.get('serial-config-error').textContent, /波特率/);
+    assert.match(f.get('serial-config-error').textContent, /Baud rate/);
     assert.equal(f.app.serialSources.get('serial-2').settings.baudRate, 115200);
     f.change('serial-baud', '1250000');
     f.change('serial-config-name', '第二路');

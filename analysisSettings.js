@@ -32,7 +32,7 @@
         return value;
     }
     function flag(value) {
-        requireValue(typeof value === 'boolean', '开关值必须为布尔值');
+        requireValue(typeof value === 'boolean', '开关值必须为 Boolean 值');
         return value;
     }
     function channel(value) {
@@ -88,7 +88,7 @@
         range(xMin, xMax, 'X 轴范围'); range(yMin, yMax, 'Y 轴范围');
         range(gainYMin, gainYMax, '幅度比纵轴范围');
         requireValue(gainUnit !== 'ratio-log' || gainYAuto || gainYMin >= 0, '对数纵轴的自定义最小值不能小于 0');
-        range(gainDbYMin, gainDbYMax, '分贝增益纵轴范围');
+        range(gainDbYMin, gainDbYMax, 'dB 增益纵轴范围');
         range(phaseYMin, phaseYMax, '相位差纵轴范围');
         range(coherenceYMin, coherenceYMax, '相干度纵轴范围');
         requireValue(Number.isInteger(fftOverlap) && fftOverlap >= 0 && fftOverlap <= maxFftOverlap,
@@ -144,13 +144,15 @@
     }
     const waveletBases = [
         ['morlet', '复 Morlet'], ['morse', '解析 Morse'], ['shannon', '复 Shannon'],
-        ['mexicanHat', '墨西哥帽（Mexican Hat）'], ['gaus1', '高斯一阶导数（gaus1）'], ['haar', 'Haar'],
-        ['db4', 'Daubechies（db4）'], ['sym4', 'Symlet（sym4）'], ['coif2', 'Coiflet（coif2）'], ['meyer', 'Meyer']
+        ['haar', 'Haar'], ['gaus1', 'Gaussian 一阶导数'], ['mexicanHat', 'Mexican Hat'],
+        ['db4', 'Daubechies'], ['sym4', 'Symlet'], ['coif2', 'Coiflet'], ['meyer', 'Meyer']
     ];
-    const waveletViews = [['magnitude', '小波幅度图'], ['phase', '小波相位图'], ['signed', '有符号系数图']];
+    const waveletViews = [['magnitude', '小波幅度图'], ['signed', '有符号系数图'], ['phase', '小波相位图']];
     const waveletCoefficientMode = basis => waveletSupportsPhase(basis) ? 'phase' : 'signed';
 
-    function normalizeWavelet({ channel: index = 0, basis = 'morlet', viewMode = 'magnitude', phaseUnit = 'radians',
+    const waveletEdgeExtensions = [['mirror', '镜像'], ['zero', '0 填充'], ['hold', '端点保持']];
+
+    function normalizeWavelet({ channel: index = 0, basis = 'morlet', viewMode = 'magnitude', phaseUnit = 'radians', edgeExtension = 'mirror',
         freezeXOnZoom = false, showEdgeHatching = true, removeDc = false, frequencyRows = 0, timeColumns = 0, timeStride = 0,
         yAuto = true, yMin = 1, yMax = 500, frequencyScale = !yAuto && yMin === 0 ? 'linear' : 'log', ...settings }) {
         choice(basis, waveletBases.map(([value]) => value), '小波基');
@@ -166,6 +168,7 @@
         requireValue(yMin >= 0 && (frequencyScale !== 'log' || yMin > 0 || yAuto), '频率范围不能为负，对数最小值须大于 0');
         return { channel: channel(index), basis, viewMode,
             phaseUnit: choice(phaseUnit, ['degrees', 'radians'], '数值单位'),
+            edgeExtension: choice(edgeExtension, waveletEdgeExtensions.map(([key]) => key), '时域延拓策略'),
             freezeXOnZoom: flag(freezeXOnZoom), showEdgeHatching: flag(showEdgeHatching), removeDc: flag(removeDc),
             frequencyRows, timeColumns, timeStride: timeColumns ? 0 : timeStride,
             frequencyScale: choice(frequencyScale, ['linear', 'log'], '纵轴刻度'), yAuto: flag(yAuto), yMin, yMax,
@@ -179,6 +182,6 @@
         throw new Error('未知的分析控件类型');
     }
     S.AnalysisSettings = { normalize, equalEdges, spectrumSegmentSize, spectrumYRangeKey, maxFftOverlap, histogramYBounds,
-        waveletBases, waveletViews, waveletCoefficientMode };
+        waveletBases, waveletViews, waveletCoefficientMode, waveletEdgeExtensions };
     if (typeof module !== 'undefined') module.exports = { AnalysisSettings: S.AnalysisSettings };
 })(globalThis);

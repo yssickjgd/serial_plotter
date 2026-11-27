@@ -18,7 +18,7 @@ test('wavelet views share pending coefficients only for identical source windows
     } };
     const frames = source(256);
     const reads = t.mock.method(frames, 'copyChannel');
-    const views = Array.from({ length: 4 }, () => new WaveletWindow(pool, () => {}));
+    const views = Array.from({ length: 5 }, () => new WaveletWindow(pool, () => {}));
     t.after(() => views.forEach(view => view.clear()));
     const update = (view, data, options) => view.update(data, 0, data.length, clock, { ...base, ...options }, null, true);
     update(views[0], frames, { viewMode: 'magnitude' });
@@ -27,7 +27,10 @@ test('wavelet views share pending coefficients only for identical source windows
     assert.equal(reads.mock.callCount(), 1);
     update(views[2], frames, { frequencyScale: 'linear' });
     update(views[3], source(256), {});
-    assert.equal(queued.length, 3);
+    update(views[4], frames, { edgeExtension: 'zero' });
+    assert.equal(queued.length, 4);
+    assert.equal(queued[0].task.edgeExtension, 'mirror');
+    assert.equal(queued[3].task.edgeExtension, 'zero', 'different boundary values require their own coefficients');
     views[0].clear();
     assert.equal(queued[0].signal.aborted, false);
     views[2].clear();
@@ -208,6 +211,38 @@ test('changing slider settings on a zoomed plot preserves the viewport and expor
     assert.equal(view.waveletDrawSnapshot.result.positions.length, view.waveletDrawSnapshot.result.columns);
     assert.equal(view.waveletDrawSnapshot.result.frequencies.length, 42);
     assert.match(view.exportSvg(), /data-wavelet-heatmap/);
+});
+
+test('editing the wavelet extension invalidates pending work and labels the resulting reference regions', async t => {
+    const { bootArrayApplication } = require('./helpers/widgetAppHarness');
+    const f = bootArrayApplication(); t.after(() => f.app.dispose());
+    const { view, source } = f.app.widgets.create({ type: 'wavelet', settings: { frequencyRows: 3 } });
+    source.sampleRate.rate = 1000;
+    for (let i = 0; i < 256; i++) source.frames.append([Math.sin(i / 10)], undefined, '', i + 1, i);
+    view.setPaused(true);
+    const tasks = [];
+    view.wavelet.pool = { runTask(task) {
+        return new Promise(resolve => tasks.push({ task, resolve }));
+    } };
+    view.renderNow();
+    view.setSettings({ ...view.settings, edgeExtension: 'hold' });
+    view.renderNow();
+    assert.equal(tasks[1].task.edgeExtension, 'hold');
+    const obsolete = createWaveletProcessor(tasks[0].task);
+    obsolete.step(Infinity);
+    tasks[0].resolve(obsolete.result());
+    await Promise.resolve();
+    assert.equal(view.wavelet.snapshot, null);
+    view.wavelet.cancel(); view.wavelet.pool = null;
+    for (const [mode, label] of [['zero', '0 填充'], ['hold', '端点保持']]) {
+        view.setSettings({ ...view.settings, edgeExtension: mode });
+        assert.equal(view.waveletDrawSnapshot, null);
+        view.renderNow();
+        assert.ok(view.svg.querySelector('[data-wavelet-reference]').textContent.includes(label));
+        assert.ok(view.exportSvg().includes(label));
+        view.hover({ x: view.area.left, y: view.area.top + view.area.height / 2 });
+        assert.ok(view.overlay.textContent.includes(label));
+    }
 });
 
 test('switching the wavelet frequency axis recalculates retained samples and exports the selected frequency rows', async t => {

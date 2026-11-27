@@ -27,7 +27,7 @@ test('field and standalone checksum rules generate and verify the same inverted 
         for(const byte of wire)parser.appendData([byte]);assert.equal(frames.length,1);assert.equal(frames[0].valid,true);
         const invalid=structuredClone(config);
         (ruleBased?invalid.rules[0].checksum:invalid.messages[0].fields[1].checksum).invertResult='false';
-        assert.throws(()=>Protocol.compile(invalid),/取反|boolean|布尔/i);
+        assert.throws(()=>Protocol.compile(invalid),/取反|boolean/i);
     }
 });
 

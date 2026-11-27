@@ -35,6 +35,35 @@ test('all real CWT families preserve coefficient sign across polarity inversion 
     }
 });
 
+test('each edge extension matches explicit samples after consuming available history', () => {
+    const worker = new Function('fftInPlace', 'nextPow2', 'return ' + createWaveletSource())(fftInPlace, nextPow2);
+    const signal = Float64Array.from({ length: 61 }, (_, i) => 5 + Math.sin(i * .24));
+    const setup = { ...options, basis: 'morlet', visibleStart: 5, visibleLength: 51, timeStride: 1 };
+    const pad = 19; // The lowest frequency needs 24 samples; five are already present on each side.
+    const run = (task, create = createWaveletProcessor) => {
+        const p = create(task);
+        p.step(Infinity);
+        return p.result();
+    };
+    for (const edgeExtension of ['mirror', 'zero', 'hold']) {
+        const padded = Float64Array.from({ length: signal.length + 2 * pad }, (_, i) => {
+            const index = i - pad, end = signal.length - 1;
+            if (index >= 0 && index <= end) return signal[index];
+            if (edgeExtension === 'zero') return 0;
+            if (edgeExtension === 'hold') return signal[index < 0 ? 0 : end];
+            return signal[index < 0 ? -index : 2 * end - index];
+        });
+        const expected = run({ ...setup, values: padded, visibleStart: setup.visibleStart + pad });
+        const actual = run({ ...setup, values: signal, edgeExtension });
+        assert.deepEqual(actual.magnitude, expected.magnitude, edgeExtension);
+        assert.deepEqual(actual.phase, expected.phase, edgeExtension);
+        assert.equal(actual.reference[0], 1);
+        assert.equal(expected.reference[0], 0);
+        assert.deepEqual(run({ ...setup, values: signal, edgeExtension }, worker), actual);
+    }
+    assert.throws(() => run({ ...setup, values: signal, edgeExtension: 'unknown' }), RangeError);
+});
+
 test('serialized workers compute the same CWT rows and polarity as the local processor for every family', () => {
     const create = new Function('fftInPlace', 'nextPow2', 'return ' + createWaveletSource())(fftInPlace, nextPow2);
     for (const basis of [...realBases, ...analyticBases]) {

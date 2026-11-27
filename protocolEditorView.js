@@ -9,7 +9,7 @@
     const fieldTypes = ['bitfield', 'uint8', 'int8', 'uint16', 'int16', 'uint32', 'int32', 'uint64', 'int64',
         'float32', 'float64', 'bool', 'enum', 'bytes', 'reserved', 'string', 'struct', 'fixed', 'choice', 'repeat', 'tlv', 'checksum'];
     const tabs = [['messages', '整帧结构'], ['rules', '规则约束'], ['json', 'JSON']];
-    const typeNames = { uint8: '无符号整数 · 1 字节', int8: '有符号整数 · 1 字节', uint16: '无符号整数 · 2 字节', int16: '有符号整数 · 2 字节', uint32: '无符号整数 · 4 字节', int32: '有符号整数 · 4 字节', uint64: '无符号整数 · 8 字节', int64: '有符号整数 · 8 字节', float32: '浮点数 · 4 字节', float64: '浮点数 · 8 字节', bool: '布尔值', enum: '枚举', bytes: '原始字节', reserved: '保留字节', string: '文本', struct: '结构体', fixed: '固定字节', choice: '互斥分支', repeat: '重复段', tlv: 'TLV 段' };
+    const typeNames = { uint8: '无符号整数 · 1 字节', int8: '有符号整数 · 1 字节', uint16: '无符号整数 · 2 字节', int16: '有符号整数 · 2 字节', uint32: '无符号整数 · 4 字节', int32: '有符号整数 · 4 字节', uint64: '无符号整数 · 8 字节', int64: '有符号整数 · 8 字节', float32: '浮点数 · 4 字节', float64: '浮点数 · 8 字节', bool: 'Boolean 值', enum: '枚举', bytes: '原始字节', reserved: '保留字节', string: '文本', struct: '结构体', fixed: '固定字节', choice: '互斥分支', repeat: '重复段', tlv: 'TLV 段' };
     const model = () => typeof module !== 'undefined' && module.exports ? require('./protocolModel').ProtocolModel : root.SerialPlotter.ProtocolModel;
     const records = () => typeof module !== 'undefined' && module.exports ? require('./protocolRecords') : root.SerialPlotter.ProtocolRecords;
     const messageZh = error => (typeof module !== 'undefined' && module.exports
@@ -1959,7 +1959,7 @@
                     });
                 this._control(row, `bit.${index}.type`, '位类型', bit.type ?? 'uint', 'select', value => this._change(() => {
                     bit.type = value; if (value === 'bool') bit.length = 1;
-                }), [['uint', '无符号数值'], ['int', '有符号数值'], ['bool', '单比特开关'], ['reserved', '保留位']]);
+                }), [['uint', '无符号数值'], ['int', '有符号数值'], ['bool', '1 位开关'], ['reserved', '保留位']]);
                 if (bit.type !== 'reserved') this._renderEnum(row, bit, `bit.${index}.enum`, bit.length, this._dataBase(field));
                 row.append(this._button('删除位字段', 'delete-bit-' + index, () => this._requestDelete('bit',bit.id)));
             }

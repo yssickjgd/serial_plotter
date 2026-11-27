@@ -113,7 +113,7 @@ test('XY inspector switches axis panels while retaining channel bindings and FFT
     assert.deepEqual(sections(), ['显示内容', '采样窗口']);
     const mode = f.get('xy-viewMode');
     assert.ok(mode);
-    assert.deepEqual(mode.options.map(option => option.textContent), ['李萨如图', '幅度比频谱图', '相位差频谱图', '相干度频谱图']);
+    assert.deepEqual(mode.options.map(option => option.textContent), ['Lissajous 图', '幅度比频谱图', '相位差频谱图', '相干度频谱图']);
     assert.equal(mode.value, 'trajectory');
     assert.ok(f.get('xy-equalAspect'));
     const choices = select => Array.from(select.options, option => [option.value, option.textContent]);
@@ -180,10 +180,20 @@ test('XY overlap slider previews whole percentages and stays in sync with typed 
 
 test('wavelet inspector offers each family and switches coefficient views by basis', t => {
     const f = inspector(t, 'wavelet', { basis: 'morlet', viewMode: 'phase' });
+    assert.deepEqual(Array.from(f.get('wavelet-viewMode').options, option => option.value),
+        ['magnitude', 'signed', 'phase']);
     const modes = () => Array.from(f.get('wavelet-viewMode').options)
         .filter(option => !option.disabled).map(option => option.value);
-    assert.deepEqual(new Set(Array.from(f.get('wavelet-basis').options, option => option.value)),
-        new Set(['morlet', 'morse', 'shannon', 'mexicanHat', 'haar', 'gaus1', 'db4', 'sym4', 'coif2', 'meyer']));
+    const basisSelect = f.get('wavelet-basis');
+    const options = Array.from(basisSelect.options);
+    assert.equal(basisSelect.querySelector('optgroup'), null);
+    assert.deepEqual(options.map(option => option.value),
+        ['morlet', 'morse', 'shannon', 'haar', 'gaus1', 'mexicanHat', 'db4', 'sym4', 'coif2', 'meyer']);
+    assert.deepEqual(options.filter(option => option.textContent.endsWith('（复数域）')).map(option => option.value),
+        ['morlet', 'morse', 'shannon']);
+    assert.deepEqual(options.filter(option => option.textContent.endsWith('（实数域）')).map(option => option.value),
+        ['haar', 'gaus1', 'mexicanHat', 'db4', 'sym4', 'coif2', 'meyer']);
+    assert.equal(f.get('wavelet-basis-hint'), null);
     assert.deepEqual(modes(), ['magnitude', 'phase']);
     f.change('wavelet-basis', 'haar');
     assert.equal(f.widget.settings.viewMode, 'magnitude');
@@ -212,7 +222,7 @@ test('wavelet axes keep waveform precision, scale and range order in all coeffic
     assert.deepEqual(fields('frequencyScale'), y);
     f.change('wavelet-viewMode', 'phase');
     f.change('wavelet-yAuto', 'manual');
-    assert.deepEqual(fields('viewMode'), ['viewMode', 'showEdgeHatching', 'phaseUnit']);
+    assert.deepEqual(fields('viewMode'), ['basis', 'viewMode', 'showEdgeHatching', 'phaseUnit']);
     assert.deepEqual(fields('frequencyScale'), [...y, 'yMin', 'yMax']);
     assert.equal(f.get('wavelet-frequencyScale').parentElement.querySelector('label').textContent, '纵轴刻度');
     assert.equal(f.get('wavelet-phaseUnit').parentElement.querySelector('label').textContent, '数值单位');
@@ -229,6 +239,19 @@ test('wavelet axes keep waveform precision, scale and range order in all coeffic
     f.change('wavelet-viewMode', 'signed');
     assert.deepEqual(fields('xNumberNotation'), x);
     assert.deepEqual(fields('frequencyScale'), [...y, 'yMin', 'yMax']);
+});
+
+test('wavelet settings offer a per-widget time-domain extension strategy', t => {
+    const f = inspector(t, 'wavelet', {});
+    const extension = () => f.get('wavelet-edgeExtension');
+    assert.equal(extension().closest('.control-group').querySelector('.section-title').textContent, '小波设置');
+    assert.deepEqual(Array.from(extension().options, option => option.value), ['mirror', 'zero', 'hold']);
+    assert.equal(extension().value, 'mirror');
+    for (const strategy of ['zero', 'hold', 'mirror']) {
+        f.change('wavelet-edgeExtension', strategy);
+        assert.equal(f.widget.settings.edgeExtension, strategy);
+        assert.equal(extension().value, strategy);
+    }
 });
 
 test('wavelet row and column counts preview both sliders and commit once', t => {

@@ -96,7 +96,7 @@ test('dense wavelet jobs preserve the entire global grid across real worker shar
     t.after(() => pool.dispose());
     const values = Float64Array.from({ length: 1450 }, (_, i) => 20 + Math.cos(i / 9) + 0.5 * Math.sin(i / 27));
     values[699] = NaN;
-    const task = { kind: 'wavelet', values, rate: 1500, basis: 'morse', cuts: [1100], removeDc: true,
+    const task = { kind: 'wavelet', values, rate: 1500, basis: 'morse', cuts: [1100], removeDc: true, edgeExtension: 'hold',
         visibleStart: 27, visibleLength: 1400, first: 9, last: 1390, timeColumns: 1313, frequencyRows: 820 };
     const serial = createWaveletProcessor(task);
     serial.step(Infinity);
@@ -116,7 +116,7 @@ test('real wavelet workers transfer and assemble signed coefficients from every 
         workerFactory: nodeWorkerFactory({ onStart: ({ threadId }) => workers.add(threadId) }) });
     t.after(() => pool.dispose());
     const values = Float64Array.from({ length: 3072 }, (_, i) => Math.sin(i / 5));
-    const task = { kind: 'wavelet', values, rate: 1000, basis: 'gaus1', frequencyRows: 96, timeStride: 1 };
+    const task = { kind: 'wavelet', values, rate: 1000, basis: 'gaus1', edgeExtension: 'zero', frequencyRows: 96, timeStride: 1 };
     const serial = createWaveletProcessor(task);
     serial.step(Infinity);
     const result = await pool.runTask(task);

@@ -2,6 +2,7 @@
 (function (root) {
     const S = root.SerialPlotter ??= {};
     const config = typeof module !== 'undefined' ? require('./analysisSettings').AnalysisSettings : S.AnalysisSettings;
+    const waveletExtensionLabels = new Map(config.waveletEdgeExtensions);
     const navigation = typeof module !== 'undefined' ? require('./frameNavigation') : S.FrameNavigation;
     const { pairSpectrum, countSpectrumBlocks } = typeof module !== 'undefined' ? require('./pairSpectrum') : S;
     const wavelet = typeof module !== 'undefined' ? require('./waveletPlot') : S.WaveletPlot;
@@ -490,7 +491,7 @@
                     if (this.zoom) this.zoom.y = null;
                     this.yZoomBase = null;
                 }
-                if (old.removeDc !== next.removeDc) {
+                if (old.removeDc !== next.removeDc || old.edgeExtension !== next.edgeExtension) {
                     this.wavelet.clear();
                     this.waveletDrawSnapshot = null;
                 }
@@ -1132,7 +1133,7 @@
             node(pattern, 'path', { d: 'M-1 1L1 -1M0 6L6 0M5 7L7 5', stroke: '#d4e8fa', 'stroke-opacity': .32 });
             const reference = node(this.svg, 'path', { d: areas.map(tilePath).join(''), fill: 'url(#' + id + ')',
                 'clip-path': 'url(#' + this.clipId + ')', 'pointer-events': 'none', 'data-wavelet-reference': '' });
-            node(reference, 'title', {}, '斜纹区域使用镜像延拓，系数仅供参考');
+            node(reference, 'title', {}, '时域延拓策略：' + waveletExtensionLabels.get(this.settings.edgeExtension) + '，斜纹区域的系数仅供参考');
         }
         drawWaveletNyquistBand() {
             const snapshot = this.waveletDrawSnapshot;
@@ -1143,7 +1144,7 @@
             const top = this.py(end), bottom = this.py(start);
             const band = node(this.svg, 'rect', { x: this.area.left, y: top, width: this.area.width, height: bottom - top,
                 fill: '#b6d4eb', 'fill-opacity': .12, 'pointer-events': 'none', 'data-wavelet-nyquist-band': '' });
-            node(band, 'title', {}, '浅色区域接近奈奎斯特频率，小波的高频侧响应受限');
+            node(band, 'title', {}, '浅色区域接近 Nyquist 频率，小波的高频侧响应受限');
         }
         drawSpectrum(group) {
             const s = this.settings, { left, right } = this.area;
@@ -1435,8 +1436,8 @@
                 }
                 lines = [channelLabel(this.frames, this.settings.channel) + ' · ' + value,
                     formatAxisValue(time, xFormat) + ' s   ' + formatAxisValue(frequency, yFormat) + ' Hz'];
-                if (cell?.reference) lines.push('镜像延拓 · 仅供参考');
-                if (cell?.frequency >= snapshot?.result.highBandStart) lines.push('高频侧响应受奈奎斯特边界限制');
+                if (cell?.reference) lines.push('时域延拓策略：' + waveletExtensionLabels.get(this.settings.edgeExtension) + ' · 仅供参考');
+                if (cell?.frequency >= snapshot?.result.highBandStart) lines.push('高频侧响应受 Nyquist 边界限制');
             } else if (this.spectral) lines = this.hoverSpectrum(p);
             else if (this.type === 'xy') {
                 let nearest, distance = Infinity;
@@ -1464,7 +1465,7 @@
             node(this.overlay, 'rect', { x, y, width, height, rx: 3, fill: '#1b2026', stroke: '#59636e' });
             lines.forEach((line, i) => label(this.overlay, x + 6, y + 15 + i * 16, line));
         }
-        exportSvg(title = this.type === 'xy' ? '李萨如图' : this.wavelet ? '小波变换' : '频度直方图') {
+        exportSvg(title = this.type === 'xy' ? 'Lissajous 图' : this.wavelet ? '小波变换' : '频度直方图') {
             this.renderNow(true, Boolean(this.wavelet?.snapshot));
             if (this.wavelet && (!this.waveletDrawSnapshot || this.waveletDrawSnapshot !==
                 this.wavelet.displaySnapshot(this.zoom?.x ? this.range.slice(0, 2) : null) ||

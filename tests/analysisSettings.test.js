@@ -96,18 +96,22 @@ test('wavelet frequency scale and mean removal use the selected widget settings 
     assert.equal(f.get('wavelet-frequencyScale').value, 'log');
     assert.deepEqual(Array.from(f.get('wavelet-frequencyScale').options, option => option.textContent), ['Hz-线性', 'Hz-对数']);
     assert.equal(f.get('wavelet-removeDc').checked, false);
+    assert.equal(f.get('wavelet-edgeExtension').value, 'mirror');
     f.change('wavelet-frequencyScale', 'linear');
     f.change('wavelet-removeDc', true);
+    f.change('wavelet-edgeExtension', 'hold');
     f.change('wavelet-viewMode', 'phase');
     assert.deepEqual(sectionTitles(), expectedSections);
     f.app.applyConfig(JSON.parse(JSON.stringify(f.app.getConfig())));
     const settings = f.app.widgets.widgets.get(widget.id).settings;
     assert.equal(settings.frequencyScale, 'linear');
     assert.equal(settings.removeDc, true);
+    assert.equal(settings.edgeExtension, 'hold');
     assert.equal(settings.viewMode, 'phase');
     assert.equal(normalize('wavelet', { frequencyScale: 'log' }).frequencyScale, 'log');
     assert.equal(normalize('wavelet', { yAuto: false, yMin: 0, yMax: 500 }).frequencyScale, 'linear');
-    assert.throws(() => normalize('wavelet', { removeDc: 'false' }), /布尔值/);
+    assert.throws(() => normalize('wavelet', { removeDc: 'false' }), /Boolean 值/);
+    assert.throws(() => normalize('wavelet', { edgeExtension: 'invalid' }), /时域延拓策略/);
 });
 
 test('analysis bindings distinguish missing and explicitly unbound channels', () => {

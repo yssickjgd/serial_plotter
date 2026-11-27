@@ -35,7 +35,7 @@ test('import validation accepts old Y bounds while rejecting malformed channels'
     assert.throws(() => validateConfig({ dataType: 'object' }), /数据类型/);
     assert.throws(() => validateConfig({ enableHeader: 'false' }), /enableHeader/);
     assert.throws(() => validateConfig({ channels: [{ visible: 'yes' }] }), /通道配置/);
-    assert.throws(() => validateConfig({ serialBaud: 'bad' }), /波特率/);
+    assert.throws(() => validateConfig({ serialBaud: 'bad' }), /Baud rate/);
     assert.throws(() => validateConfig({ plotTimeXUnit: 'ms' }), /时域横轴/);
     assert.throws(() => validateConfig({ plotFreqXUnit: 'seconds' }), /频域横轴单位/);
     assert.throws(() => validateConfig({ plotFreqXScale: 'cubic' }), /频域横轴形式/);
